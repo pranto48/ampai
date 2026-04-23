@@ -41,8 +41,11 @@
         <!-- Sidebar -->
         <aside class="sidebar">
             <div class="sidebar-header">
-                <h2>AI Agent</h2>
-                <span class="badge">Memory Active</span>
+                <h2 id="agent-display-name">AI Agent</h2>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <span class="badge">Memory Active</span>
+                    <button id="sidebar-minimize-btn" class="btn icon-btn" type="button" title="Toggle sidebar" style="width:auto; padding:4px 8px;">⇔</button>
+                </div>
             </div>
             
             <button id="new-chat-btn" class="btn primary-btn">

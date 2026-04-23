@@ -7,9 +7,9 @@ from typing import List, Dict, Optional
 from datetime import datetime, timedelta, timezone
 import shutil
 import uuid
-import imaplib
-import email
-from email.header import decode_header
+import ftplib
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
@@ -41,6 +41,14 @@ from database import (
     update_user as db_update_user,
     delete_user as db_delete_user,
     ensure_default_users,
+    add_media_asset,
+    list_media_assets,
+    create_memory_group,
+    add_user_to_memory_group,
+    share_session_to_group,
+    list_memory_groups_for_user,
+    list_shared_sessions_for_user,
+    export_all_sessions_for_backup,
     list_chat_messages,
     get_sql_chat_history,
     list_tasks,
@@ -137,6 +145,16 @@ class AdminUserCreateRequest(BaseModel):
 class AdminUserUpdateRequest(BaseModel):
     role: Optional[str] = None
     password: Optional[str] = None
+
+
+class MemoryGroupCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    members: List[str] = []
+
+
+class MemoryGroupShareRequest(BaseModel):
+    session_id: str
 
 
 class TaskCreateRequest(BaseModel):
@@ -371,7 +389,11 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
 
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), user=Depends(require_authenticated_user)):
+async def upload_file(
+    file: UploadFile = File(...),
+    session_id: Optional[str] = None,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     try:
         file_ext = os.path.splitext(file.filename)[1]
         unique_filename = f"{uuid.uuid4()}{file_ext}"
@@ -393,28 +415,48 @@ async def upload_file(file: UploadFile = File(...), user=Depends(require_authent
             with open(file_path, "r", encoding="utf-8") as text_file:
                 extracted_text = text_file.read()
 
-        return {"filename": file.filename, "url": f"/uploads/{unique_filename}", "type": file.content_type, "extracted_text": extracted_text}
+        payload = {
+            "filename": file.filename,
+            "url": f"/uploads/{unique_filename}",
+            "type": file.content_type,
+            "extracted_text": extracted_text,
+        }
+        add_media_asset(
+            username=current_user.username,
+            session_id=session_id,
+            filename=file.filename,
+            url=payload["url"],
+            mime_type=file.content_type,
+        )
+        return payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/media")
+def get_media_assets(
+    username: Optional[str] = Query(default=None),
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    if current_user.role != "admin":
+        username = current_user.username
+    return {"media": list_media_assets(username=username)}
+
+
 @app.get("/api/sessions")
-def get_sessions(query: str = "", archived: bool = False, user=Depends(require_authenticated_user)):
-    return {"sessions": get_all_sessions(query=query, include_archived=archived)}
-
-
-@app.post("/api/sessions/{session_id}/pin")
-def pin_session(session_id: str, request: SessionFlagsRequest, user=Depends(require_authenticated_user)):
-    if not set_session_flags(session_id, pinned=request.value):
-        raise HTTPException(status_code=500, detail="Failed to update pin")
-    return {"status": "success"}
-
-
-@app.post("/api/sessions/{session_id}/archive")
-def archive_session(session_id: str, request: SessionFlagsRequest, user=Depends(require_authenticated_user)):
-    if not set_session_flags(session_id, archived=request.value):
-        raise HTTPException(status_code=500, detail="Failed to update archive")
-    return {"status": "success"}
+def get_sessions(
+    query: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    archived: Optional[bool] = Query(default=None),
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    sessions = get_all_sessions(query=query, category=category, archived=archived)
+    if current_user.role != "admin":
+        shared_ids = set(list_shared_sessions_for_user(current_user.username))
+        for session in sessions:
+            if session["session_id"] in shared_ids:
+                session["shared_via_group"] = True
+    return {"sessions": sessions}
 
 
 @app.get("/api/history/{session_id}")
@@ -599,6 +641,78 @@ def admin_delete_user(username: str, current_user: UserContext = Depends(require
         raise HTTPException(status_code=500, detail="Failed to delete user")
     return {"status": "success"}
 
+
+@app.post("/api/admin/memory-groups")
+def admin_create_memory_group(request: MemoryGroupCreateRequest, current_user: UserContext = Depends(require_admin_user)):
+    group_id = create_memory_group(
+        name=request.name.strip(),
+        description=(request.description or "").strip(),
+        created_by=current_user.username,
+    )
+    if not group_id:
+        raise HTTPException(status_code=500, detail="Failed to create group")
+    for member in request.members:
+        member_name = (member or "").strip()
+        if member_name:
+            add_user_to_memory_group(group_id, member_name)
+    return {"status": "success", "group_id": group_id}
+
+
+@app.get("/api/memory-groups")
+def get_memory_groups(current_user: UserContext = Depends(require_authenticated_user)):
+    return {"groups": list_memory_groups_for_user(current_user.username)}
+
+
+@app.post("/api/admin/memory-groups/{group_id}/members/{username}")
+def admin_add_group_member(group_id: int, username: str, _: UserContext = Depends(require_admin_user)):
+    if not add_user_to_memory_group(group_id, username.strip()):
+        raise HTTPException(status_code=500, detail="Failed to add member")
+    return {"status": "success"}
+
+
+@app.post("/api/admin/memory-groups/{group_id}/share")
+def admin_share_session(group_id: int, request: MemoryGroupShareRequest, _: UserContext = Depends(require_admin_user)):
+    if not share_session_to_group(group_id, request.session_id):
+        raise HTTPException(status_code=500, detail="Failed to share session")
+    return {"status": "success"}
+
+
+@app.post("/api/admin/backup/run")
+def run_backup(current_user: UserContext = Depends(require_admin_user)):
+    backup_mode = (get_config("backup_mode", "local") or "local").strip().lower()
+    snapshot = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "by": current_user.username,
+        "sessions": export_all_sessions_for_backup(),
+    }
+    serialized = json.dumps(snapshot, indent=2)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"ampai_backup_{timestamp}.json"
+
+    if backup_mode == "ftp":
+        host = get_config("backup_ftp_host")
+        user = get_config("backup_ftp_user")
+        password = get_config("backup_ftp_password")
+        remote_path = get_config("backup_ftp_path", "/")
+        if not host or not user or not password:
+            raise HTTPException(status_code=400, detail="FTP backup is not fully configured")
+        try:
+            with ftplib.FTP(host) as ftp:
+                ftp.login(user=user, passwd=password)
+                ftp.cwd(remote_path)
+                from io import BytesIO
+                ftp.storbinary(f"STOR {filename}", BytesIO(serialized.encode("utf-8")))
+            return {"status": "success", "mode": "ftp", "file": filename}
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"FTP backup failed: {exc}") from exc
+
+    local_dir = get_config("backup_local_path", "/tmp/ampai_backups")
+    os.makedirs(local_dir, exist_ok=True)
+    path = os.path.join(local_dir, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(serialized)
+    return {"status": "success", "mode": "local", "path": path}
+
 @app.post("/api/admin/configs/migrate")
 def migrate_admin_configs():
     result = migrate_app_config_encryption()
@@ -615,6 +729,8 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "openrouter": bool(configs.get("openrouter_api_key")),
         "anythingllm": bool(configs.get("anythingllm_base_url")),
         "default_model": configs.get("default_model"),
+        "chat_agent_name": configs.get("chat_agent_name") or "AI Agent",
+        "chat_agent_avatar_url": configs.get("chat_agent_avatar_url") or "",
     }
 
 

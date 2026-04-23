@@ -43,6 +43,18 @@ body {
     transition: all 0.3s ease;
 }
 
+.sidebar.minimized {
+    width: 72px;
+    padding: 12px 8px;
+}
+
+.sidebar.minimized .sidebar-header h2,
+.sidebar.minimized .settings-section,
+.sidebar.minimized .sessions-container,
+.sidebar.minimized #new-chat-btn {
+    display: none;
+}
+
 .sidebar-header {
     display: flex;
     justify-content: space-between;

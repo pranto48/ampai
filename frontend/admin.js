@@ -69,7 +69,18 @@ document.addEventListener('DOMContentLoaded', () => {
         'email_digest_provider': document.getElementById('config-email-digest-provider'),
         'email_digest_hour': document.getElementById('config-email-digest-hour'),
         'email_digest_minute': document.getElementById('config-email-digest-minute'),
-        'email_digest_timezone': document.getElementById('config-email-digest-timezone')
+        'email_digest_timezone': document.getElementById('config-email-digest-timezone'),
+        'chat_agent_name': document.getElementById('config-chat-agent-name'),
+        'chat_agent_avatar_url': document.getElementById('config-chat-agent-avatar-url'),
+        'backup_mode': document.getElementById('config-backup-mode'),
+        'backup_local_path': document.getElementById('config-backup-local-path'),
+        'backup_ftp_host': document.getElementById('config-backup-ftp-host'),
+        'backup_ftp_user': document.getElementById('config-backup-ftp-user'),
+        'backup_ftp_password': document.getElementById('config-backup-ftp-password'),
+        'backup_ftp_path': document.getElementById('config-backup-ftp-path'),
+        'resend_api_key': document.getElementById('config-resend-api-key'),
+        'resend_from_email': document.getElementById('config-resend-from-email'),
+        'notification_email_to': document.getElementById('config-notification-email-to')
     };
     const SECRET_CONFIG_KEYS = new Set([
         'generic_api_key',
@@ -82,7 +93,9 @@ document.addEventListener('DOMContentLoaded', () => {
         'bing_api_key',
         'custom_web_search_api_key',
         'integration_email_outlook_credentials',
-        'integration_email_gmail_credentials'
+        'integration_email_gmail_credentials',
+        'backup_ftp_password',
+        'resend_api_key'
     ]);
     const CLEAR_VALUE_SENTINEL = "__CLEAR__";
     const initialConfigValues = {};
@@ -103,6 +116,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const newUserRole = document.getElementById('new-user-role');
     const createUserBtn = document.getElementById('create-user-btn');
     const userStatus = document.getElementById('user-status');
+    const mediaTbody = document.getElementById('media-tbody');
+    const runBackupBtn = document.getElementById('run-backup-btn');
+    const backupStatus = document.getElementById('backup-status');
+    const groupNameInput = document.getElementById('group-name');
+    const groupMembersInput = document.getElementById('group-members');
+    const groupSessionIdInput = document.getElementById('group-session-id');
+    const createGroupBtn = document.getElementById('create-group-btn');
+    const shareGroupSessionBtn = document.getElementById('share-group-session-btn');
+    const groupsList = document.getElementById('groups-list');
+    const groupStatus = document.getElementById('group-status');
+    let latestGroupId = null;
 
     const initializeAdmin = async () => {
         const user = await enforceAuth({ requiredRole: 'admin' });
@@ -112,9 +136,20 @@ document.addEventListener('DOMContentLoaded', () => {
         loadCoreMemories();
         loadSystemHealth();
         loadUsers();
+        loadMediaAssets();
+        loadGroups();
         setupConfigChangeTracking();
         setupClearKeyButtons();
         refreshHealthBtn.addEventListener('click', loadSystemHealth);
+        if (runBackupBtn) {
+            runBackupBtn.addEventListener('click', runBackupNow);
+        }
+        if (createGroupBtn) {
+            createGroupBtn.addEventListener('click', createGroup);
+        }
+        if (shareGroupSessionBtn) {
+            shareGroupSessionBtn.addEventListener('click', shareSessionToGroup);
+        }
     };
     initializeAdmin();
 
@@ -703,5 +738,112 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (createUserBtn) {
         createUserBtn.addEventListener('click', createUser);
+    }
+
+    async function runBackupNow() {
+        backupStatus.textContent = 'Running backup...';
+        backupStatus.style.color = 'var(--text-secondary)';
+        try {
+            const response = await fetch('/api/admin/backup/run', { method: 'POST' });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Backup failed');
+            backupStatus.textContent = data.path || data.file || 'Backup completed';
+            backupStatus.style.color = '#10b981';
+        } catch (error) {
+            backupStatus.textContent = error.message;
+            backupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function loadGroups() {
+        try {
+            const response = await fetch('/api/memory-groups');
+            const data = await response.json();
+            const groups = data.groups || [];
+            groupsList.innerHTML = '';
+            latestGroupId = groups.length ? groups[0].id : null;
+            groups.forEach((g) => {
+                const li = document.createElement('li');
+                li.textContent = `#${g.id} ${g.name} (${g.created_by})`;
+                groupsList.appendChild(li);
+            });
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function createGroup() {
+        const name = groupNameInput.value.trim();
+        const members = groupMembersInput.value.split(',').map(s => s.trim()).filter(Boolean);
+        if (!name) {
+            groupStatus.textContent = 'Group name is required';
+            groupStatus.style.color = '#ef4444';
+            return;
+        }
+        try {
+            const response = await fetch('/api/admin/memory-groups', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, members, description: '' }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to create group');
+            latestGroupId = data.group_id;
+            groupStatus.textContent = `Created group #${latestGroupId}`;
+            groupStatus.style.color = '#10b981';
+            loadGroups();
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function shareSessionToGroup() {
+        const sessionId = groupSessionIdInput.value.trim();
+        if (!latestGroupId || !sessionId) {
+            groupStatus.textContent = 'Create/select a group and provide session id';
+            groupStatus.style.color = '#ef4444';
+            return;
+        }
+        try {
+            const response = await fetch(`/api/admin/memory-groups/${latestGroupId}/share`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: sessionId }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to share session');
+            groupStatus.textContent = `Shared ${sessionId} to group #${latestGroupId}`;
+            groupStatus.style.color = '#10b981';
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function loadMediaAssets() {
+        try {
+            const response = await fetch('/api/media');
+            const data = await response.json();
+            const media = data.media || [];
+            mediaTbody.innerHTML = '';
+            if (!media.length) {
+                mediaTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">No uploaded media found</td></tr>';
+                return;
+            }
+            media.forEach((m) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${m.username || ''}</td>
+                    <td>${m.session_id || ''}</td>
+                    <td><a href="${m.url}" target="_blank" rel="noopener noreferrer">${m.filename || ''}</a></td>
+                    <td>${m.mime_type || ''}</td>
+                `;
+                mediaTbody.appendChild(tr);
+            });
+        } catch (error) {
+            mediaTbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:#ef4444;">${error.message}</td></tr>`;
+        }
     }
 });
