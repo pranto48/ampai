@@ -33,6 +33,10 @@ async function enforceAuth({ requiredRole = null, redirectTo = '/login.html' } =
         userLabel.textContent = user.username;
     }
 
+    document.querySelectorAll('[data-admin-link]').forEach((link) => {
+        link.style.display = user.role === 'admin' ? '' : 'none';
+    });
+
     document.querySelectorAll('[data-logout-btn]').forEach((btn) => {
         btn.addEventListener('click', (event) => {
             event.preventDefault();

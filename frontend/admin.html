@@ -110,6 +110,16 @@
         </div>
 
         <div class="card">
+            <h2>Admin Diagnostics</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Recent scheduler runs, last job errors, and config sanity checks.</p>
+            <div style="display: flex; align-items: center; gap: 10px; margin-top: 12px;">
+                <button id="refresh-admin-diagnostics-btn" class="btn" style="width: auto;">Refresh Diagnostics</button>
+                <span id="admin-diagnostics-updated-at" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
+            </div>
+            <pre id="admin-diagnostics-content" style="margin-top: 14px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; font-size: 0.82rem; color: var(--text-secondary); white-space: pre-wrap;"></pre>
+        </div>
+
+        <div class="card">
             <h2>Import Memory</h2>
             <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Restore a memory session exported from another Ampai server.</p>
             <div class="import-section">
@@ -158,6 +168,14 @@
                     <input type="text" id="config-openrouter-model" class="modern-input" placeholder="meta-llama/llama-3-8b-instruct:free" style="margin-bottom: 16px;">
                 </div>
 
+                    <h3 style="font-size: 1rem; margin-bottom: 12px; color: var(--accent-color);">Email Integration (IMAP)</h3>
+                    <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">IMAP Host</label>
+                    <input type="text" id="config-imap-host" class="modern-input" placeholder="imap-mail.outlook.com" style="margin-bottom: 16px;">
+                    <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">IMAP Username</label>
+                    <input type="text" id="config-imap-username" class="modern-input" placeholder="you@domain.com" style="margin-bottom: 16px;">
+                    <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">IMAP Password / App Password</label>
+                    <input type="password" id="config-imap-password" class="modern-input" placeholder="app-password" style="margin-bottom: 16px;">
+
                 <div style="flex: 1; min-width: 250px;">
                     <h3>AnythingLLM Workspace</h3>
                     <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">API Base URL</label>
@@ -187,6 +205,14 @@
 
             <div style="margin-bottom: 20px;">
                 <h3>Web Search Fallback Provider</h3>
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Secondary Provider (used after DuckDuckGo)</label>
+                <select id="config-web-search-secondary-provider" class="modern-input" style="width: 320px; margin-bottom: 12px;">
+                    <option value="">None</option>
+                    <option value="serpapi">SerpAPI</option>
+                    <option value="bing">Bing</option>
+                    <option value="custom">Custom Provider</option>
+                </select>
+
                 <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Fallback Provider (used if DuckDuckGo fails)</label>
                 <select id="config-web-fallback-provider" class="modern-input" style="width: 320px; margin-bottom: 12px;">
                     <option value="">None</option>
@@ -211,6 +237,16 @@
             <div style="margin-bottom: 20px;">
                 <h3>Email Integrations & Digest</h3>
                 <p style="color: var(--text-secondary); font-size: 0.85rem;">Paste provider OAuth credential JSON for secure storage. Format for each provider: {"client_id":"...","client_secret":"...","refresh_token":"...","access_token":"...","expires_at":0} plus Outlook optional "tenant_id".</p>
+                <div style="display:flex; align-items:center; gap: 10px; flex-wrap: wrap; margin: 8px 0 14px;">
+                    <label style="display:block; font-size:0.85rem; color:var(--text-secondary);">Provider</label>
+                    <select id="email-provider-select" class="modern-input" style="max-width: 180px;">
+                        <option value="outlook">Outlook</option>
+                        <option value="gmail">Gmail</option>
+                    </select>
+                    <button id="connect-email-provider-btn" class="btn primary-btn" style="width:auto;">Connect Provider</button>
+                    <button id="disconnect-email-provider-btn" class="btn" style="width:auto; background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.4); color:#ef4444;">Disconnect Provider</button>
+                    <span id="email-provider-status" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
+                </div>
 
                 <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Outlook Graph Credentials (JSON)</label>
                 <textarea id="config-outlook-credentials" class="modern-input" rows="4" style="margin-bottom: 14px; width: 100%;"></textarea>
@@ -238,6 +274,10 @@
                         <label style="display:block; font-size:0.85rem; color:var(--text-secondary); margin-bottom:6px;">Timezone</label>
                         <input id="config-email-digest-timezone" type="text" class="modern-input" placeholder="UTC">
                     </div>
+                </div>
+                <div style="margin-top: 12px; display:flex; align-items:center; gap: 10px;">
+                    <button id="save-email-schedule-btn" class="btn" style="width:auto;">Save Email Schedule</button>
+                    <span id="email-schedule-status" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
                 </div>
             </div>
             
@@ -280,6 +320,25 @@
                 <span style="font-size: 0.85rem; color: var(--text-secondary);">Daily sweep scheduled for 9:00 AM. Reports are saved to "System Reports".</span>
                 <button id="run-sweep-btn" class="btn" style="width: auto; background: rgba(16, 185, 129, 0.2); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.4);">Run Sweep Now</button>
             </div>
+        </div>
+
+
+        <div class="card">
+            <h2>User Management</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Admin can create users, set roles, and remove accounts.</p>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:12px;">
+                <input id="new-username" class="modern-input" placeholder="Username" style="flex:1; min-width:160px;">
+                <input id="new-password" type="password" class="modern-input" placeholder="Password" style="flex:1; min-width:160px;">
+                <select id="new-role" class="modern-input" style="width:140px;">
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                </select>
+                <button id="create-user-btn" class="btn primary-btn" style="width:auto;">Create User</button>
+            </div>
+            <table class="data-table" style="margin-top:12px;">
+                <thead><tr><th>ID</th><th>Username</th><th>Role</th><th>Actions</th></tr></thead>
+                <tbody id="users-tbody"></tbody>
+            </table>
         </div>
 
         <div class="card">
