@@ -120,6 +120,14 @@
                     <input type="text" id="config-openrouter-model" class="modern-input" placeholder="meta-llama/llama-3-8b-instruct:free" style="margin-bottom: 16px;">
                 </div>
 
+                    <h3 style="font-size: 1rem; margin-bottom: 12px; color: var(--accent-color);">Email Integration (IMAP)</h3>
+                    <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">IMAP Host</label>
+                    <input type="text" id="config-imap-host" class="modern-input" placeholder="imap-mail.outlook.com" style="margin-bottom: 16px;">
+                    <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">IMAP Username</label>
+                    <input type="text" id="config-imap-username" class="modern-input" placeholder="you@domain.com" style="margin-bottom: 16px;">
+                    <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">IMAP Password / App Password</label>
+                    <input type="password" id="config-imap-password" class="modern-input" placeholder="app-password" style="margin-bottom: 16px;">
+
                 <div style="flex: 1; min-width: 250px;">
                     <h3>AnythingLLM Workspace</h3>
                     <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">API Base URL</label>
@@ -186,6 +194,25 @@
                 <span style="font-size: 0.85rem; color: var(--text-secondary);">Daily sweep scheduled for 9:00 AM. Reports are saved to "System Reports".</span>
                 <button id="run-sweep-btn" class="btn" style="width: auto; background: rgba(16, 185, 129, 0.2); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.4);">Run Sweep Now</button>
             </div>
+        </div>
+
+
+        <div class="card">
+            <h2>User Management</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Admin can create users, set roles, and remove accounts.</p>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:12px;">
+                <input id="new-username" class="modern-input" placeholder="Username" style="flex:1; min-width:160px;">
+                <input id="new-password" type="password" class="modern-input" placeholder="Password" style="flex:1; min-width:160px;">
+                <select id="new-role" class="modern-input" style="width:140px;">
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                </select>
+                <button id="create-user-btn" class="btn primary-btn" style="width:auto;">Create User</button>
+            </div>
+            <table class="data-table" style="margin-top:12px;">
+                <thead><tr><th>ID</th><th>Username</th><th>Role</th><th>Actions</th></tr></thead>
+                <tbody id="users-tbody"></tbody>
+            </table>
         </div>
 
         <div class="card">
