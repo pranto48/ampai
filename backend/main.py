@@ -28,8 +28,12 @@ from database import (
     get_network_targets,
     get_sql_chat_history,
     list_tasks,
+    migrate_app_config_encryption,
     set_config,
+    set_session_archived,
     set_session_category,
+    set_session_pinned,
+    touch_session_updated_at,
     update_task,
 )
 from scheduler import run_network_sweep, start_scheduler
@@ -72,11 +76,6 @@ class TargetModel(BaseModel):
     name: str
     ip_address: str
 
-@app.on_event("startup")
-def startup_event():
-    start_scheduler()
-    migrate_app_config_encryption()
-
 class ChatRequest(BaseModel):
     session_id: str
     message: str
@@ -89,6 +88,10 @@ class ChatRequest(BaseModel):
 
 class CategoryRequest(BaseModel):
     category: str
+
+
+class SessionStateRequest(BaseModel):
+    value: bool = True
 
 
 class ImportMessage(BaseModel):
@@ -159,6 +162,7 @@ USERS = _build_user_store()
 @app.on_event("startup")
 def startup_event():
     start_scheduler()
+    migrate_app_config_encryption()
 
 
 def _create_access_token(data: Dict[str, str]) -> str:
@@ -241,6 +245,7 @@ def chat(request: ChatRequest, _: UserContext = Depends(require_authenticated_us
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
         )
+        touch_session_updated_at(request.session_id)
         return {
             "response": response.get("content", ""),
             "web_search_status": response.get("web_search_status"),
@@ -284,8 +289,13 @@ async def upload_file(file: UploadFile = File(...), _: UserContext = Depends(req
 
 
 @app.get("/api/sessions")
-def get_sessions(_: UserContext = Depends(require_authenticated_user)):
-    return {"sessions": get_all_sessions()}
+def get_sessions(
+    query: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    archived: Optional[bool] = Query(default=None),
+    _: UserContext = Depends(require_authenticated_user),
+):
+    return {"sessions": get_all_sessions(query=query, category=category, archived=archived)}
 
 
 @app.get("/api/history/{session_id}")
@@ -305,6 +315,20 @@ def update_category(session_id: str, request: CategoryRequest, _: UserContext = 
     success = set_session_category(session_id, request.category)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to update category")
+    return {"status": "success"}
+
+
+@app.patch("/api/sessions/{session_id}/pin")
+def update_pin(session_id: str, request: SessionStateRequest, _: UserContext = Depends(require_authenticated_user)):
+    if not set_session_pinned(session_id, request.value):
+        raise HTTPException(status_code=500, detail="Failed to update pin state")
+    return {"status": "success"}
+
+
+@app.patch("/api/sessions/{session_id}/archive")
+def update_archive(session_id: str, request: SessionStateRequest, _: UserContext = Depends(require_authenticated_user)):
+    if not set_session_archived(session_id, request.value):
+        raise HTTPException(status_code=500, detail="Failed to update archive state")
     return {"status": "success"}
 
 
