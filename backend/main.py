@@ -6,13 +6,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
+from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from passlib.context import CryptContext
 from pydantic import BaseModel
+from redis import Redis
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
@@ -52,6 +53,7 @@ from integrations.outlook_graph import (
 from scheduler import run_network_sweep, run_email_digest_job, start_scheduler
 
 from sqlalchemy import text
+from logging_utils import configure_logging, get_logger, reset_request_id, set_request_id
 
 configure_logging()
 logger = get_logger(__name__)
@@ -435,6 +437,7 @@ def summarize_todays_email(request: EmailSummaryTodayRequest, _: UserContext = D
         use_web_search=False,
         attachments=[],
     )
+    touch_session_updated_at(request.session_id)
     return {
         "status": "success",
         "provider": provider,
@@ -523,6 +526,13 @@ def update_archive(session_id: str, request: SessionStateRequest, _: UserContext
     return {"status": "success"}
 
 
+@app.post("/api/sessions/{session_id}/unarchive")
+def unarchive_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
+    if not set_session_archived(session_id, False):
+        raise HTTPException(status_code=500, detail="Failed to unarchive session")
+    return {"status": "success"}
+
+
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
@@ -582,6 +592,8 @@ def import_session(request: ImportRequest, _: UserContext = Depends(require_auth
             existing_messages.add(key)
 
         set_session_category(request.session_id, request.category)
+        if inserted > 0:
+            touch_session_updated_at(request.session_id)
         return {"status": "success", "session_id": request.session_id, "inserted": inserted, "skipped": skipped}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
