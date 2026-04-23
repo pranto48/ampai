@@ -24,6 +24,7 @@ logger = get_logger(__name__)
 
 
 
+
 def get_redis_history(session_id: str):
     return RedisChatMessageHistory(session_id, url=REDIS_URL)
 

@@ -201,24 +201,6 @@ def set_session_flags(session_id: str, pinned: bool = None, archived: bool = Non
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error setting session flags: {e}")
-        return False
-
-
-def set_session_flags(session_id: str, pinned: bool = None, archived: bool = None):
-    if not engine:
-        return False
-    try:
-        with engine.connect() as conn:
-            _ensure_session_metadata_columns(conn)
-            upsert_stmt = text(
-                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, FALSE, FALSE, :u) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category, updated_at = EXCLUDED.updated_at"
-            )
-            conn.execute(upsert_stmt, {"s": session_id, "c": category, "u": _now_iso()})
-            conn.commit()
-            return True
-    except Exception as e:
         logger.warning(f"Error setting category: {e}")
         return False
 
