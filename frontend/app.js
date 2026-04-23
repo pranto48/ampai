@@ -97,6 +97,34 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let globalConfigs = {};
     let isUserAway = false;
+    let notificationPreferences = {
+        browser_notify_on_away_replies: true,
+        email_notify_on_away_replies: false,
+        minimum_notify_interval_seconds: 300,
+        digest_mode: 'immediate',
+        digest_interval_minutes: 30,
+    };
+
+    async function loadNotificationPreferences() {
+        try {
+            const res = await apiFetch('/api/users/me/notification-preferences');
+            if (!res.ok) return;
+            const prefs = await res.json();
+            notificationPreferences = { ...notificationPreferences, ...prefs };
+            const browserEl = document.getElementById('pref-browser-away');
+            const emailEl = document.getElementById('pref-email-away');
+            const intervalEl = document.getElementById('pref-min-interval');
+            const modeEl = document.getElementById('pref-digest-mode');
+            const digestIntervalEl = document.getElementById('pref-digest-interval');
+            if (browserEl) browserEl.checked = !!notificationPreferences.browser_notify_on_away_replies;
+            if (emailEl) emailEl.checked = !!notificationPreferences.email_notify_on_away_replies;
+            if (intervalEl) intervalEl.value = notificationPreferences.minimum_notify_interval_seconds ?? 300;
+            if (modeEl) modeEl.value = notificationPreferences.digest_mode || 'immediate';
+            if (digestIntervalEl) digestIntervalEl.value = notificationPreferences.digest_interval_minutes ?? 30;
+        } catch (error) {
+            console.error('Failed to load notification preferences', error);
+        }
+    }
 
     function toggleFullscreenChat() {
         const container = document.querySelector('.app-container');
@@ -157,6 +185,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!ok) return;
         loadSessions();
         checkGlobalConfigs();
+        loadNotificationPreferences();
     };
     initializeApp();
 
@@ -179,6 +208,44 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (fullscreenChatBtn) {
         fullscreenChatBtn.addEventListener('click', toggleFullscreenChat);
+    }
+
+    const notificationSettingsBtn = document.querySelector('[data-notification-settings-btn]');
+    const notificationSettingsModal = document.getElementById('notification-settings-modal');
+    const prefCancelBtn = document.getElementById('pref-cancel-btn');
+    const prefSaveBtn = document.getElementById('pref-save-btn');
+
+    if (notificationSettingsBtn && notificationSettingsModal) {
+        notificationSettingsBtn.addEventListener('click', async () => {
+            await loadNotificationPreferences();
+            notificationSettingsModal.classList.add('show');
+        });
+    }
+    if (prefCancelBtn && notificationSettingsModal) {
+        prefCancelBtn.addEventListener('click', () => notificationSettingsModal.classList.remove('show'));
+    }
+    if (prefSaveBtn && notificationSettingsModal) {
+        prefSaveBtn.addEventListener('click', async () => {
+            const payload = {
+                browser_notify_on_away_replies: !!document.getElementById('pref-browser-away')?.checked,
+                email_notify_on_away_replies: !!document.getElementById('pref-email-away')?.checked,
+                minimum_notify_interval_seconds: Number(document.getElementById('pref-min-interval')?.value || 300),
+                digest_mode: document.getElementById('pref-digest-mode')?.value || 'immediate',
+                digest_interval_minutes: Number(document.getElementById('pref-digest-interval')?.value || 30),
+            };
+            const res = await apiFetch('/api/users/me/notification-preferences', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                alert('Failed to save notification preferences');
+                return;
+            }
+            const data = await res.json();
+            notificationPreferences = { ...notificationPreferences, ...(data.preferences || {}) };
+            notificationSettingsModal.classList.remove('show');
+        });
     }
 
     window.addEventListener('blur', () => { isUserAway = true; });
@@ -534,14 +601,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Refresh sessions list in case this was a new session
                 loadSessions();
                 if (isUserAway) {
-                    if ('Notification' in window) {
+                    if (notificationPreferences.browser_notify_on_away_replies && 'Notification' in window) {
                         if (Notification.permission === 'granted') {
                             new Notification('AmpAI Reply Ready', { body: data.response?.slice(0, 120) || 'New AI reply received.' });
                         } else if (Notification.permission !== 'denied') {
                             Notification.requestPermission();
                         }
                     }
-                    fetch('/api/notifications/chat-reply', {
+                    apiFetch('/api/notifications/chat-reply', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({

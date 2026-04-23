@@ -3,6 +3,7 @@ import re
 import json
 import time
 import urllib.request
+import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from database import (
     get_network_targets,
@@ -12,6 +13,8 @@ from database import (
     get_sql_chat_history,
     set_session_category,
     auto_complete_due_tasks,
+    list_pending_reply_notifications_for_digest,
+    mark_pending_reply_notifications_delivered,
 )
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -134,6 +137,7 @@ def run_network_sweep():
 def run_task_digest():
     tasks = list_tasks(status='todo')
     overdue = []
+    reminder_lines = []
     now = datetime.now(timezone.utc)
     for t in tasks:
         due_at = t.get('due_at')
@@ -176,9 +180,41 @@ def run_task_digest():
         logger.exception("Error writing task digest: %s", e)
 
 
+def run_chat_reply_digest():
+    default_window = max(1, int(get_config("notification_default_digest_interval_minutes", "30") or "30"))
+    pending = list_pending_reply_notifications_for_digest(max_age_minutes=default_window)
+    if not pending:
+        return
+
+    grouped = {}
+    delivered_ids = []
+    for row in pending:
+        username = row.get("username") or "unknown"
+        grouped.setdefault(username, []).append(row)
+        delivered_ids.append(int(row["id"]))
+
+    lines = []
+    for username, entries in grouped.items():
+        lines.append(f"User: {username} ({len(entries)} replies)")
+        for entry in entries[:20]:
+            created_at = entry.get("created_at")
+            lines.append(
+                f"- [{created_at}] Session {entry.get('session_id')}: {(entry.get('reply_preview') or '')[:140]}"
+            )
+        lines.append("")
+
+    body = "AmpAI periodic chat reply digest\n\n" + "\n".join(lines).strip()
+    sent = _send_resend_email(subject="AmpAI Chat Reply Digest", body_text=body)
+    if sent:
+        mark_pending_reply_notifications_delivered(delivered_ids)
+    else:
+        logger.warning("Reply digest email not sent; pending items retained")
+
+
 def start_scheduler():
     if not scheduler.running:
         scheduler.add_job(run_network_sweep, 'cron', hour=9, minute=0)
         scheduler.add_job(run_task_digest, 'interval', minutes=30)
+        scheduler.add_job(run_chat_reply_digest, 'interval', minutes=5)
         scheduler.start()
         logger.info("Background scheduler started")

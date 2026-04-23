@@ -1433,3 +1433,219 @@ def export_all_sessions_for_backup():
     except Exception as e:
         logger.exception("Error exporting sessions for backup", exc_info=e)
         return []
+
+
+def migrate_notification_preferences_schema() -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_notification_preferences (
+                        username VARCHAR PRIMARY KEY,
+                        browser_notify_on_away_replies BOOLEAN NOT NULL DEFAULT TRUE,
+                        email_notify_on_away_replies BOOLEAN NOT NULL DEFAULT FALSE,
+                        minimum_notify_interval_seconds INTEGER NOT NULL DEFAULT 300,
+                        digest_mode VARCHAR NOT NULL DEFAULT 'immediate',
+                        digest_interval_minutes INTEGER NOT NULL DEFAULT 30,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS pending_reply_notifications (
+                        id SERIAL PRIMARY KEY,
+                        username VARCHAR NOT NULL,
+                        session_id VARCHAR NOT NULL,
+                        reply_preview TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        delivered_at TIMESTAMPTZ
+                    )
+                    """
+                )
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Failed migrating notification preference schema", exc_info=exc)
+
+
+migrate_notification_preferences_schema()
+
+
+def _as_bool(value, default: bool) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_effective_notification_preferences(username: str) -> Dict[str, object]:
+    defaults = {
+        "browser_notify_on_away_replies": _as_bool(get_config("notification_default_browser_notify_on_away_replies", "true"), True),
+        "email_notify_on_away_replies": _as_bool(
+            get_config("notification_default_email_notify_on_away_replies", get_config("chat_reply_email_notifications", "false")),
+            False,
+        ),
+        "minimum_notify_interval_seconds": max(0, int(get_config("notification_default_minimum_notify_interval_seconds", "300") or "300")),
+        "digest_mode": (get_config("notification_default_digest_mode", "immediate") or "immediate").strip().lower(),
+        "digest_interval_minutes": max(1, int(get_config("notification_default_digest_interval_minutes", "30") or "30")),
+    }
+
+    if defaults["digest_mode"] not in {"immediate", "periodic"}:
+        defaults["digest_mode"] = "immediate"
+
+    if not engine:
+        return defaults
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT browser_notify_on_away_replies, email_notify_on_away_replies,
+                           minimum_notify_interval_seconds, digest_mode, digest_interval_minutes
+                    FROM user_notification_preferences WHERE username = :username
+                    """
+                ),
+                {"username": username},
+            ).mappings().first()
+            if not row:
+                return defaults
+            merged = {**defaults, **dict(row)}
+            merged["digest_mode"] = (merged.get("digest_mode") or "immediate").strip().lower()
+            if merged["digest_mode"] not in {"immediate", "periodic"}:
+                merged["digest_mode"] = "immediate"
+            merged["minimum_notify_interval_seconds"] = max(0, int(merged.get("minimum_notify_interval_seconds") or 0))
+            merged["digest_interval_minutes"] = max(1, int(merged.get("digest_interval_minutes") or 30))
+            return merged
+    except Exception as exc:
+        logger.exception("Error loading effective notification preferences", extra={"username": username}, exc_info=exc)
+        return defaults
+
+
+def upsert_user_notification_preferences(
+    username: str,
+    browser_notify_on_away_replies: bool,
+    email_notify_on_away_replies: bool,
+    minimum_notify_interval_seconds: int,
+    digest_mode: str,
+    digest_interval_minutes: int,
+) -> bool:
+    if not engine:
+        return False
+
+    normalized_mode = (digest_mode or "immediate").strip().lower()
+    if normalized_mode not in {"immediate", "periodic"}:
+        normalized_mode = "immediate"
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO user_notification_preferences (
+                        username,
+                        browser_notify_on_away_replies,
+                        email_notify_on_away_replies,
+                        minimum_notify_interval_seconds,
+                        digest_mode,
+                        digest_interval_minutes,
+                        created_at,
+                        updated_at
+                    ) VALUES (
+                        :username, :browser_notify_on_away_replies, :email_notify_on_away_replies,
+                        :minimum_notify_interval_seconds, :digest_mode, :digest_interval_minutes, NOW(), NOW()
+                    )
+                    ON CONFLICT (username) DO UPDATE SET
+                        browser_notify_on_away_replies = EXCLUDED.browser_notify_on_away_replies,
+                        email_notify_on_away_replies = EXCLUDED.email_notify_on_away_replies,
+                        minimum_notify_interval_seconds = EXCLUDED.minimum_notify_interval_seconds,
+                        digest_mode = EXCLUDED.digest_mode,
+                        digest_interval_minutes = EXCLUDED.digest_interval_minutes,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "username": username,
+                    "browser_notify_on_away_replies": bool(browser_notify_on_away_replies),
+                    "email_notify_on_away_replies": bool(email_notify_on_away_replies),
+                    "minimum_notify_interval_seconds": max(0, int(minimum_notify_interval_seconds)),
+                    "digest_mode": normalized_mode,
+                    "digest_interval_minutes": max(1, int(digest_interval_minutes)),
+                },
+            )
+            conn.commit()
+        return True
+    except Exception as exc:
+        logger.exception("Error upserting notification preferences", extra={"username": username}, exc_info=exc)
+        return False
+
+
+def enqueue_pending_reply_notification(username: str, session_id: str, reply_preview: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO pending_reply_notifications (username, session_id, reply_preview, created_at)
+                    VALUES (:username, :session_id, :reply_preview, NOW())
+                    """
+                ),
+                {
+                    "username": username,
+                    "session_id": session_id,
+                    "reply_preview": (reply_preview or "")[:500],
+                },
+            )
+            conn.commit()
+        return True
+    except Exception as exc:
+        logger.exception("Error enqueuing pending reply notification", exc_info=exc)
+        return False
+
+
+def list_pending_reply_notifications_for_digest(max_age_minutes: int = 30) -> List[Dict[str, object]]:
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT id, username, session_id, reply_preview, created_at
+                    FROM pending_reply_notifications
+                    WHERE delivered_at IS NULL
+                      AND created_at <= NOW() - make_interval(mins => :max_age_minutes)
+                    ORDER BY username ASC, created_at ASC
+                    """
+                ),
+                {"max_age_minutes": max(1, int(max_age_minutes))},
+            ).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as exc:
+        logger.exception("Error listing pending reply notifications", exc_info=exc)
+        return []
+
+
+def mark_pending_reply_notifications_delivered(ids: List[int]) -> int:
+    if not engine or not ids:
+        return 0
+    clean_ids = [int(i) for i in ids]
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("UPDATE pending_reply_notifications SET delivered_at = NOW() WHERE id = ANY(:ids)"),
+                {"ids": clean_ids},
+            )
+            conn.commit()
+            return int(result.rowcount or 0)
+    except Exception as exc:
+        logger.exception("Error marking pending reply notifications delivered", exc_info=exc)
+        return 0

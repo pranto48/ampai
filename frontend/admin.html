@@ -272,6 +272,21 @@
                     <input type="checkbox" id="config-chat-reply-email-notifications">
                     Enable email when chat reply is ready and user is away
                 </label>
+                <h4 style="margin:14px 0 8px;">Organization Baseline Defaults</h4>
+                <label style="display:flex; align-items:center; gap:8px; margin-bottom:8px; color:var(--text-secondary); font-size:0.9rem;">
+                    <input type="checkbox" id="config-notification-default-browser-notify-on-away-replies">
+                    Default browser notify on away replies
+                </label>
+                <label style="display:flex; align-items:center; gap:8px; margin-bottom:8px; color:var(--text-secondary); font-size:0.9rem;">
+                    <input type="checkbox" id="config-notification-default-email-notify-on-away-replies">
+                    Default email notify on away replies
+                </label>
+                <input type="number" id="config-notification-default-minimum-notify-interval-seconds" class="modern-input" min="0" placeholder="Default min notify interval (seconds)" style="max-width: 420px; margin-bottom: 8px;">
+                <select id="config-notification-default-digest-mode" class="modern-input" style="max-width: 420px; margin-bottom: 8px;">
+                    <option value="immediate">Immediate</option>
+                    <option value="periodic">Periodic</option>
+                </select>
+                <input type="number" id="config-notification-default-digest-interval-minutes" class="modern-input" min="1" placeholder="Default digest interval (minutes)" style="max-width: 420px;">
             </div>
 
             <div style="margin-bottom: 20px;">
