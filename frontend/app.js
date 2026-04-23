@@ -318,7 +318,7 @@ document.addEventListener('DOMContentLoaded', () => {
             removeTypingIndicator(typingId);
             
             if (response.ok) {
-                appendMessage('ai', data.response);
+                appendMessage('ai', data.response, false, data.web_search_status);
                 // Refresh sessions list in case this was a new session
                 loadSessions();
             } else {
@@ -351,7 +351,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function appendMessage(role, content, isPreFormatted = false) {
+    function appendMessage(role, content, isPreFormatted = false, webSearchStatus = null) {
         const div = document.createElement('div');
         div.className = `message ${role}-message`;
         
@@ -373,6 +373,30 @@ document.addEventListener('DOMContentLoaded', () => {
                 .replace(/\n/g, '<br>');
                 
             bubble.innerHTML = formattedContent;
+        }
+
+        if (role === 'ai' && webSearchStatus) {
+            const statusBadge = document.createElement('div');
+            statusBadge.style.marginTop = '8px';
+            statusBadge.style.display = 'inline-block';
+            statusBadge.style.fontSize = '0.75rem';
+            statusBadge.style.padding = '3px 8px';
+            statusBadge.style.borderRadius = '999px';
+
+            if (webSearchStatus.ok) {
+                statusBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+                statusBadge.style.border = '1px solid rgba(16, 185, 129, 0.35)';
+                statusBadge.style.color = '#10b981';
+                statusBadge.textContent = `Web: ${webSearchStatus.provider || 'available'}`;
+            } else {
+                statusBadge.style.background = 'rgba(239, 68, 68, 0.12)';
+                statusBadge.style.border = '1px solid rgba(239, 68, 68, 0.35)';
+                statusBadge.style.color = '#ef4444';
+                statusBadge.textContent = 'Web unavailable';
+                statusBadge.title = webSearchStatus.error || 'Web search failed';
+            }
+
+            bubble.appendChild(statusBadge);
         }
 
         div.appendChild(avatar);

@@ -43,7 +43,10 @@ SECRET_CONFIG_KEYS = {
     "gemini_api_key",
     "anthropic_api_key",
     "openrouter_api_key",
-    "anythingllm_api_key"
+    "anythingllm_api_key",
+    "serpapi_api_key",
+    "bing_api_key",
+    "custom_web_search_api_key",
 }
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "uploads")
@@ -239,7 +242,10 @@ def chat(request: ChatRequest, _: UserContext = Depends(require_authenticated_us
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
         )
-        return {"response": response}
+        return {
+            "response": response.get("content", ""),
+            "web_search_status": response.get("web_search_status"),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

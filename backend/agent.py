@@ -1,10 +1,13 @@
 import os
 import re
+import json
+import urllib.parse
+import urllib.request
 from langchain_community.chat_message_histories import SQLChatMessageHistory, RedisChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from memory_indexer import MemoryIndexer
-from typing import List, Dict
+from typing import List, Dict, Any
 
 # Models
 from langchain_openai import ChatOpenAI
@@ -37,6 +40,130 @@ class ShortTermRedisMessageHistory(BaseChatMessageHistory):
 
 def get_short_redis_history(session_id: str):
     return ShortTermRedisMessageHistory(session_id=session_id, k=6)
+
+
+def _format_search_results(results: List[Dict[str, Any]]) -> str:
+    if not results:
+        return "No results found."
+    lines = []
+    for idx, item in enumerate(results, 1):
+        title = item.get("title") or "Untitled"
+        url = item.get("url") or ""
+        snippet = item.get("snippet") or ""
+        lines.append(f"{idx}. {title}\n   URL: {url}\n   Snippet: {snippet}")
+    return "\n".join(lines)
+
+
+def search_web(query: str, max_results: int = 5) -> Dict[str, Any]:
+    """
+    Try web search providers in order:
+    1) DuckDuckGo
+    2) Optional configured fallback provider (SerpAPI/Bing/custom)
+    """
+    last_error = "Web search unavailable."
+
+    # 1) DuckDuckGo
+    try:
+        from ddgs import DDGS
+        with DDGS() as ddgs:
+            ddg_results = list(ddgs.text(query, max_results=max_results))
+        normalized = [
+            {
+                "title": row.get("title", ""),
+                "url": row.get("href", ""),
+                "snippet": row.get("body", ""),
+            }
+            for row in ddg_results
+        ]
+        return {
+            "ok": True,
+            "provider": "DuckDuckGo",
+            "results": normalized,
+            "error": None,
+        }
+    except Exception as exc:
+        last_error = f"DuckDuckGo failed: {exc}"
+
+    # 2) Optional fallback provider
+    fallback_provider = (get_config("web_fallback_provider") or "").strip().lower()
+    if fallback_provider == "serpapi":
+        serpapi_key = (get_config("serpapi_api_key") or "").strip()
+        if serpapi_key:
+            try:
+                params = urllib.parse.urlencode({
+                    "engine": "google",
+                    "q": query,
+                    "api_key": serpapi_key,
+                    "num": max_results
+                })
+                url = f"https://serpapi.com/search.json?{params}"
+                with urllib.request.urlopen(url, timeout=12) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                items = payload.get("organic_results", [])[:max_results]
+                normalized = [
+                    {
+                        "title": row.get("title", ""),
+                        "url": row.get("link", ""),
+                        "snippet": row.get("snippet", ""),
+                    }
+                    for row in items
+                ]
+                return {"ok": True, "provider": "SerpAPI", "results": normalized, "error": None}
+            except Exception as exc:
+                last_error = f"SerpAPI failed: {exc}"
+        else:
+            last_error = "SerpAPI fallback selected but serpapi_api_key is missing."
+    elif fallback_provider == "bing":
+        bing_key = (get_config("bing_api_key") or "").strip()
+        if bing_key:
+            try:
+                params = urllib.parse.urlencode({"q": query, "count": max_results})
+                url = f"https://api.bing.microsoft.com/v7.0/search?{params}"
+                req = urllib.request.Request(url, headers={"Ocp-Apim-Subscription-Key": bing_key})
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                items = payload.get("webPages", {}).get("value", [])[:max_results]
+                normalized = [
+                    {
+                        "title": row.get("name", ""),
+                        "url": row.get("url", ""),
+                        "snippet": row.get("snippet", ""),
+                    }
+                    for row in items
+                ]
+                return {"ok": True, "provider": "Bing", "results": normalized, "error": None}
+            except Exception as exc:
+                last_error = f"Bing failed: {exc}"
+        else:
+            last_error = "Bing fallback selected but bing_api_key is missing."
+    elif fallback_provider == "custom":
+        custom_url = (get_config("custom_web_search_url") or "").strip()
+        custom_key = (get_config("custom_web_search_api_key") or "").strip()
+        if custom_url:
+            try:
+                sep = "&" if "?" in custom_url else "?"
+                url = f"{custom_url}{sep}{urllib.parse.urlencode({'q': query, 'limit': max_results})}"
+                headers = {"Accept": "application/json"}
+                if custom_key:
+                    headers["Authorization"] = f"Bearer {custom_key}"
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                rows = payload.get("results") or payload.get("items") or payload.get("data") or []
+                normalized = []
+                for row in rows[:max_results]:
+                    normalized.append({
+                        "title": row.get("title", ""),
+                        "url": row.get("url") or row.get("link", ""),
+                        "snippet": row.get("snippet") or row.get("description", ""),
+                    })
+                return {"ok": True, "provider": "Custom", "results": normalized, "error": None}
+            except Exception as exc:
+                last_error = f"Custom provider failed: {exc}"
+        else:
+            last_error = "Custom fallback selected but custom_web_search_url is missing."
+
+    return {"ok": False, "provider": None, "results": [], "error": last_error}
 
 def get_llm(model_type: str, api_key: str = None):
     if model_type == "ollama":
@@ -96,14 +223,17 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
     core_facts_str = "\n".join([f"- {m['fact']}" for m in core_mems]) if core_mems else "None yet."
     
     web_context = ""
+    web_search_status = {"ok": False, "provider": None, "results": [], "error": "Web search not requested."}
     if use_web_search:
-        try:
-            from langchain_community.tools import DuckDuckGoSearchRun
-            search = DuckDuckGoSearchRun()
-            search_results = search.run(message)
-            web_context = f"\n\n--- LIVE WEB SEARCH RESULTS FOR '{message}' ---\n{search_results}\nUse this real-time information to answer accurately.\n"
-        except Exception as e:
-            error_msg = str(e)
+        web_search_status = search_web(message)
+        if web_search_status["ok"]:
+            formatted_results = _format_search_results(web_search_status["results"])
+            web_context = (
+                f"\n\n--- LIVE WEB SEARCH RESULTS ({web_search_status['provider']}) FOR '{message}' ---\n"
+                f"{formatted_results}\nUse this real-time information to answer accurately.\n"
+            )
+        else:
+            error_msg = web_search_status["error"]
             print(f"Web search error: {error_msg}")
             web_context = (
                 "\n\n--- LIVE WEB SEARCH STATUS ---\n"
@@ -267,4 +397,4 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
     sql_history.add_user_message(message_log)
     sql_history.add_ai_message(content)
     
-    return content
+    return {"content": content, "web_search_status": web_search_status}

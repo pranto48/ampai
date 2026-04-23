@@ -23,7 +23,12 @@ document.addEventListener('DOMContentLoaded', () => {
         'anythingllm_base_url': document.getElementById('config-anythingllm-url'),
         'anythingllm_api_key': document.getElementById('config-anythingllm-key'),
         'anythingllm_workspace': document.getElementById('config-anythingllm-workspace'),
-        'default_model': document.getElementById('config-default-model')
+        'default_model': document.getElementById('config-default-model'),
+        'web_fallback_provider': document.getElementById('config-web-fallback-provider'),
+        'serpapi_api_key': document.getElementById('config-serpapi-key'),
+        'bing_api_key': document.getElementById('config-bing-key'),
+        'custom_web_search_url': document.getElementById('config-custom-web-search-url'),
+        'custom_web_search_api_key': document.getElementById('config-custom-web-search-api-key')
     };
     const SECRET_CONFIG_KEYS = new Set([
         'generic_api_key',
@@ -31,7 +36,10 @@ document.addEventListener('DOMContentLoaded', () => {
         'gemini_api_key',
         'anthropic_api_key',
         'openrouter_api_key',
-        'anythingllm_api_key'
+        'anythingllm_api_key',
+        'serpapi_api_key',
+        'bing_api_key',
+        'custom_web_search_api_key'
     ]);
     const CLEAR_VALUE_SENTINEL = "__CLEAR__";
     const initialConfigValues = {};
