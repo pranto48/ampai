@@ -1,9 +1,10 @@
 import os
 import logging
 import hashlib
+import json
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Tuple
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, Boolean, select, inspect, text
 from cryptography.fernet import Fernet, InvalidToken
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from logging_utils import get_logger
@@ -88,6 +89,16 @@ memory_group_sessions = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("group_id", Integer, nullable=False),
     Column("session_id", String, nullable=False),
+)
+
+session_access = Table(
+    "session_access",
+    metadata,
+    Column("session_id", String, primary_key=True),
+    Column("owner_username", String, nullable=False),
+    Column("visibility", String, nullable=False, default="private"),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
 
 tasks = Table(
@@ -271,7 +282,7 @@ def touch_session(session_id: str):
         logger.warning(f"Error touching session: {e}")
 
 
-def get_all_sessions(query: str = "", include_archived: bool = False):
+def get_all_sessions(query: str = "", category: Optional[str] = None, archived: Optional[bool] = None):
     if not engine:
         return []
     try:
@@ -280,24 +291,13 @@ def get_all_sessions(query: str = "", include_archived: bool = False):
             if not inspector.has_table(CHAT_HISTORY_TABLE):
                 return []
 
-            # Derive sessions from the same canonical SQL history table used by /api/history.
             session_rows = conn.execute(
                 text(
-                    f"SELECT id, session_id, message FROM {CHAT_HISTORY_TABLE} "
-                    "WHERE session_id IS NOT NULL ORDER BY id ASC"
+                    f"SELECT DISTINCT session_id FROM {CHAT_HISTORY_TABLE} "
+                    "WHERE session_id IS NOT NULL ORDER BY session_id ASC"
                 )
             ).fetchall()
-
-            # Safeguard: filter malformed/partial records and dedupe duplicated message rows.
-            by_session = {}
-            for _, session_id, raw_message in session_rows:
-                if not session_id or not raw_message:
-                    continue
-                parsed = _parse_chat_payload(raw_message)
-                if not parsed:
-                    continue
-
-                msg_type, content = parsed
+            session_ids = [row[0] for row in session_rows if row and row[0]]
 
             stmt_meta = select(
                 session_metadata.c.session_id,
@@ -325,9 +325,11 @@ def get_all_sessions(query: str = "", include_archived: bool = False):
                     "archived": False,
                     "updated_at": None,
                 })
-                if not include_archived and meta["archived"]:
+                if archived is not None and meta["archived"] != bool(archived):
                     continue
                 if q and q not in s_id.lower() and q not in meta["category"].lower():
+                    continue
+                if category and meta["category"] != category:
                     continue
                 output.append({"session_id": s_id, **meta})
 
@@ -1570,3 +1572,6 @@ def export_all_sessions_for_backup():
     except Exception as e:
         logger.exception("Error exporting sessions for backup", exc_info=e)
         return []
+
+
+ensure_session_access_schema()
