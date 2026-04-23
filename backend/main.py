@@ -35,6 +35,12 @@ from database import (
     get_core_memories,
     get_network_targets,
     get_duplicate_message_counts,
+    get_user,
+    list_users as db_list_users,
+    create_user as db_create_user,
+    update_user as db_update_user,
+    delete_user as db_delete_user,
+    ensure_default_users,
     list_chat_messages,
     get_sql_chat_history,
     list_tasks,
@@ -122,6 +128,17 @@ class AdminPasswordChangeRequest(BaseModel):
     new_password: str
 
 
+class AdminUserCreateRequest(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+
+
+class AdminUserUpdateRequest(BaseModel):
+    role: Optional[str] = None
+    password: Optional[str] = None
+
+
 class TaskCreateRequest(BaseModel):
     title: str
     description: str = ""
@@ -155,7 +172,7 @@ class UserContext(BaseModel):
     role: str
 
 
-def _build_user_store() -> Dict[str, Dict[str, str]]:
+def _bootstrap_default_users() -> None:
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
     admin_password = os.getenv("ADMIN_PASSWORD", "password")
     persisted_admin_hash = get_config("admin_password_hash")
@@ -163,19 +180,23 @@ def _build_user_store() -> Dict[str, Dict[str, str]]:
     user_username = os.getenv("USER_USERNAME", "user")
     user_password = os.getenv("USER_PASSWORD", "user123")
 
-    return {
-        admin_username: {
-            "role": "admin",
-            "password_hash": persisted_admin_hash or pwd_context.hash(admin_password),
-        },
-        user_username: {
-            "role": "user",
-            "password_hash": pwd_context.hash(user_password),
-        },
-    }
+    ensure_default_users(
+        [
+            {
+                "username": admin_username,
+                "role": "admin",
+                "password_hash": persisted_admin_hash or pwd_context.hash(admin_password),
+            },
+            {
+                "username": user_username,
+                "role": "user",
+                "password_hash": pwd_context.hash(user_password),
+            },
+        ]
+    )
 
 
-USERS = _build_user_store()
+_bootstrap_default_users()
 
 
 def _load_integration_credentials(provider: str) -> Dict[str, str]:
@@ -207,6 +228,117 @@ def _ensure_valid_email_access_token(provider: str) -> str:
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
+    _save_integration_credentials(provider, refreshed)
+    return refreshed["access_token"]
+
+
+def _fetch_todays_email_messages(provider: str, timezone_name: str, max_results: int) -> List[Dict[str, str]]:
+    access_token = _ensure_valid_email_access_token(provider)
+    if provider == "gmail":
+        return fetch_gmail_todays_messages(access_token=access_token, tz=timezone_name, max_results=max_results)
+    if provider == "outlook":
+        return fetch_outlook_todays_messages(access_token=access_token, tz=timezone_name, max_results=max_results)
+    raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+
+
+def _create_access_token(data: Dict[str, str]) -> str:
+    payload = data.copy()
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRY_MINUTES)
+    payload.update({"exp": expiry})
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _check_db_health() -> dict:
+    try:
+        if not engine:
+            return {"ok": False, "details": "DB engine unavailable"}
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"ok": True}
+    except Exception as exc:
+        logger.exception("DB health check failed", exc_info=exc)
+        return {"ok": False, "details": str(exc)}
+
+
+def _check_redis_health() -> dict:
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+        redis_client = Redis.from_url(redis_url, socket_timeout=2)
+        redis_client.ping()
+        return {"ok": True}
+    except Exception as exc:
+        logger.exception("Redis health check failed", exc_info=exc)
+        return {"ok": False, "details": str(exc)}
+
+
+def _check_model_provider_health() -> dict:
+    provider = (get_all_configs().get("default_model") or "ollama").strip().lower()
+    try:
+        get_llm(provider)
+        return {"ok": True, "provider": provider}
+    except Exception as exc:
+        return {"ok": False, "provider": provider, "details": str(exc)}
+
+
+def _check_search_provider_health() -> dict:
+    configs = get_all_configs()
+    fallback = (configs.get("web_fallback_provider") or "").strip().lower()
+    if fallback == "serpapi":
+        return {"ok": bool(configs.get("serpapi_api_key")), "provider": "serpapi"}
+    if fallback == "bing":
+        return {"ok": bool(configs.get("bing_api_key")), "provider": "bing"}
+    if fallback == "custom":
+        return {"ok": bool(configs.get("custom_web_search_url")), "provider": "custom"}
+    return {"ok": True, "provider": "duckduckgo"}
+
+
+def _get_current_user(access_token: Optional[str] = None) -> UserContext:
+    if not access_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    try:
+        payload = jwt.decode(access_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        username = payload.get("sub")
+        role = payload.get("role")
+        if not username or role not in {"admin", "user"}:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+        return UserContext(username=username, role=role)
+    except JWTError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
+
+
+def get_current_user_from_cookie(request: Request):
+    token = request.cookies.get("access_token")
+    return _get_current_user(token)
+
+
+def require_authenticated_user(current_user: UserContext = Depends(get_current_user_from_cookie)) -> UserContext:
+    return current_user
+
+
+def require_admin_user(current_user: UserContext = Depends(get_current_user_from_cookie)) -> UserContext:
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return current_user
+
+
+@app.post("/api/auth/login", response_model=UserLoginResponse)
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = get_user(form_data.username)
+    if not user or not pwd_context.verify(form_data.password, user["password_hash"]):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+
+    token = _create_access_token({"sub": user["username"], "role": user["role"]})
+    response = Response(content=UserLoginResponse(username=form_data.username, role=user["role"]).model_dump_json(), media_type="application/json")
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=JWT_EXPIRY_MINUTES * 60,
+    )
+    return response
 
 @app.on_event("startup")
 def startup_event():
@@ -395,7 +527,7 @@ def admin_change_password(
     request: AdminPasswordChangeRequest,
     current_user: UserContext = Depends(require_admin_user),
 ):
-    user = USERS.get(current_user.username)
+    user = get_user(current_user.username)
     if not user:
         raise HTTPException(status_code=404, detail="Admin user not found")
 
@@ -406,8 +538,65 @@ def admin_change_password(
         raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
 
     new_hash = pwd_context.hash(request.new_password)
-    user["password_hash"] = new_hash
+    if not db_update_user(current_user.username, password_hash=new_hash):
+        raise HTTPException(status_code=500, detail="Failed to update admin password")
     set_config("admin_password_hash", new_hash)
+    return {"status": "success"}
+
+
+@app.get("/api/admin/users")
+def admin_list_users(_: UserContext = Depends(require_admin_user)):
+    return {"users": db_list_users()}
+
+
+@app.post("/api/admin/users")
+def admin_create_user(request: AdminUserCreateRequest, _: UserContext = Depends(require_admin_user)):
+    username = (request.username or "").strip()
+    role = (request.role or "user").strip().lower()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if len(request.password or "") < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if role not in {"admin", "user"}:
+        raise HTTPException(status_code=400, detail="Role must be admin or user")
+    if get_user(username):
+        raise HTTPException(status_code=409, detail="User already exists")
+    if not db_create_user(username=username, role=role, password_hash=pwd_context.hash(request.password)):
+        raise HTTPException(status_code=500, detail="Failed to create user")
+    return {"status": "success"}
+
+
+@app.patch("/api/admin/users/{username}")
+def admin_update_user(username: str, request: AdminUserUpdateRequest, current_user: UserContext = Depends(require_admin_user)):
+    username = username.strip()
+    existing = get_user(username)
+    if not existing:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    role = request.role.strip().lower() if request.role is not None else None
+    if role is not None and role not in {"admin", "user"}:
+        raise HTTPException(status_code=400, detail="Role must be admin or user")
+    if request.password is not None and len(request.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if existing["username"] == current_user.username and role == "user":
+        raise HTTPException(status_code=400, detail="You cannot remove your own admin role")
+
+    password_hash = pwd_context.hash(request.password) if request.password else None
+    if not db_update_user(username=username, role=role, password_hash=password_hash):
+        raise HTTPException(status_code=500, detail="Failed to update user")
+    return {"status": "success"}
+
+
+@app.delete("/api/admin/users/{username}")
+def admin_delete_user(username: str, current_user: UserContext = Depends(require_admin_user)):
+    username = username.strip()
+    if username == current_user.username:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+    existing = get_user(username)
+    if not existing:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not db_delete_user(username):
+        raise HTTPException(status_code=500, detail="Failed to delete user")
     return {"status": "success"}
 
 @app.post("/api/admin/configs/migrate")

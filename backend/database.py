@@ -65,6 +65,65 @@ tasks = Table(
     Column('updated_at', String, default=lambda: datetime.now(timezone.utc).isoformat())
 )
 
+users = Table(
+    "users",
+    metadata,
+    Column("username", String, primary_key=True),
+    Column("role", String, nullable=False, default="user"),
+    Column("password_hash", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
+try:
+    engine = create_engine(DATABASE_URL)
+    metadata.create_all(engine)
+except Exception:
+    pass
+
+
+def migrate_session_metadata_schema():
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            inspector = inspect(engine)
+            if not inspector.has_table("session_metadata"):
+                return
+            columns = {col["name"] for col in inspector.get_columns("session_metadata")}
+            if "pinned" not in columns:
+                conn.execute(text("ALTER TABLE session_metadata ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"))
+            if "archived" not in columns:
+                conn.execute(text("ALTER TABLE session_metadata ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"))
+            if "updated_at" not in columns:
+                conn.execute(text("ALTER TABLE session_metadata ADD COLUMN updated_at TIMESTAMPTZ"))
+                conn.execute(text("UPDATE session_metadata SET updated_at = NOW() WHERE updated_at IS NULL"))
+            conn.commit()
+    except Exception as e:
+        print(f"Error migrating session metadata schema: {e}")
+
+
+migrate_session_metadata_schema()
+
+
+def _load_fernet_keys() -> List[Fernet]:
+    active_key = os.getenv("CONFIG_ENCRYPTION_KEY")
+    previous_keys = os.getenv("CONFIG_ENCRYPTION_PREVIOUS_KEYS", "")
+
+    keys = []
+    if active_key:
+        keys.append(active_key)
+    if previous_keys:
+        keys.extend([k.strip() for k in previous_keys.split(",") if k.strip()])
+
+    fernets: List[Fernet] = []
+    for key in keys:
+        try:
+            fernets.append(Fernet(key.encode()))
+        except Exception:
+            logger.warning("Invalid config encryption key provided; skipping key")
+    return fernets
+
 
 users = Table(
     'users', metadata,
@@ -303,35 +362,6 @@ def set_session_flags(session_id: str, pinned: bool = None, archived: bool = Non
             return True
     except Exception as e:
         logger.warning(f"Error setting category: {e}")
-        return False
-
-
-def set_session_flags(session_id: str, pinned: bool = None, archived: bool = None):
-    if not engine:
-        return False
-    try:
-        with engine.connect() as conn:
-            _ensure_session_metadata_columns(conn)
-            touch = _now_iso()
-            existing = conn.execute(select(session_metadata).where(session_metadata.c.session_id == session_id)).first()
-            category = existing.category if existing else "Uncategorized"
-            curr_pinned = bool(existing.pinned) if existing else False
-            curr_archived = bool(existing.archived) if existing else False
-            upsert_stmt = text(
-                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, :p, :a, :u) "
-                "ON CONFLICT (session_id) DO UPDATE SET pinned = EXCLUDED.pinned, archived = EXCLUDED.archived, updated_at = EXCLUDED.updated_at"
-            )
-            conn.execute(upsert_stmt, {
-                "s": session_id,
-                "c": category,
-                "p": curr_pinned if pinned is None else pinned,
-                "a": curr_archived if archived is None else archived,
-                "u": touch,
-            })
-            conn.commit()
-            return True
-    except Exception as e:
-        logger.warning(f"Error setting session flags: {e}")
         return False
 
 
@@ -629,4 +659,122 @@ def delete_user(user_id: int):
             return True
     except Exception as e:
         logger.warning(f"Error deleting user: {e}")
+        return False
+
+
+def ensure_default_users(default_users: List[Dict[str, str]]) -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            for entry in default_users:
+                username = (entry.get("username") or "").strip()
+                role = (entry.get("role") or "user").strip().lower()
+                password_hash = entry.get("password_hash")
+                if not username or role not in {"admin", "user"} or not password_hash:
+                    continue
+                conn.execute(
+                    text(
+                        "INSERT INTO users (username, role, password_hash, created_at, updated_at) "
+                        "VALUES (:username, :role, :password_hash, NOW(), NOW()) "
+                        "ON CONFLICT (username) DO NOTHING"
+                    ),
+                    {"username": username, "role": role, "password_hash": password_hash},
+                )
+            conn.commit()
+    except Exception as e:
+        logger.exception("Error ensuring default users", exc_info=e)
+
+
+def get_user(username: str) -> Optional[Dict[str, str]]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT username, role, password_hash, created_at, updated_at "
+                    "FROM users WHERE username = :username"
+                ),
+                {"username": username},
+            ).mappings().first()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.exception("Error fetching user", extra={"username": username}, exc_info=e)
+        return None
+
+
+def list_users() -> List[Dict[str, str]]:
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT username, role, created_at, updated_at "
+                    "FROM users ORDER BY username ASC"
+                )
+            ).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as e:
+        logger.exception("Error listing users", exc_info=e)
+        return []
+
+
+def create_user(username: str, role: str, password_hash: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (username, role, password_hash, created_at, updated_at) "
+                    "VALUES (:username, :role, :password_hash, NOW(), NOW())"
+                ),
+                {"username": username, "role": role, "password_hash": password_hash},
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.exception("Error creating user", extra={"username": username}, exc_info=e)
+        return False
+
+
+def update_user(username: str, role: Optional[str] = None, password_hash: Optional[str] = None) -> bool:
+    if not engine:
+        return False
+    if role is None and password_hash is None:
+        return True
+    try:
+        params = {"username": username}
+        set_parts = ["updated_at = NOW()"]
+        if role is not None:
+            set_parts.append("role = :role")
+            params["role"] = role
+        if password_hash is not None:
+            set_parts.append("password_hash = :password_hash")
+            params["password_hash"] = password_hash
+
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(f"UPDATE users SET {', '.join(set_parts)} WHERE username = :username"),
+                params,
+            )
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.exception("Error updating user", extra={"username": username}, exc_info=e)
+        return False
+
+
+def delete_user(username: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("DELETE FROM users WHERE username = :username"), {"username": username})
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.exception("Error deleting user", extra={"username": username}, exc_info=e)
         return False

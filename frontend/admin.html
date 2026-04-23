@@ -99,6 +99,34 @@
         </div>
 
         <div class="card">
+            <h2>User Management</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Create, edit, and delete users for login access.</p>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 14px;">
+                <input id="new-user-username" class="modern-input" placeholder="Username">
+                <input id="new-user-password" class="modern-input" type="password" placeholder="Password (min 8)">
+                <select id="new-user-role" class="modern-input">
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                </select>
+                <button id="create-user-btn" class="btn primary-btn" style="width: auto;">Create User</button>
+            </div>
+            <div id="user-status" style="margin-top: 10px; font-size: 0.9rem;"></div>
+
+            <table class="data-table" style="margin-top: 14px;">
+                <thead>
+                    <tr>
+                        <th>Username</th>
+                        <th>Role</th>
+                        <th>Password</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="users-tbody"></tbody>
+            </table>
+        </div>
+
+        <div class="card">
             <h2>System Diagnostics</h2>
             <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Recent health checks and scheduler activity.</p>
             <div style="display: flex; align-items: center; gap: 10px; margin-top: 12px;">

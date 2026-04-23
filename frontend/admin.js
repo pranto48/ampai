@@ -97,6 +97,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const adminNewPasswordInput = document.getElementById('admin-new-password');
     const adminChangePasswordBtn = document.getElementById('admin-change-password-btn');
     const adminPasswordStatus = document.getElementById('admin-password-status');
+    const usersTbody = document.getElementById('users-tbody');
+    const newUserUsername = document.getElementById('new-user-username');
+    const newUserPassword = document.getElementById('new-user-password');
+    const newUserRole = document.getElementById('new-user-role');
+    const createUserBtn = document.getElementById('create-user-btn');
+    const userStatus = document.getElementById('user-status');
 
     const initializeAdmin = async () => {
         const user = await enforceAuth({ requiredRole: 'admin' });
@@ -105,6 +111,7 @@ document.addEventListener('DOMContentLoaded', () => {
         loadConfigs();
         loadCoreMemories();
         loadSystemHealth();
+        loadUsers();
         setupConfigChangeTracking();
         setupClearKeyButtons();
         refreshHealthBtn.addEventListener('click', loadSystemHealth);
@@ -575,5 +582,126 @@ document.addEventListener('DOMContentLoaded', () => {
                 adminPasswordStatus.style.color = '#ef4444';
             }
         });
+    }
+
+    async function loadUsers() {
+        try {
+            const response = await fetch('/api/admin/users');
+            const data = await response.json();
+            usersTbody.innerHTML = '';
+            const users = data.users || [];
+            if (!users.length) {
+                usersTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">No users</td></tr>';
+                return;
+            }
+
+            users.forEach((user) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${user.username}</td>
+                    <td>
+                        <select class="modern-input user-role-select" data-username="${user.username}" style="max-width:120px;">
+                            <option value="user" ${user.role === 'user' ? 'selected' : ''}>user</option>
+                            <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>admin</option>
+                        </select>
+                    </td>
+                    <td><input type="password" class="modern-input user-password-input" data-username="${user.username}" placeholder="New password" style="max-width:200px;"></td>
+                    <td>
+                        <button class="btn user-save-btn" data-username="${user.username}" style="width:auto; padding:6px 10px;">Save</button>
+                        <button class="btn user-delete-btn" data-username="${user.username}" style="width:auto; padding:6px 10px; background:rgba(239,68,68,0.15); color:#ef4444; border:1px solid rgba(239,68,68,0.35);">Delete</button>
+                    </td>
+                `;
+                usersTbody.appendChild(tr);
+            });
+
+            usersTbody.querySelectorAll('.user-save-btn').forEach((btn) => {
+                btn.addEventListener('click', async () => {
+                    const username = btn.dataset.username;
+                    const roleSelect = usersTbody.querySelector(`.user-role-select[data-username="${username}"]`);
+                    const passwordInput = usersTbody.querySelector(`.user-password-input[data-username="${username}"]`);
+                    const payload = { role: roleSelect.value };
+                    if (passwordInput.value.trim()) payload.password = passwordInput.value.trim();
+                    await updateUser(username, payload);
+                });
+            });
+
+            usersTbody.querySelectorAll('.user-delete-btn').forEach((btn) => {
+                btn.addEventListener('click', async () => {
+                    const username = btn.dataset.username;
+                    if (!confirm(`Delete user "${username}"?`)) return;
+                    await deleteUser(username);
+                });
+            });
+        } catch (error) {
+            userStatus.textContent = `Failed to load users: ${error.message}`;
+            userStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function createUser() {
+        const username = newUserUsername.value.trim();
+        const password = newUserPassword.value;
+        const role = newUserRole.value;
+        if (!username || !password) {
+            userStatus.textContent = 'Username and password are required.';
+            userStatus.style.color = '#ef4444';
+            return;
+        }
+        try {
+            const response = await fetch('/api/admin/users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, role }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to create user');
+            newUserUsername.value = '';
+            newUserPassword.value = '';
+            newUserRole.value = 'user';
+            userStatus.textContent = 'User created.';
+            userStatus.style.color = '#10b981';
+            loadUsers();
+        } catch (error) {
+            userStatus.textContent = error.message;
+            userStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function updateUser(username, payload) {
+        try {
+            const response = await fetch(`/api/admin/users/${encodeURIComponent(username)}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to update user');
+            userStatus.textContent = `Updated ${username}.`;
+            userStatus.style.color = '#10b981';
+            loadUsers();
+        } catch (error) {
+            userStatus.textContent = error.message;
+            userStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function deleteUser(username) {
+        try {
+            const response = await fetch(`/api/admin/users/${encodeURIComponent(username)}`, {
+                method: 'DELETE',
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to delete user');
+            userStatus.textContent = `Deleted ${username}.`;
+            userStatus.style.color = '#10b981';
+            loadUsers();
+        } catch (error) {
+            userStatus.textContent = error.message;
+            userStatus.style.color = '#ef4444';
+        }
+    }
+
+    if (createUserBtn) {
+        createUserBtn.addEventListener('click', createUser);
     }
 });
