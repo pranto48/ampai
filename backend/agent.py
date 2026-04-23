@@ -6,7 +6,6 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from memory_indexer import MemoryIndexer
 from typing import List, Dict
 
-# Models
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_models import ChatOllama
@@ -16,8 +15,10 @@ from langchain_core.chat_history import BaseChatMessageHistory
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
+
 def get_redis_history(session_id: str):
     return RedisChatMessageHistory(session_id, url=REDIS_URL)
+
 
 class ShortTermRedisMessageHistory(BaseChatMessageHistory):
     def __init__(self, session_id: str, k: int = 6):
@@ -35,8 +36,10 @@ class ShortTermRedisMessageHistory(BaseChatMessageHistory):
     def clear(self):
         self.history.clear()
 
+
 def get_short_redis_history(session_id: str):
     return ShortTermRedisMessageHistory(session_id=session_id, k=6)
+
 
 def get_llm(model_type: str, api_key: str = None):
     if model_type == "ollama":
@@ -71,13 +74,8 @@ def get_llm(model_type: str, api_key: str = None):
         key = api_key or get_config("openrouter_api_key")
         if not key:
             raise ValueError("OpenRouter API key is required")
-        # Default to a popular free model on OpenRouter if admin didn't specify one
         model_name = get_config("openrouter_model") or "meta-llama/llama-3-8b-instruct:free"
-        return ChatOpenAI(
-            model=model_name,
-            api_key=key,
-            base_url="https://openrouter.ai/api/v1"
-        )
+        return ChatOpenAI(model=model_name, api_key=key, base_url="https://openrouter.ai/api/v1")
     elif model_type == "anythingllm":
         base_url = get_config("anythingllm_base_url")
         key = api_key or get_config("anythingllm_api_key") or "not-needed"
@@ -88,26 +86,46 @@ def get_llm(model_type: str, api_key: str = None):
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 
+
 def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", api_key: str = None, memory_mode: str = "full", use_web_search: bool = False, attachments: List[Dict] = None):
-    if attachments is None: attachments = []
+    if attachments is None:
+        attachments = []
     llm = get_llm(model_type, api_key)
-    
+
     core_mems = get_core_memories()
     core_facts_str = "\n".join([f"- {m['fact']}" for m in core_mems]) if core_mems else "None yet."
-    
+
     web_context = ""
+    web_search = {"enabled": use_web_search, "provider": None, "status": "disabled", "error": None}
     if use_web_search:
         try:
             from langchain_community.tools import DuckDuckGoSearchRun
             search = DuckDuckGoSearchRun()
             search_results = search.run(message)
+            web_search = {"enabled": True, "provider": "duckduckgo-langchain", "status": "ok", "error": None}
             web_context = f"\n\n--- LIVE WEB SEARCH RESULTS FOR '{message}' ---\n{search_results}\nUse this real-time information to answer accurately.\n"
         except Exception as e:
-            print(f"Web search error: {e}")
+            first_error = str(e)
+            try:
+                from ddgs import DDGS
+                with DDGS() as ddgs:
+                    results = list(ddgs.text(message, max_results=5))
+                search_results = "\n".join([f"- {r.get('title','')} | {r.get('href','')} | {r.get('body','')}" for r in results])
+                web_search = {"enabled": True, "provider": "ddgs-direct", "status": "ok", "error": first_error}
+                web_context = f"\n\n--- LIVE WEB SEARCH RESULTS FOR '{message}' ---\n{search_results}\nUse this real-time information to answer accurately.\n"
+            except Exception as e2:
+                error_msg = f"{first_error}; fallback_error={e2}"
+                print(f"Web search error: {error_msg}")
+                web_search = {"enabled": True, "provider": "none", "status": "failed", "error": error_msg}
+                web_context = (
+                    "\n\n--- LIVE WEB SEARCH STATUS ---\n"
+                    f"Web search failed with error: {error_msg}\n"
+                    "If results are unavailable, say that clearly instead of inventing web facts.\n"
+                )
 
     file_context = ""
     image_contents = []
-    
+
     for attachment in attachments:
         if attachment.get("extracted_text"):
             file_context += f"\n--- Attached Document: {attachment['filename']} ---\n{attachment['extracted_text']}\n"
@@ -140,16 +158,15 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
         indexer = MemoryIndexer(model_type)
         relevant_memories = indexer.search_facts(message, k=5)
         context_str = "\n---\n".join(relevant_memories) if relevant_memories else "No previous relevant facts found."
-        
         system_msg = (
-            agent_directives + 
+            agent_directives +
             "FAST INDEXED MEMORY MODE: Instead of full history, here are the most relevant distilled facts retrieved for this query:\n"
             f"{context_str}\n\n"
             "Use these to provide highly contextual answers."
         )
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_msg),
-            MessagesPlaceholder(variable_name="history"), # We still pass recent short-term history via RunnableWithMessageHistory
+            MessagesPlaceholder(variable_name="history"),
             ("human", "{input}")
         ])
     else:
@@ -159,13 +176,9 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
             MessagesPlaceholder(variable_name="history"),
             ("human", "{input}")
         ])
-    
+
     chain = prompt | llm
-    
-    if memory_mode == "indexed":
-        history_factory = get_short_redis_history
-    else:
-        history_factory = get_redis_history
+    history_factory = get_short_redis_history if memory_mode == "indexed" else get_redis_history
 
     chain_with_history = RunnableWithMessageHistory(
         chain,
@@ -173,47 +186,30 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
         input_messages_key="input",
         history_messages_key="history",
     )
-    
-    # Format input for vision models if there are images
+
     human_input = [{"type": "text", "text": message}] + image_contents if image_contents else message
 
-    response = chain_with_history.invoke(
-        {"input": human_input},
-        config={"configurable": {"session_id": session_id}}
-    )
-    
+    response = chain_with_history.invoke({"input": human_input}, config={"configurable": {"session_id": session_id}})
     content = response.content
-    
-    # Parse for [SAVE_MEMORY: ...]
+
     match = re.search(r'\[SAVE_MEMORY:\s*(.*?)\]', content, re.IGNORECASE | re.DOTALL)
     if match:
-        fact_to_save = match.group(1).strip()
-        # Clean trailing brackets or punctuation if model included them
-        fact_to_save = fact_to_save.rstrip('].')
-        
-        # Save to global prompt injection DB
+        fact_to_save = match.group(1).strip().rstrip('].')
         add_core_memory(fact_to_save)
-        
-        # Save to PGVector for semantic search indexing
         try:
             indexer = MemoryIndexer(model_type)
             indexer.add_fact(fact_to_save)
         except Exception as e:
             print(f"Failed to add fact to PGVector: {e}")
-            
-        # Strip the tag from the final response sent to user
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
-    
-    # Save Raw History to PostgreSQL for Admin Logging/Export
+
     sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
-    
-    # Store images locally as markdown in raw history
     message_log = message
     if attachments:
         attachment_names = [a['filename'] for a in attachments]
         message_log = f"[Attachments: {', '.join(attachment_names)}]\n" + message
-        
+
     sql_history.add_user_message(message_log)
     sql_history.add_ai_message(content)
-    
-    return content
+
+    return {"response": content, "web_search": web_search}

@@ -1,4 +1,33 @@
 document.addEventListener('DOMContentLoaded', () => {
+    async function ensureAuth() {
+        const token = localStorage.getItem('ampai_token') || '';
+        if (!token) {
+            alert('Please login from chat page first.');
+            window.location.href = 'index.html';
+            return false;
+        }
+        const res = await apiFetch('/api/auth/whoami', { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!res.ok) {
+            alert('Authentication expired.');
+            localStorage.removeItem('ampai_token');
+            window.location.href = 'index.html';
+            return false;
+        }
+        const who = await res.json();
+        if (who.role !== 'admin') {
+            alert('Admin token required.');
+            window.location.href = 'index.html';
+            return false;
+        }
+        return true;
+    }
+
+    async function apiFetch(url, options = {}) {
+        const token = localStorage.getItem('ampai_token') || '';
+        const headers = options.headers || {};
+        headers['Authorization'] = `Bearer ${token}`;
+        return fetch(url, { ...options, headers });
+    }
     const memoriesTbody = document.getElementById('memories-tbody');
     const importFile = document.getElementById('import-file');
     const importBtn = document.getElementById('import-btn');
@@ -20,6 +49,9 @@ document.addEventListener('DOMContentLoaded', () => {
         'anthropic_api_key': document.getElementById('config-anthropic-key'),
         'openrouter_api_key': document.getElementById('config-openrouter-key'),
         'openrouter_model': document.getElementById('config-openrouter-model'),
+        'imap_host': document.getElementById('config-imap-host'),
+        'imap_username': document.getElementById('config-imap-username'),
+        'imap_password': document.getElementById('config-imap-password'),
         'anythingllm_base_url': document.getElementById('config-anythingllm-url'),
         'anythingllm_api_key': document.getElementById('config-anythingllm-key'),
         'anythingllm_workspace': document.getElementById('config-anythingllm-workspace'),
@@ -28,13 +60,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const coreMemoriesContainer = document.getElementById('core-memories-container');
 
-    loadAdminSessions();
-    loadConfigs();
-    loadCoreMemories();
+    ensureAuth().then((ok) => { if (!ok) return; loadAdminSessions(); loadConfigs(); loadCoreMemories(); loadHealth(); });
 
     async function loadCoreMemories() {
         try {
-            const res = await fetch('/api/admin/core-memories');
+            const res = await apiFetch('/api/admin/core-memories');
             const data = await res.json();
             coreMemoriesContainer.innerHTML = '';
             
@@ -63,7 +93,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     delBtn.style.fontSize = '1.2rem';
                     delBtn.style.lineHeight = '1';
                     delBtn.onclick = async () => {
-                        await fetch(`/api/admin/core-memories/${mem.id}`, { method: 'DELETE' });
+                        await apiFetch(`/api/admin/core-memories/${mem.id}`, { method: 'DELETE' });
                         loadCoreMemories();
                     };
                     
@@ -81,7 +111,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadConfigs() {
         try {
-            const res = await fetch('/api/admin/configs');
+            const res = await apiFetch('/api/admin/configs');
             const data = await res.json();
             for (const [key, input] of Object.entries(configInputs)) {
                 if (data[key]) {
@@ -103,7 +133,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const res = await fetch('/api/admin/configs', {
+            const res = await apiFetch('/api/admin/configs', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ configs: payload })
@@ -124,7 +154,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadAdminSessions() {
         try {
-            const response = await fetch('/api/sessions');
+            const response = await apiFetch('/api/sessions');
             const data = await response.json();
             
             memoriesTbody.innerHTML = '';
@@ -181,7 +211,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function exportMemory(sessionId) {
         try {
-            const response = await fetch(`/api/export/${sessionId}`);
+            const response = await apiFetch(`/api/export/${sessionId}`);
             const data = await response.json();
             
             const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
@@ -202,7 +232,7 @@ document.addEventListener('DOMContentLoaded', () => {
         logModal.classList.add('show');
 
         try {
-            const res = await fetch(`/api/history/${sessionId}`);
+            const res = await apiFetch(`/api/history/${sessionId}`);
             const data = await res.json();
             
             modalChatBox.innerHTML = ''; // clear loading
@@ -239,6 +269,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+
+    async function loadHealth() {
+        try {
+            const res = await apiFetch('/api/health');
+            if (!res.ok) return;
+            const data = await res.json();
+            const el = document.createElement('div');
+            el.className = 'card';
+            el.innerHTML = `<h2>Diagnostics</h2><pre style="white-space:pre-wrap;">${JSON.stringify(data, null, 2)}</pre>`;
+            document.querySelector('.admin-container')?.appendChild(el);
+        } catch (e) { console.error(e); }
+    }
+
     closeModalBtn.addEventListener('click', () => {
         logModal.classList.remove('show');
     });
@@ -272,7 +315,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 importStatus.textContent = "Importing...";
                 importStatus.style.color = "var(--text-secondary)";
 
-                const response = await fetch('/api/import', {
+                const response = await apiFetch('/api/import', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({

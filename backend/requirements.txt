@@ -14,4 +14,5 @@ redis
 python-multipart
 PyPDF2
 duckduckgo-search
+ddgs
 APScheduler
