@@ -1,16 +1,19 @@
+import json
 import os
 import shutil
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
+from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from passlib.context import CryptContext
 from pydantic import BaseModel
-from redis import Redis
-from sqlalchemy import text
-from starlette.staticfiles import StaticFiles
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -21,11 +24,11 @@ from database import (
     create_task,
     delete_core_memory,
     delete_network_target,
-    delete_task,
     delete_session_metadata,
-    engine,
+    delete_task,
     get_all_configs,
     get_all_sessions,
+    get_config,
     get_core_memories,
     get_network_targets,
     get_sql_chat_history,
@@ -38,8 +41,17 @@ from database import (
     touch_session_updated_at,
     update_task,
 )
-from logging_utils import configure_logging, get_logger, reset_request_id, set_request_id
-from scheduler import get_scheduler_diagnostics, run_network_sweep, start_scheduler
+from integrations.gmail_api import (
+    fetch_todays_messages as fetch_gmail_todays_messages,
+    refresh_access_token as refresh_gmail_access_token,
+)
+from integrations.outlook_graph import (
+    fetch_todays_messages as fetch_outlook_todays_messages,
+    refresh_access_token as refresh_outlook_access_token,
+)
+from scheduler import run_network_sweep, run_email_digest_job, start_scheduler
+
+from sqlalchemy import text
 
 configure_logging()
 logger = get_logger(__name__)
@@ -55,6 +67,8 @@ SECRET_CONFIG_KEYS = {
     "serpapi_api_key",
     "bing_api_key",
     "custom_web_search_api_key",
+    "integration_email_gmail_credentials",
+    "integration_email_outlook_credentials",
 }
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "uploads")
@@ -159,6 +173,15 @@ class TaskUpdateRequest(BaseModel):
     session_id: Optional[str] = None
 
 
+class EmailSummaryTodayRequest(BaseModel):
+    provider: str = "outlook"
+    timezone: str = "UTC"
+    max_results: int = 25
+    model_type: Optional[str] = None
+    api_key: Optional[str] = None
+    session_id: str = "system_email_reports"
+
+
 class UserLoginResponse(BaseModel):
     username: str
     role: str
@@ -189,6 +212,48 @@ def _build_user_store() -> Dict[str, Dict[str, str]]:
 
 
 USERS = _build_user_store()
+
+
+def _load_integration_credentials(provider: str) -> Dict[str, str]:
+    raw = get_config(f"integration_email_{provider}_credentials", "{}")
+    try:
+        parsed = json.loads(raw or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _save_integration_credentials(provider: str, credentials: Dict[str, str]) -> None:
+    set_config(f"integration_email_{provider}_credentials", json.dumps(credentials))
+
+
+def _ensure_valid_email_access_token(provider: str) -> str:
+    credentials = _load_integration_credentials(provider)
+    if not credentials:
+        raise HTTPException(status_code=400, detail=f"{provider} integration is not configured")
+
+    expires_at = int(credentials.get("expires_at") or 0)
+    if credentials.get("access_token") and expires_at > int(time.time()) + 60:
+        return credentials["access_token"]
+
+    if provider == "gmail":
+        refreshed = refresh_gmail_access_token(credentials)
+    elif provider == "outlook":
+        refreshed = refresh_outlook_access_token(credentials)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+
+    _save_integration_credentials(provider, refreshed)
+    return refreshed["access_token"]
+
+
+def _fetch_todays_email_messages(provider: str, timezone_name: str, max_results: int) -> List[Dict[str, str]]:
+    access_token = _ensure_valid_email_access_token(provider)
+    if provider == "gmail":
+        return fetch_gmail_todays_messages(access_token=access_token, tz=timezone_name, max_results=max_results)
+    if provider == "outlook":
+        return fetch_outlook_todays_messages(access_token=access_token, tz=timezone_name, max_results=max_results)
+    raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
 
 def _create_access_token(data: Dict[str, str]) -> str:
@@ -322,6 +387,62 @@ def chat(request: ChatRequest, _: UserContext = Depends(require_authenticated_us
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/integrations/email/summary-today")
+def summarize_todays_email(request: EmailSummaryTodayRequest, _: UserContext = Depends(require_authenticated_user)):
+    provider = request.provider.strip().lower()
+    tz_name = request.timezone.strip() or "UTC"
+    try:
+        ZoneInfo(tz_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid timezone: {tz_name}") from exc
+
+    messages = _fetch_todays_email_messages(
+        provider=provider,
+        timezone_name=tz_name,
+        max_results=max(1, min(request.max_results, 100)),
+    )
+
+    if not messages:
+        return {"status": "success", "summary": "No messages found for today.", "messages_count": 0}
+
+    digest_lines = []
+    for idx, msg in enumerate(messages, 1):
+        digest_lines.append(
+            f"{idx}. From: {msg.get('from', '')}\n"
+            f"   Subject: {msg.get('subject', '(No subject)')}\n"
+            f"   Date: {msg.get('date', '')}\n"
+            f"   Snippet: {msg.get('snippet', '')}"
+        )
+
+    date_label = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    prompt = (
+        f"Summarize my {provider.title()} email inbox for {date_label} ({tz_name}). "
+        "Provide: (1) key topics, (2) urgent follow-ups, (3) calendar/time-sensitive items, "
+        "(4) a concise executive digest.\n\n"
+        "Today's messages:\n"
+        + "\n\n".join(digest_lines)
+    )
+
+    model_type = request.model_type or get_config("default_model", "ollama")
+    result = chat_with_agent(
+        session_id=request.session_id,
+        message=prompt,
+        model_type=model_type,
+        api_key=request.api_key,
+        memory_mode="full",
+        use_web_search=False,
+        attachments=[],
+    )
+    return {
+        "status": "success",
+        "provider": provider,
+        "timezone": tz_name,
+        "messages_count": len(messages),
+        "summary": result.get("content", ""),
+        "session_id": request.session_id,
+    }
 
 
 @app.post("/api/upload")
@@ -606,6 +727,12 @@ def remove_target(target_id: int, _: UserContext = Depends(require_admin_user)):
 @app.post("/api/targets/run")
 def run_sweep_now(_: UserContext = Depends(require_admin_user)):
     run_network_sweep()
+    return {"status": "success"}
+
+
+@app.post("/api/admin/integrations/email/digest/run")
+def run_email_digest_now(_: UserContext = Depends(require_admin_user)):
+    run_email_digest_job()
     return {"status": "success"}
 
 

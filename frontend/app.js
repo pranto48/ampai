@@ -23,6 +23,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const tasksViewBtn = document.getElementById('tasks-view-btn');
     const taskQuickAddInput = document.getElementById('task-quick-add-input');
     const taskQuickAddBtn = document.getElementById('task-quick-add-btn');
+    const summarizeEmailBtn = document.getElementById('summarize-email-btn');
 
     let currentSessionId = generateSessionId();
     let currentSessionCategory = "Uncategorized";
@@ -114,6 +115,37 @@ document.addEventListener('DOMContentLoaded', () => {
             if (created) {
                 taskQuickAddInput.value = '';
                 if (currentView === 'tasks') await renderTasksView();
+            }
+        });
+    }
+
+    if (summarizeEmailBtn) {
+        summarizeEmailBtn.addEventListener('click', async () => {
+            appendMessage('ai', 'Generating today’s email summary...');
+            summarizeEmailBtn.disabled = true;
+            try {
+                const response = await fetch('/api/integrations/email/summary-today', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        provider: 'outlook',
+                        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+                        session_id: currentSessionId,
+                        model_type: modelSelect.value,
+                        api_key: apiKeyInput.value || null,
+                    }),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    appendMessage('ai', `Email summary error: ${data.detail || 'Failed to summarize inbox.'}`);
+                    return;
+                }
+                appendMessage('ai', data.summary || 'No summary generated.');
+                loadSessions();
+            } catch (error) {
+                appendMessage('ai', `Email summary failed: ${error.message}`);
+            } finally {
+                summarizeEmailBtn.disabled = false;
             }
         });
     }

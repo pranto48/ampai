@@ -5,8 +5,6 @@ from typing import List, Optional
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
 from cryptography.fernet import Fernet, InvalidToken
 
-from logging_utils import get_logger
-
 # Allow overriding for local testing vs docker
 # Default to Postgres container format
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")

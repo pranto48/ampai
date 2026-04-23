@@ -1,8 +1,21 @@
 import subprocess
 import re
+import json
+import time
 from apscheduler.schedulers.background import BackgroundScheduler
-from database import get_network_targets, list_tasks, set_session_category, get_sql_chat_history
+from database import get_network_targets, list_tasks, engine, get_config, set_config
+from sqlalchemy import text
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+from agent import chat_with_agent
+from integrations.gmail_api import (
+    fetch_todays_messages as fetch_gmail_todays_messages,
+    refresh_access_token as refresh_gmail_access_token,
+)
+from integrations.outlook_graph import (
+    fetch_todays_messages as fetch_outlook_todays_messages,
+    refresh_access_token as refresh_outlook_access_token,
+)
 
 from logging_utils import get_logger
 
@@ -129,12 +142,109 @@ def run_task_reminders():
     except Exception as e:
         logger.exception("Error saving task reminders", exc_info=e)
 
+
+def _load_email_credentials(provider: str):
+    raw = get_config(f"integration_email_{provider}_credentials", "{}")
+    try:
+        data = json.loads(raw or "{}")
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _store_email_credentials(provider: str, credentials: dict):
+    set_config(f"integration_email_{provider}_credentials", json.dumps(credentials))
+
+
+def _ensure_access_token(provider: str) -> str:
+    creds = _load_email_credentials(provider)
+    expires_at = int(creds.get("expires_at") or 0)
+    if creds.get("access_token") and expires_at > int(time.time()) + 60:
+        return creds["access_token"]
+
+    if provider == "gmail":
+        creds = refresh_gmail_access_token(creds)
+    else:
+        creds = refresh_outlook_access_token(creds)
+    _store_email_credentials(provider, creds)
+    return creds["access_token"]
+
+
+def run_email_digest_job():
+    provider = (get_config("email_digest_provider", "outlook") or "outlook").strip().lower()
+    tz_name = (get_config("email_digest_timezone", "UTC") or "UTC").strip()
+    max_results = int(get_config("email_digest_max_results", "25") or "25")
+    session_id = "system_email_reports"
+
+    try:
+        ZoneInfo(tz_name)
+    except Exception:
+        tz_name = "UTC"
+
+    try:
+        token = _ensure_access_token(provider)
+        if provider == "gmail":
+            messages = fetch_gmail_todays_messages(token, tz=tz_name, max_results=max_results)
+        else:
+            messages = fetch_outlook_todays_messages(token, tz=tz_name, max_results=max_results)
+    except Exception as exc:
+        print(f"Email digest job failed before summarization: {exc}")
+        return
+
+    if not messages:
+        print("Email digest job: no messages found for today.")
+        return
+
+    digest_lines = []
+    for idx, msg in enumerate(messages, 1):
+        digest_lines.append(
+            f"{idx}. From: {msg.get('from', '')}\n"
+            f"   Subject: {msg.get('subject', '(No subject)')}\n"
+            f"   Date: {msg.get('date', '')}\n"
+            f"   Snippet: {msg.get('snippet', '')}"
+        )
+
+    date_label = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    prompt = (
+        f"Generate a daily inbox digest for {provider.title()} on {date_label} ({tz_name}). "
+        "Include key themes, urgent items, time-sensitive items, and suggested next actions.\n\n"
+        "Messages:\n"
+        + "\n\n".join(digest_lines)
+    )
+    model_type = get_config("default_model", "ollama") or "ollama"
+    chat_with_agent(
+        session_id=session_id,
+        message=prompt,
+        model_type=model_type,
+        api_key=None,
+        memory_mode="full",
+        use_web_search=False,
+        attachments=[],
+    )
+    print(f"Email digest job saved to {session_id}.")
+
 def start_scheduler():
     if not scheduler.running:
         # Run every day at 9:00 AM
         scheduler.add_job(run_network_sweep, 'cron', hour=9, minute=0)
         # Run task reminder checks every 10 minutes
         scheduler.add_job(run_task_reminders, 'interval', minutes=10)
+        try:
+            digest_hour = int(get_config("email_digest_hour", "7") or "7")
+        except ValueError:
+            digest_hour = 7
+        try:
+            digest_minute = int(get_config("email_digest_minute", "30") or "30")
+        except ValueError:
+            digest_minute = 30
+        digest_timezone = get_config("email_digest_timezone", "UTC") or "UTC"
+        scheduler.add_job(
+            run_email_digest_job,
+            "cron",
+            hour=digest_hour,
+            minute=digest_minute,
+            timezone=digest_timezone,
+        )
         scheduler.start()
         logger.info("Background scheduler started")
 
