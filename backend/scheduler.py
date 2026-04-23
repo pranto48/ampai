@@ -4,15 +4,13 @@ import json
 import time
 from apscheduler.schedulers.background import BackgroundScheduler
 from database import (
-    engine,
-    get_config,
     get_network_targets,
-    get_sql_chat_history,
     list_tasks,
+    get_config,
     set_config,
+    get_sql_chat_history,
     set_session_category,
 )
-from sqlalchemy import text
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from agent import chat_with_agent

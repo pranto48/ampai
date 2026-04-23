@@ -8,6 +8,8 @@ from typing import Dict, List, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from pydantic import BaseModel
 from redis import Redis
 from sqlalchemy import text
@@ -27,6 +29,8 @@ from database import (
     get_config,
     get_core_memories,
     get_network_targets,
+    get_duplicate_message_counts,
+    list_chat_messages,
     get_sql_chat_history,
     list_tasks,
     migrate_app_config_encryption,
@@ -385,10 +389,7 @@ def get_sessions(
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = get_sql_chat_history(session_id)
-        messages = []
-        for msg in history.messages:
-            messages.append({"type": msg.type, "content": msg.content})
+        messages = list_chat_messages(session_id, dedupe=True)
         return {"messages": messages}
     except Exception as e:
         return {"messages": [], "error": str(e)}
@@ -442,8 +443,7 @@ def delete_session(session_id: str, _: UserContext = Depends(require_authenticat
 @app.get("/api/export/{session_id}")
 def export_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = get_sql_chat_history(session_id)
-        messages = [{"type": msg.type, "content": msg.content} for msg in history.messages]
+        messages = list_chat_messages(session_id, dedupe=True)
 
         sessions = get_all_sessions()
         category = "Uncategorized"
@@ -461,7 +461,7 @@ def export_session(session_id: str, _: UserContext = Depends(require_authenticat
 def import_session(request: ImportRequest, _: UserContext = Depends(require_authenticated_user)):
     try:
         history = get_sql_chat_history(request.session_id)
-        existing_messages = {(msg.type, msg.content) for msg in history.messages}
+        existing_messages = {(msg["type"], msg["content"]) for msg in list_chat_messages(request.session_id, dedupe=False)}
         inserted = 0
         skipped = 0
 
@@ -487,6 +487,16 @@ def import_session(request: ImportRequest, _: UserContext = Depends(require_auth
         return {"status": "success", "session_id": request.session_id, "inserted": inserted, "skipped": skipped}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/history/duplicates")
+def get_history_duplicates(_: UserContext = Depends(require_admin_user)):
+    duplicates = get_duplicate_message_counts()
+    return {
+        "sessions_with_duplicates": len(duplicates),
+        "duplicate_messages": sum(duplicates.values()),
+        "by_session": duplicates,
+    }
 
 
 @app.get("/api/admin/configs")
