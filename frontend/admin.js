@@ -28,7 +28,13 @@ document.addEventListener('DOMContentLoaded', () => {
         'serpapi_api_key': document.getElementById('config-serpapi-key'),
         'bing_api_key': document.getElementById('config-bing-key'),
         'custom_web_search_url': document.getElementById('config-custom-web-search-url'),
-        'custom_web_search_api_key': document.getElementById('config-custom-web-search-api-key')
+        'custom_web_search_api_key': document.getElementById('config-custom-web-search-api-key'),
+        'integration_email_outlook_credentials': document.getElementById('config-outlook-credentials'),
+        'integration_email_gmail_credentials': document.getElementById('config-gmail-credentials'),
+        'email_digest_provider': document.getElementById('config-email-digest-provider'),
+        'email_digest_hour': document.getElementById('config-email-digest-hour'),
+        'email_digest_minute': document.getElementById('config-email-digest-minute'),
+        'email_digest_timezone': document.getElementById('config-email-digest-timezone')
     };
     const SECRET_CONFIG_KEYS = new Set([
         'generic_api_key',
@@ -39,7 +45,9 @@ document.addEventListener('DOMContentLoaded', () => {
         'anythingllm_api_key',
         'serpapi_api_key',
         'bing_api_key',
-        'custom_web_search_api_key'
+        'custom_web_search_api_key',
+        'integration_email_outlook_credentials',
+        'integration_email_gmail_credentials'
     ]);
     const CLEAR_VALUE_SENTINEL = "__CLEAR__";
     const initialConfigValues = {};

@@ -1,7 +1,8 @@
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
+from cryptography.fernet import Fernet, InvalidToken
 
 # Allow overriding for local testing vs docker
 # Default to Postgres container format
