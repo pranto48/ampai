@@ -1,4 +1,5 @@
 import os
+import json
 from datetime import datetime, timezone
 from typing import List, Optional
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
@@ -25,7 +26,10 @@ message_store = Table(
 session_metadata = Table(
     'session_metadata', metadata,
     Column('session_id', String, primary_key=True),
-    Column('category', String, default='Uncategorized')
+    Column('category', String, default='Uncategorized'),
+    Column('pinned', Integer, nullable=False, default=0),
+    Column('archived', Integer, nullable=False, default=0),
+    Column('updated_at', DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 )
 
 app_configs = Table(
@@ -66,6 +70,30 @@ try:
     metadata.create_all(engine)
 except Exception:
     pass
+
+
+def migrate_session_metadata_schema():
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            inspector = inspect(engine)
+            if not inspector.has_table("session_metadata"):
+                return
+            columns = {col["name"] for col in inspector.get_columns("session_metadata")}
+            if "pinned" not in columns:
+                conn.execute(text("ALTER TABLE session_metadata ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"))
+            if "archived" not in columns:
+                conn.execute(text("ALTER TABLE session_metadata ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"))
+            if "updated_at" not in columns:
+                conn.execute(text("ALTER TABLE session_metadata ADD COLUMN updated_at TIMESTAMPTZ"))
+                conn.execute(text("UPDATE session_metadata SET updated_at = NOW() WHERE updated_at IS NULL"))
+            conn.commit()
+    except Exception as e:
+        print(f"Error migrating session metadata schema: {e}")
+
+
+migrate_session_metadata_schema()
 
 
 def _load_fernet_keys() -> List[Fernet]:
@@ -155,35 +183,130 @@ def migrate_app_config_encryption() -> dict:
 
     return {"updated": updated, "failed": failed, "checked": checked}
 
-def get_all_sessions():
+def _upsert_session_metadata(session_id: str, category: Optional[str] = None, pinned: Optional[bool] = None, archived: Optional[bool] = None, touch_updated_at: bool = False):
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            upsert_stmt = text(
+                """
+                INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at)
+                VALUES (:s, COALESCE(:c, 'Uncategorized'), COALESCE(:p, 0), COALESCE(:a, 0), NOW())
+                ON CONFLICT (session_id) DO UPDATE SET
+                    category = COALESCE(:c, session_metadata.category),
+                    pinned = COALESCE(:p, session_metadata.pinned),
+                    archived = COALESCE(:a, session_metadata.archived),
+                    updated_at = CASE WHEN :touch = 1 THEN NOW() ELSE session_metadata.updated_at END
+                """
+            )
+            conn.execute(
+                upsert_stmt,
+                {
+                    "s": session_id,
+                    "c": category,
+                    "p": int(pinned) if pinned is not None else None,
+                    "a": int(archived) if archived is not None else None,
+                    "touch": 1 if touch_updated_at else 0,
+                },
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error upserting session metadata: {e}")
+        return False
+
+
+def get_all_sessions(query: Optional[str] = None, category: Optional[str] = None, archived: Optional[bool] = None):
     if not engine:
         return []
     try:
         with engine.connect() as conn:
             inspector = inspect(engine)
-            if not inspector.has_table("message_store"):
+            if not inspector.has_table(CHAT_HISTORY_TABLE):
                 return []
-                
-            # Fetch all distinct sessions
-            stmt_sessions = select(message_store.c.session_id).distinct()
-            sessions_result = conn.execute(stmt_sessions)
-            session_ids = [row[0] for row in sessions_result]
+
+            # Derive sessions from the same canonical SQL history table used by /api/history.
+            session_rows = conn.execute(
+                text(
+                    f"SELECT id, session_id, message FROM {CHAT_HISTORY_TABLE} "
+                    "WHERE session_id IS NOT NULL ORDER BY id ASC"
+                )
+            ).fetchall()
+
+            # Safeguard: filter malformed/partial records and dedupe duplicated message rows.
+            by_session = {}
+            for _, session_id, raw_message in session_rows:
+                if not session_id or not raw_message:
+                    continue
+                try:
+                    payload = json.loads(raw_message)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+
+                msg_type = payload.get("type")
+                content = ((payload.get("data") or {}).get("content")) if isinstance(payload, dict) else None
+                if msg_type not in {"human", "ai"} or not isinstance(content, str):
+                    continue
+
+                bucket = by_session.setdefault(session_id, {"roles": set(), "fingerprints": set()})
+                fingerprint = f"{msg_type}:{content}"
+                if fingerprint in bucket["fingerprints"]:
+                    continue
+                bucket["fingerprints"].add(fingerprint)
+                bucket["roles"].add(msg_type)
+
+            # Include sessions that have at least one valid message.
+            session_ids = sorted([session_id for session_id, data in by_session.items() if data["fingerprints"]])
             
-            # Fetch categories
-            stmt_cats = select(session_metadata.c.session_id, session_metadata.c.category)
+            # Fetch metadata
+            stmt_cats = select(
+                session_metadata.c.session_id,
+                session_metadata.c.category,
+                session_metadata.c.pinned,
+                session_metadata.c.archived,
+                session_metadata.c.updated_at,
+            )
             cats_result = conn.execute(stmt_cats)
-            cats_map = {row[0]: row[1] for row in cats_result}
+            meta_map = {
+                row[0]: {
+                    "category": row[1] or "Uncategorized",
+                    "pinned": bool(row[2]),
+                    "archived": bool(row[3]),
+                    "updated_at": row[4].isoformat() if row[4] else None,
+                }
+                for row in cats_result
+            }
             
             output = []
             for s_id in session_ids:
+                meta = meta_map.get(s_id, {})
                 output.append({
                     "session_id": s_id,
-                    "category": cats_map.get(s_id, "Uncategorized")
+                    "category": meta.get("category", "Uncategorized"),
+                    "pinned": meta.get("pinned", False),
+                    "archived": meta.get("archived", False),
+                    "updated_at": meta.get("updated_at"),
                 })
+            if query:
+                query_l = query.lower()
+                output = [s for s in output if query_l in s["session_id"].lower()]
+            if category:
+                output = [s for s in output if s["category"] == category]
+            if archived is not None:
+                output = [s for s in output if s["archived"] is archived]
+            output.sort(key=lambda s: (s["pinned"], s["updated_at"] or ""), reverse=True)
             return output
     except Exception as e:
         logger.exception("Error fetching sessions", exc_info=e)
         return []
+
+
+def get_sql_chat_history(session_id: str) -> SQLChatMessageHistory:
+    return SQLChatMessageHistory(
+        session_id=session_id,
+        connection_string=DATABASE_URL,
+        table_name=CHAT_HISTORY_TABLE,
+    )
 
 def set_session_category(session_id: str, category: str):
     if not engine:

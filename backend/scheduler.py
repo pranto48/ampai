@@ -1,8 +1,7 @@
 import subprocess
 import re
 from apscheduler.schedulers.background import BackgroundScheduler
-from database import get_network_targets, list_tasks, engine
-from sqlalchemy import text
+from database import get_network_targets, list_tasks, set_session_category, get_sql_chat_history
 from datetime import datetime, timedelta, timezone
 
 from logging_utils import get_logger
@@ -71,26 +70,12 @@ def run_network_sweep():
     # Save the report to the "System Reports" chat session in the DB
     session_id = "system_reports"
     try:
-        with engine.connect() as conn:
-            # Ensure session metadata exists
-            upsert_meta = text(
-                "INSERT INTO session_metadata (session_id, category) VALUES (:s, :c) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category"
-            )
-            conn.execute(upsert_meta, {"s": session_id, "c": "System Reports"})
-            
-            # Save the message
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ai_message = f"**Automated Network Report ({timestamp})**\n```\n{final_report}\n```"
-            
-            # Add a user trigger message to make the UI look normal
-            ins_user = text("INSERT INTO message_store (session_id, message) VALUES (:s, :m)")
-            conn.execute(ins_user, {"s": session_id, "m": f"Run daily network sweep for {timestamp}"})
-            
-            ins_ai = text("INSERT INTO message_store (session_id, message) VALUES (:s, :m)")
-            conn.execute(ins_ai, {"s": session_id, "m": ai_message})
-            
-            conn.commit()
+        set_session_category(session_id, "System Reports")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ai_message = f"**Automated Network Report ({timestamp})**\n```\n{final_report}\n```"
+        history = get_sql_chat_history(session_id)
+        history.add_user_message(f"Run daily network sweep for {timestamp}")
+        history.add_ai_message(ai_message)
     except Exception as e:
         logger.exception("Error saving network sweep report to DB", exc_info=e)
 

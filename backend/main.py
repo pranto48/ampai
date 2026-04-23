@@ -17,7 +17,6 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from agent import chat_with_agent, get_redis_history, get_llm
 from database import (
-    DATABASE_URL,
     add_network_target,
     create_task,
     delete_core_memory,
@@ -29,10 +28,14 @@ from database import (
     get_all_sessions,
     get_core_memories,
     get_network_targets,
+    get_sql_chat_history,
     list_tasks,
     migrate_app_config_encryption,
     set_config,
+    set_session_archived,
     set_session_category,
+    set_session_pinned,
+    touch_session_updated_at,
     update_task,
 )
 from logging_utils import configure_logging, get_logger, reset_request_id, set_request_id
@@ -117,6 +120,10 @@ class ChatRequest(BaseModel):
 
 class CategoryRequest(BaseModel):
     category: str
+
+
+class SessionStateRequest(BaseModel):
+    value: bool = True
 
 
 class ImportMessage(BaseModel):
@@ -308,6 +315,7 @@ def chat(request: ChatRequest, _: UserContext = Depends(require_authenticated_us
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
         )
+        touch_session_updated_at(request.session_id)
         return {
             "response": response.get("content", ""),
             "web_search_status": response.get("web_search_status"),
@@ -351,14 +359,19 @@ async def upload_file(file: UploadFile = File(...), _: UserContext = Depends(req
 
 
 @app.get("/api/sessions")
-def get_sessions(_: UserContext = Depends(require_authenticated_user)):
-    return {"sessions": get_all_sessions()}
+def get_sessions(
+    query: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    archived: Optional[bool] = Query(default=None),
+    _: UserContext = Depends(require_authenticated_user),
+):
+    return {"sessions": get_all_sessions(query=query, category=category, archived=archived)}
 
 
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+        history = get_sql_chat_history(session_id)
         messages = []
         for msg in history.messages:
             messages.append({"type": msg.type, "content": msg.content})
@@ -375,12 +388,26 @@ def update_category(session_id: str, request: CategoryRequest, _: UserContext = 
     return {"status": "success"}
 
 
+@app.patch("/api/sessions/{session_id}/pin")
+def update_pin(session_id: str, request: SessionStateRequest, _: UserContext = Depends(require_authenticated_user)):
+    if not set_session_pinned(session_id, request.value):
+        raise HTTPException(status_code=500, detail="Failed to update pin state")
+    return {"status": "success"}
+
+
+@app.patch("/api/sessions/{session_id}/archive")
+def update_archive(session_id: str, request: SessionStateRequest, _: UserContext = Depends(require_authenticated_user)):
+    if not set_session_archived(session_id, request.value):
+        raise HTTPException(status_code=500, detail="Failed to update archive state")
+    return {"status": "success"}
+
+
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
         delete_session_metadata(session_id)
 
-        sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+        sql_history = get_sql_chat_history(session_id)
         sql_history.clear()
 
         redis_history = get_redis_history(session_id)
@@ -394,7 +421,7 @@ def delete_session(session_id: str, _: UserContext = Depends(require_authenticat
 @app.get("/api/export/{session_id}")
 def export_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+        history = get_sql_chat_history(session_id)
         messages = [{"type": msg.type, "content": msg.content} for msg in history.messages]
 
         sessions = get_all_sessions()
@@ -412,16 +439,29 @@ def export_session(session_id: str, _: UserContext = Depends(require_authenticat
 @app.post("/api/import")
 def import_session(request: ImportRequest, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=request.session_id, connection_string=DATABASE_URL)
+        history = get_sql_chat_history(request.session_id)
+        existing_messages = {(msg.type, msg.content) for msg in history.messages}
+        inserted = 0
+        skipped = 0
 
         for msg in request.messages:
+            key = (msg.type, msg.content)
+            if key in existing_messages:
+                skipped += 1
+                continue
             if msg.type == "human":
                 history.add_user_message(msg.content)
+                inserted += 1
             elif msg.type == "ai":
                 history.add_ai_message(msg.content)
+                inserted += 1
+            else:
+                skipped += 1
+                continue
+            existing_messages.add(key)
 
         set_session_category(request.session_id, request.category)
-        return {"status": "success", "session_id": request.session_id}
+        return {"status": "success", "session_id": request.session_id, "inserted": inserted, "skipped": skipped}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
