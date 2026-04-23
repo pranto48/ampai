@@ -249,18 +249,47 @@
             </div>
 
             <div style="margin-bottom: 20px;">
-                <h3>Backup Destination (Local/FTP)</h3>
+                <h3>Backup Destination (Local/FTP/SMB)</h3>
                 <select id="config-backup-mode" class="modern-input" style="max-width: 200px; margin-bottom: 10px;">
                     <option value="local">Local</option>
                     <option value="ftp">FTP</option>
+                    <option value="smb">SMB</option>
                 </select>
                 <input type="text" id="config-backup-local-path" class="modern-input" placeholder="/tmp/ampai_backups" style="max-width: 520px; margin-bottom: 10px;">
                 <input type="text" id="config-backup-ftp-host" class="modern-input" placeholder="FTP Host" style="max-width: 320px; margin-bottom: 8px;">
                 <input type="text" id="config-backup-ftp-user" class="modern-input" placeholder="FTP User" style="max-width: 320px; margin-bottom: 8px;">
                 <input type="password" id="config-backup-ftp-password" class="modern-input" placeholder="FTP Password" style="max-width: 320px; margin-bottom: 8px;">
                 <input type="text" id="config-backup-ftp-path" class="modern-input" placeholder="/remote/path" style="max-width: 520px;">
+                <button id="test-ftp-connection-btn" class="btn" style="width:auto; margin-top:8px;">Test FTP connection</button>
+                <div style="height: 8px;"></div>
+                <input type="text" id="config-backup-smb-host" class="modern-input" placeholder="SMB Host" style="max-width: 320px; margin-bottom: 8px;">
+                <input type="text" id="config-backup-smb-share" class="modern-input" placeholder="SMB Share" style="max-width: 320px; margin-bottom: 8px;">
+                <input type="text" id="config-backup-smb-path" class="modern-input" placeholder="SMB Path (optional)" style="max-width: 520px; margin-bottom: 8px;">
+                <input type="text" id="config-backup-smb-user" class="modern-input" placeholder="SMB Username" style="max-width: 320px; margin-bottom: 8px;">
+                <input type="password" id="config-backup-smb-password" class="modern-input" placeholder="SMB Password" style="max-width: 320px; margin-bottom: 8px;">
+                <input type="text" id="config-backup-smb-domain" class="modern-input" placeholder="SMB Domain (optional)" style="max-width: 320px; margin-bottom: 8px;">
+                <button id="test-smb-connection-btn" class="btn" style="width:auto; margin-top:8px;">Test SMB connection</button>
+                <div style="height: 8px;"></div>
+                <label style="display:block; font-size:0.85rem; color:var(--text-secondary); margin-top: 8px;">Backup schedule</label>
+                <input type="number" id="config-backup-schedule-hour" class="modern-input" placeholder="Daily hour (UTC)" min="0" max="23" style="max-width: 220px; margin-bottom: 8px;">
+                <input type="number" id="config-backup-schedule-minute" class="modern-input" placeholder="Daily minute" min="0" max="59" style="max-width: 220px; margin-bottom: 8px;">
+                <input type="text" id="config-backup-schedule-cron" class="modern-input" placeholder="Cron override: m h dom mon dow" style="max-width: 420px; margin-bottom: 8px;">
+                <label style="display:flex; align-items:center; gap:8px; margin-top:6px; color:var(--text-secondary); font-size:0.9rem;">
+                    <input type="checkbox" id="config-backup-schedule-enabled"> Enable scheduled backups
+                </label>
                 <button id="run-backup-btn" class="btn" style="width:auto; margin-top:10px;">Run Backup Now</button>
                 <span id="backup-status" style="margin-left:10px; font-size:0.9rem;"></span>
+                <div style="margin-top: 12px;">
+                    <textarea id="backup-restore-json" class="modern-input" rows="4" placeholder="Paste backup JSON to restore" style="max-width: 720px; width: 100%;"></textarea>
+                    <label style="display:flex; align-items:center; gap:8px; color:var(--text-secondary); font-size:0.9rem; margin-top:6px;">
+                        <input type="checkbox" id="backup-restore-dry-run" checked> Dry-run validation only
+                    </label>
+                    <button id="backup-restore-btn" class="btn" style="width:auto; margin-top:8px;">Restore Backup</button>
+                </div>
+                <table class="data-table" style="margin-top: 16px;">
+                    <thead><tr><th>Timestamp</th><th>Trigger</th><th>Status</th><th>Mode</th><th>Details</th></tr></thead>
+                    <tbody id="backup-history-tbody"></tbody>
+                </table>
             </div>
 
             <div style="margin-bottom: 20px;">
