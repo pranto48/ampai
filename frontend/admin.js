@@ -63,13 +63,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const adminDiagnosticsUpdatedAt = document.getElementById('admin-diagnostics-updated-at');
     const adminDiagnosticsContent = document.getElementById('admin-diagnostics-content');
 
-    loadAdminSessions();
-    loadConfigs();
-    loadCoreMemories();
-    loadSystemHealth();
-    loadAdminDiagnostics();
-    setupConfigChangeTracking();
-    setupClearKeyButtons();
+    const initializeAdmin = async () => {
+        const user = await enforceAuth({ requiredRole: 'admin' });
+        if (!user) return;
+        loadAdminSessions();
+        loadConfigs();
+        loadCoreMemories();
+        loadSystemHealth();
+        setupConfigChangeTracking();
+        setupClearKeyButtons();
+    };
+    initializeAdmin();
     refreshHealthBtn.addEventListener('click', loadSystemHealth);
     refreshAdminDiagnosticsBtn.addEventListener('click', loadAdminDiagnostics);
     setInterval(loadSystemHealth, 30000);

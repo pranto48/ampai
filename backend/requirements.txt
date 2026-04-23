@@ -17,3 +17,5 @@ duckduckgo-search
 ddgs
 APScheduler
 cryptography
+python-jose
+passlib[bcrypt]

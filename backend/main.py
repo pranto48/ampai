@@ -3,19 +3,18 @@ import os
 import shutil
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
-from jose import JWTError, jwt
-from passlib.context import CryptContext
 from pydantic import BaseModel
 from redis import Redis
+from sqlalchemy import text
 from zoneinfo import ZoneInfo
 
-from agent import chat_with_agent, get_redis_history, get_llm
+from auth import UserContext, auth_context_middleware, require_admin_user, require_authenticated_user, router as auth_router
+from agent import chat_with_agent, get_llm, get_redis_history
 from database import (
     add_network_target,
     create_task,
@@ -49,14 +48,14 @@ from integrations.outlook_graph import (
     fetch_todays_messages as fetch_outlook_todays_messages,
     refresh_access_token as refresh_outlook_access_token,
 )
-from scheduler import get_scheduler_diagnostics, run_email_digest_job, run_network_sweep, start_scheduler
-
-from sqlalchemy import text
 from logging_utils import configure_logging, get_logger, reset_request_id, set_request_id
+from scheduler import get_scheduler_diagnostics, run_email_digest_job, run_network_sweep, start_scheduler
 
 configure_logging()
 logger = get_logger(__name__)
 app = FastAPI()
+app.middleware("http")(auth_context_middleware)
+app.include_router(auth_router)
 CLEAR_VALUE_SENTINEL = "__CLEAR__"
 SECRET_CONFIG_KEYS = {
     "generic_api_key",
@@ -74,15 +73,6 @@ SECRET_CONFIG_KEYS = {
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-JWT_SECRET = os.getenv("JWT_SECRET")
-if not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET environment variable is required")
-
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class Attachment(BaseModel):
@@ -183,38 +173,6 @@ class EmailSummaryTodayRequest(BaseModel):
     session_id: str = "system_email_reports"
 
 
-class UserLoginResponse(BaseModel):
-    username: str
-    role: str
-
-
-class UserContext(BaseModel):
-    username: str
-    role: str
-
-
-def _build_user_store() -> Dict[str, Dict[str, str]]:
-    admin_username = os.getenv("ADMIN_USERNAME", "admin")
-    admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
-
-    user_username = os.getenv("USER_USERNAME", "user")
-    user_password = os.getenv("USER_PASSWORD", "user123")
-
-    return {
-        admin_username: {
-            "role": "admin",
-            "password_hash": pwd_context.hash(admin_password),
-        },
-        user_username: {
-            "role": "user",
-            "password_hash": pwd_context.hash(user_password),
-        },
-    }
-
-
-USERS = _build_user_store()
-
-
 def _load_integration_credentials(provider: str) -> Dict[str, str]:
     raw = get_config(f"integration_email_{provider}_credentials", "{}")
     try:
@@ -255,13 +213,6 @@ def _fetch_todays_email_messages(provider: str, timezone_name: str, max_results:
     if provider == "outlook":
         return fetch_outlook_todays_messages(access_token=access_token, tz=timezone_name, max_results=max_results)
     raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
-
-
-def _create_access_token(data: Dict[str, str]) -> str:
-    payload = data.copy()
-    expiry = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRY_MINUTES)
-    payload.update({"exp": expiry})
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 def _check_db_health() -> dict:
@@ -306,104 +257,6 @@ def _check_search_provider_health() -> dict:
     if fallback == "custom":
         return {"ok": bool(configs.get("custom_web_search_url")), "provider": "custom"}
     return {"ok": True, "provider": "duckduckgo"}
-
-
-def _check_vector_index_health() -> dict:
-    model_type = (get_all_configs().get("default_model") or "ollama").strip().lower()
-    try:
-        indexer = MemoryIndexer(model_type=model_type)
-        if not getattr(indexer, "enabled", False):
-            return {"ok": False, "details": "Vector index unavailable", "provider": model_type}
-        return {"ok": True, "provider": model_type}
-    except Exception as exc:
-        return {"ok": False, "provider": model_type, "details": str(exc)}
-
-
-def _build_config_sanity() -> dict:
-    configs = get_all_configs()
-    default_model = (configs.get("default_model") or "ollama").strip().lower()
-    required_keys = {
-        "openai": ["openai_api_key"],
-        "gemini": ["gemini_api_key"],
-        "anthropic": ["anthropic_api_key"],
-        "openrouter": ["openrouter_api_key"],
-        "anythingllm": ["anythingllm_base_url"],
-        "generic": ["generic_base_url"],
-    }.get(default_model, [])
-    missing = [key for key in required_keys if not (configs.get(key) or "").strip()]
-
-    digest_hour = int(configs.get("email_digest_hour") or 7)
-    digest_minute = int(configs.get("email_digest_minute") or 30)
-    schedule_ok = 0 <= digest_hour <= 23 and 0 <= digest_minute <= 59
-    return {
-        "default_model": default_model,
-        "required_keys_ok": not missing,
-        "missing_required_keys": missing,
-        "digest_schedule_ok": schedule_ok,
-        "email_digest_hour": digest_hour,
-        "email_digest_minute": digest_minute,
-    }
-
-
-def _get_current_user(access_token: Optional[str] = None) -> UserContext:
-    if not access_token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-
-    try:
-        payload = jwt.decode(access_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        username = payload.get("sub")
-        role = payload.get("role")
-        if not username or role not in {"admin", "user"}:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
-        return UserContext(username=username, role=role)
-    except JWTError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
-
-
-def get_current_user_from_cookie(request: Request):
-    token = request.cookies.get("access_token")
-    return _get_current_user(token)
-
-
-def require_authenticated_user(current_user: UserContext = Depends(get_current_user_from_cookie)) -> UserContext:
-    return current_user
-
-
-def require_admin_user(current_user: UserContext = Depends(get_current_user_from_cookie)) -> UserContext:
-    if current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
-    return current_user
-
-
-@app.post("/api/auth/login", response_model=UserLoginResponse)
-def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = USERS.get(form_data.username)
-    if not user or not pwd_context.verify(form_data.password, user["password_hash"]):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
-
-    token = _create_access_token({"sub": form_data.username, "role": user["role"]})
-    response = Response(content=UserLoginResponse(username=form_data.username, role=user["role"]).model_dump_json(), media_type="application/json")
-    response.set_cookie(
-        key="access_token",
-        value=token,
-        httponly=True,
-        samesite="lax",
-        secure=False,
-        max_age=JWT_EXPIRY_MINUTES * 60,
-    )
-    return response
-
-
-@app.post("/api/auth/logout")
-def logout():
-    response = Response(content='{"status":"success"}', media_type="application/json")
-    response.delete_cookie("access_token")
-    return response
-
-
-@app.get("/api/auth/me", response_model=UserContext)
-def auth_me(current_user: UserContext = Depends(require_authenticated_user)):
-    return current_user
 
 
 @app.post("/api/chat")
@@ -663,7 +516,7 @@ def update_admin_configs(request: ConfigUpdateRequest, _: UserContext = Depends(
     return {"status": "success"}
 
 @app.post("/api/admin/configs/migrate")
-def migrate_admin_configs():
+def migrate_admin_configs(_: UserContext = Depends(require_admin_user)):
     result = migrate_app_config_encryption()
     return {"status": "success", **result}
 
