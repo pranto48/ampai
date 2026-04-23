@@ -1,9 +1,10 @@
 import os
 import logging
 import hashlib
+import json
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Tuple
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, Boolean, select, inspect, text
 from cryptography.fernet import Fernet, InvalidToken
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from logging_utils import get_logger
@@ -88,6 +89,16 @@ memory_group_sessions = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("group_id", Integer, nullable=False),
     Column("session_id", String, nullable=False),
+)
+
+session_access = Table(
+    "session_access",
+    metadata,
+    Column("session_id", String, primary_key=True),
+    Column("owner_username", String, nullable=False),
+    Column("visibility", String, nullable=False, default="private"),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
 
 tasks = Table(
@@ -271,7 +282,7 @@ def touch_session(session_id: str):
         logger.warning(f"Error touching session: {e}")
 
 
-def get_all_sessions(query: str = "", include_archived: bool = False):
+def get_all_sessions(query: str = "", category: Optional[str] = None, archived: Optional[bool] = None):
     if not engine:
         return []
     try:
@@ -280,24 +291,13 @@ def get_all_sessions(query: str = "", include_archived: bool = False):
             if not inspector.has_table(CHAT_HISTORY_TABLE):
                 return []
 
-            # Derive sessions from the same canonical SQL history table used by /api/history.
             session_rows = conn.execute(
                 text(
-                    f"SELECT id, session_id, message FROM {CHAT_HISTORY_TABLE} "
-                    "WHERE session_id IS NOT NULL ORDER BY id ASC"
+                    f"SELECT DISTINCT session_id FROM {CHAT_HISTORY_TABLE} "
+                    "WHERE session_id IS NOT NULL ORDER BY session_id ASC"
                 )
             ).fetchall()
-
-            # Safeguard: filter malformed/partial records and dedupe duplicated message rows.
-            by_session = {}
-            for _, session_id, raw_message in session_rows:
-                if not session_id or not raw_message:
-                    continue
-                parsed = _parse_chat_payload(raw_message)
-                if not parsed:
-                    continue
-
-                msg_type, content = parsed
+            session_ids = [row[0] for row in session_rows if row and row[0]]
 
             stmt_meta = select(
                 session_metadata.c.session_id,
@@ -325,9 +325,11 @@ def get_all_sessions(query: str = "", include_archived: bool = False):
                     "archived": False,
                     "updated_at": None,
                 })
-                if not include_archived and meta["archived"]:
+                if archived is not None and meta["archived"] != bool(archived):
                     continue
                 if q and q not in s_id.lower() and q not in meta["category"].lower():
+                    continue
+                if category and meta["category"] != category:
                     continue
                 output.append({"session_id": s_id, **meta})
 
@@ -1098,6 +1100,127 @@ def list_shared_sessions_for_user(username: str):
         return []
 
 
+def ensure_session_access_schema() -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS session_access ("
+                    "session_id VARCHAR PRIMARY KEY, "
+                    "owner_username VARCHAR NOT NULL, "
+                    "visibility VARCHAR NOT NULL DEFAULT 'private', "
+                    "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+                    "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+                )
+            )
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_session_access_owner ON session_access(owner_username)"))
+            conn.commit()
+    except Exception as e:
+        logger.exception("Error ensuring session_access schema", exc_info=e)
+
+
+def set_session_owner(session_id: str, owner_username: str, visibility: str = "private") -> bool:
+    if not engine:
+        return False
+    ensure_session_access_schema()
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO session_access (session_id, owner_username, visibility, created_at, updated_at) "
+                    "VALUES (:session_id, :owner_username, :visibility, NOW(), NOW()) "
+                    "ON CONFLICT (session_id) DO UPDATE SET "
+                    "owner_username = EXCLUDED.owner_username, "
+                    "visibility = EXCLUDED.visibility, "
+                    "updated_at = NOW()"
+                ),
+                {
+                    "session_id": session_id,
+                    "owner_username": owner_username,
+                    "visibility": visibility or "private",
+                },
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.exception("Error setting session owner", exc_info=e)
+        return False
+
+
+def get_session_owner(session_id: str) -> Optional[str]:
+    if not engine:
+        return None
+    ensure_session_access_schema()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT owner_username FROM session_access WHERE session_id = :session_id"),
+                {"session_id": session_id},
+            ).first()
+            return row[0] if row else None
+    except Exception as e:
+        logger.exception("Error getting session owner", exc_info=e)
+        return None
+
+
+def session_exists(session_id: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(f"SELECT 1 FROM {CHAT_HISTORY_TABLE} WHERE session_id = :session_id LIMIT 1"),
+                {"session_id": session_id},
+            ).first()
+            if row:
+                return True
+            md_row = conn.execute(
+                text("SELECT 1 FROM session_metadata WHERE session_id = :session_id LIMIT 1"),
+                {"session_id": session_id},
+            ).first()
+            if md_row:
+                return True
+            ensure_session_access_schema()
+            access_row = conn.execute(
+                text("SELECT 1 FROM session_access WHERE session_id = :session_id LIMIT 1"),
+                {"session_id": session_id},
+            ).first()
+            return bool(access_row)
+    except Exception as e:
+        logger.exception("Error checking session existence", exc_info=e)
+        return False
+
+
+def user_can_access_session(session_id: str, username: str, role: str) -> bool:
+    if role == "admin":
+        return True
+    if not engine:
+        return False
+    ensure_session_access_schema()
+    try:
+        shared_ids = set(list_shared_sessions_for_user(username))
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT owner_username, visibility FROM session_access WHERE session_id = :session_id"),
+                {"session_id": session_id},
+            ).first()
+            if row:
+                owner_username, visibility = row
+                if owner_username == username:
+                    return True
+                if visibility == "public":
+                    return True
+                if session_id in shared_ids:
+                    return True
+                return False
+            return session_id in shared_ids
+    except Exception as e:
+        logger.exception("Error checking session access", exc_info=e)
+        return False
+
+
 def add_media_asset(username: str, session_id: Optional[str], filename: str, url: str, mime_type: Optional[str]) -> bool:
     if not engine:
         return False
@@ -1433,3 +1556,6 @@ def export_all_sessions_for_backup():
     except Exception as e:
         logger.exception("Error exporting sessions for backup", exc_info=e)
         return []
+
+
+ensure_session_access_schema()

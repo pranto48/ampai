@@ -49,6 +49,10 @@ from database import (
     share_session_to_group,
     list_memory_groups_for_user,
     list_shared_sessions_for_user,
+    get_session_owner,
+    session_exists,
+    set_session_owner,
+    user_can_access_session,
     export_all_sessions_for_backup,
     list_chat_messages,
     get_sql_chat_history,
@@ -58,6 +62,7 @@ from database import (
     set_session_archived,
     set_session_category,
     set_session_pinned,
+    touch_session,
     touch_session_updated_at,
     update_task,
 )
@@ -395,10 +400,26 @@ app.include_router(auth_router)
 app.include_router(admin_users_router)
 
 
+def _enforce_session_access_or_403(session_id: str, current_user: UserContext) -> None:
+    if user_can_access_session(session_id, current_user.username, current_user.role):
+        return
+    if session_exists(session_id):
+        raise HTTPException(status_code=403, detail="Forbidden: you do not have permission to access this session")
+    raise HTTPException(status_code=404, detail="Session not found")
+
+
+def _ensure_session_owner_for_user(session_id: str, current_user: UserContext) -> None:
+    if current_user.role == "admin":
+        return
+    if get_session_owner(session_id):
+        return
+    set_session_owner(session_id=session_id, owner_username=current_user.username, visibility="private")
+
 
 @app.post("/api/chat")
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
+        _ensure_session_owner_for_user(request.session_id, user)
         result = chat_with_agent(
             session_id=request.session_id,
             message=request.message,
@@ -494,6 +515,10 @@ async def upload_file(
     current_user: UserContext = Depends(require_authenticated_user),
 ):
     try:
+        owner_username = current_user.username
+        if session_id:
+            _enforce_session_access_or_403(session_id, current_user)
+            owner_username = get_session_owner(session_id) or current_user.username
         file_ext = os.path.splitext(file.filename)[1]
         unique_filename = f"{uuid.uuid4()}{file_ext}"
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
@@ -521,7 +546,7 @@ async def upload_file(
             "extracted_text": extracted_text,
         }
         add_media_asset(
-            username=current_user.username,
+            username=owner_username,
             session_id=session_id,
             filename=file.filename,
             url=payload["url"],
@@ -549,18 +574,29 @@ def get_sessions(
     archived: Optional[bool] = Query(default=None),
     current_user: UserContext = Depends(require_authenticated_user),
 ):
-    sessions = get_all_sessions(query=query, category=category, archived=archived)
-    if current_user.role != "admin":
-        shared_ids = set(list_shared_sessions_for_user(current_user.username))
-        for session in sessions:
-            if session["session_id"] in shared_ids:
-                session["shared_via_group"] = True
+    sessions = get_all_sessions(query=query or "", category=category, archived=archived)
+    if current_user.role == "admin":
+        return {"sessions": sessions}
+
+    shared_ids = set(list_shared_sessions_for_user(current_user.username))
+    filtered_sessions = []
+    for session in sessions:
+        sid = session["session_id"]
+        owner = get_session_owner(sid)
+        if owner == current_user.username:
+            filtered_sessions.append(session)
+            continue
+        if sid in shared_ids:
+            session["shared_via_group"] = True
+            filtered_sessions.append(session)
+    sessions = filtered_sessions
     return {"sessions": sessions}
 
 
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str, user=Depends(require_authenticated_user)):
     try:
+        _enforce_session_access_or_403(session_id, user)
         messages = list_chat_messages(session_id, dedupe=True)
         return {"messages": messages}
     except Exception as e:
@@ -578,6 +614,7 @@ def update_category(session_id: str, request: CategoryRequest, user=Depends(requ
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str, user=Depends(require_authenticated_user)):
     try:
+        _enforce_session_access_or_403(session_id, user)
         delete_session_metadata(session_id)
         SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL).clear()
         get_redis_history(session_id).clear()
@@ -589,6 +626,7 @@ def delete_session(session_id: str, user=Depends(require_authenticated_user)):
 @app.get("/api/export/{session_id}")
 def export_session(session_id: str, user=Depends(require_authenticated_user)):
     try:
+        _enforce_session_access_or_403(session_id, user)
         messages = list_chat_messages(session_id, dedupe=True)
 
         sessions = get_all_sessions()
@@ -606,6 +644,10 @@ def export_session(session_id: str, user=Depends(require_authenticated_user)):
 @app.post("/api/import")
 def import_session(request: ImportRequest, user=Depends(require_authenticated_user)):
     try:
+        if session_exists(request.session_id):
+            _enforce_session_access_or_403(request.session_id, user)
+        else:
+            set_session_owner(session_id=request.session_id, owner_username=user.username, visibility="private")
         history = get_sql_chat_history(request.session_id)
         existing_messages = {(msg["type"], msg["content"]) for msg in list_chat_messages(request.session_id, dedupe=False)}
         inserted = 0
@@ -771,6 +813,8 @@ def admin_add_group_member(group_id: int, username: str, _: UserContext = Depend
 
 @app.post("/api/admin/memory-groups/{group_id}/share")
 def admin_share_session(group_id: int, request: MemoryGroupShareRequest, _: UserContext = Depends(require_admin_user)):
+    if not get_session_owner(request.session_id):
+        set_session_owner(session_id=request.session_id, owner_username="admin", visibility="private")
     if not share_session_to_group(group_id, request.session_id):
         raise HTTPException(status_code=500, detail="Failed to share session")
     return {"status": "success"}
