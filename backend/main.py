@@ -1,24 +1,27 @@
-import json
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+import logging
 import os
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta, timezone
 import shutil
-import time
 import uuid
 import ftplib
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
+from redis import Redis
+from sqlalchemy import text
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
-from fastapi.security import OAuth2PasswordRequestForm
-
-from agent import chat_with_agent, get_redis_history, get_llm
+from auth import UserContext, auth_context_middleware, require_admin_user, require_authenticated_user, router as auth_router
+from agent import chat_with_agent, get_llm, get_redis_history
 from database import (
     add_network_target,
     create_task,
@@ -61,43 +64,26 @@ from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
     refresh_access_token as refresh_gmail_access_token,
 )
-from integrations.outlook_graph import (
-    fetch_todays_messages as fetch_outlook_todays_messages,
-    refresh_access_token as refresh_outlook_access_token,
+from agent import chat_with_agent, get_redis_history
+from scheduler import start_scheduler, run_network_sweep
+from langchain_community.chat_message_histories import SQLChatMessageHistory
+from auth import (
+    router as auth_router,
+    admin_router as admin_users_router,
+    require_authenticated_user,
+    require_admin_user,
+    bootstrap_default_admin,
 )
-from scheduler import run_network_sweep, run_email_digest_job, start_scheduler
 
-from sqlalchemy import text
-
-configure_logging()
-logger = get_logger(__name__)
 app = FastAPI()
-CLEAR_VALUE_SENTINEL = "__CLEAR__"
-SECRET_CONFIG_KEYS = {
-    "generic_api_key",
-    "openai_api_key",
-    "gemini_api_key",
-    "anthropic_api_key",
-    "openrouter_api_key",
-    "anythingllm_api_key",
-    "serpapi_api_key",
-    "bing_api_key",
-    "custom_web_search_api_key",
-    "integration_email_gmail_credentials",
-    "integration_email_outlook_credentials",
-}
+logger = logging.getLogger("ampai")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-JWT_SECRET = os.getenv("JWT_SECRET")
-if not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET environment variable is required")
-
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+USER_TOKEN = os.getenv("AMPAI_USER_TOKEN", "ampai-user")
+ADMIN_TOKEN = os.getenv("AMPAI_ADMIN_TOKEN", "ampai-admin")
 
 
 class Attachment(BaseModel):
@@ -111,32 +97,6 @@ class TargetModel(BaseModel):
     name: str
     ip_address: str
 
-@app.on_event("startup")
-def startup_event():
-    start_scheduler()
-    migrate_app_config_encryption()
-
-
-@app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-    token = set_request_id(request_id)
-    request.state.request_id = request_id
-    started = datetime.now(timezone.utc)
-    try:
-        response = await call_next(request)
-    except Exception:
-        logger.exception("HTTP request failed", extra={"path": request.url.path, "method": request.method})
-        reset_request_id(token)
-        raise
-    elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
-    logger.info(
-        "HTTP request completed",
-        extra={"path": request.url.path, "method": request.method, "status_code": response.status_code, "elapsed_ms": elapsed_ms},
-    )
-    reset_request_id(token)
-    response.headers["X-Request-ID"] = request_id
-    return response
 
 class ChatRequest(BaseModel):
     session_id: str
@@ -152,8 +112,8 @@ class CategoryRequest(BaseModel):
     category: str
 
 
-class SessionStateRequest(BaseModel):
-    value: bool = True
+class SessionFlagsRequest(BaseModel):
+    value: bool
 
 
 class ImportMessage(BaseModel):
@@ -199,8 +159,7 @@ class MemoryGroupShareRequest(BaseModel):
 
 class TaskCreateRequest(BaseModel):
     title: str
-    description: Optional[str] = ""
-    status: str = "todo"
+    description: str = ""
     priority: str = "medium"
     due_at: Optional[str] = None
     session_id: Optional[str] = None
@@ -215,11 +174,8 @@ class TaskUpdateRequest(BaseModel):
     session_id: Optional[str] = None
 
 
-class EmailSummaryTodayRequest(BaseModel):
-    provider: str = "outlook"
-    timezone: str = "UTC"
-    max_results: int = 25
-    model_type: Optional[str] = None
+class EmailSummaryRequest(BaseModel):
+    model_type: str = "ollama"
     api_key: Optional[str] = None
     session_id: str = "system_email_reports"
 
@@ -402,23 +358,21 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
     )
     return response
 
-
-@app.post("/api/auth/logout")
-def logout():
-    response = Response(content='{"status":"success"}', media_type="application/json")
-    response.delete_cookie("access_token")
-    return response
+@app.on_event("startup")
+def startup_event():
+    bootstrap_default_admin()
+    start_scheduler()
 
 
-@app.get("/api/auth/me", response_model=UserContext)
-def auth_me(current_user: UserContext = Depends(require_authenticated_user)):
-    return current_user
+app.include_router(auth_router)
+app.include_router(admin_users_router)
+
 
 
 @app.post("/api/chat")
-def chat(request: ChatRequest, _: UserContext = Depends(require_authenticated_user)):
+def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
-        response = chat_with_agent(
+        result = chat_with_agent(
             session_id=request.session_id,
             message=request.message,
             model_type=request.model_type,
@@ -427,69 +381,11 @@ def chat(request: ChatRequest, _: UserContext = Depends(require_authenticated_us
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
         )
-        touch_session_updated_at(request.session_id)
-        return {
-            "response": response.get("content", ""),
-            "web_search_status": response.get("web_search_status"),
-        }
+        touch_session(request.session_id)
+        return result
     except Exception as e:
+        logger.exception("chat failed")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/integrations/email/summary-today")
-def summarize_todays_email(request: EmailSummaryTodayRequest, _: UserContext = Depends(require_authenticated_user)):
-    provider = request.provider.strip().lower()
-    tz_name = request.timezone.strip() or "UTC"
-    try:
-        ZoneInfo(tz_name)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid timezone: {tz_name}") from exc
-
-    messages = _fetch_todays_email_messages(
-        provider=provider,
-        timezone_name=tz_name,
-        max_results=max(1, min(request.max_results, 100)),
-    )
-
-    if not messages:
-        return {"status": "success", "summary": "No messages found for today.", "messages_count": 0}
-
-    digest_lines = []
-    for idx, msg in enumerate(messages, 1):
-        digest_lines.append(
-            f"{idx}. From: {msg.get('from', '')}\n"
-            f"   Subject: {msg.get('subject', '(No subject)')}\n"
-            f"   Date: {msg.get('date', '')}\n"
-            f"   Snippet: {msg.get('snippet', '')}"
-        )
-
-    date_label = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
-    prompt = (
-        f"Summarize my {provider.title()} email inbox for {date_label} ({tz_name}). "
-        "Provide: (1) key topics, (2) urgent follow-ups, (3) calendar/time-sensitive items, "
-        "(4) a concise executive digest.\n\n"
-        "Today's messages:\n"
-        + "\n\n".join(digest_lines)
-    )
-
-    model_type = request.model_type or get_config("default_model", "ollama")
-    result = chat_with_agent(
-        session_id=request.session_id,
-        message=prompt,
-        model_type=model_type,
-        api_key=request.api_key,
-        memory_mode="full",
-        use_web_search=False,
-        attachments=[],
-    )
-    return {
-        "status": "success",
-        "provider": provider,
-        "timezone": tz_name,
-        "messages_count": len(messages),
-        "summary": result.get("content", ""),
-        "session_id": request.session_id,
-    }
 
 
 @app.post("/api/upload")
@@ -502,7 +398,6 @@ async def upload_file(
         file_ext = os.path.splitext(file.filename)[1]
         unique_filename = f"{uuid.uuid4()}{file_ext}"
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
-
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
@@ -515,7 +410,7 @@ async def upload_file(
                     reader = PyPDF2.PdfReader(pdf_file)
                     extracted_text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
             except Exception as e:
-                logger.exception("PDF parsing error", exc_info=e)
+                logger.warning("PDF parsing error: %s", e)
         elif file_ext.lower() in [".txt", ".csv", ".json", ".md", ".py", ".js", ".html", ".css"]:
             with open(file_path, "r", encoding="utf-8") as text_file:
                 extracted_text = text_file.read()
@@ -565,7 +460,7 @@ def get_sessions(
 
 
 @app.get("/api/history/{session_id}")
-def get_history(session_id: str, _: UserContext = Depends(require_authenticated_user)):
+def get_history(session_id: str, user=Depends(require_authenticated_user)):
     try:
         messages = list_chat_messages(session_id, dedupe=True)
         return {"messages": messages}
@@ -574,45 +469,26 @@ def get_history(session_id: str, _: UserContext = Depends(require_authenticated_
 
 
 @app.post("/api/sessions/{session_id}/category")
-def update_category(session_id: str, request: CategoryRequest, _: UserContext = Depends(require_authenticated_user)):
+def update_category(session_id: str, request: CategoryRequest, user=Depends(require_authenticated_user)):
     success = set_session_category(session_id, request.category)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to update category")
     return {"status": "success"}
 
 
-@app.patch("/api/sessions/{session_id}/pin")
-def update_pin(session_id: str, request: SessionStateRequest, _: UserContext = Depends(require_authenticated_user)):
-    if not set_session_pinned(session_id, request.value):
-        raise HTTPException(status_code=500, detail="Failed to update pin state")
-    return {"status": "success"}
-
-
-@app.patch("/api/sessions/{session_id}/archive")
-def update_archive(session_id: str, request: SessionStateRequest, _: UserContext = Depends(require_authenticated_user)):
-    if not set_session_archived(session_id, request.value):
-        raise HTTPException(status_code=500, detail="Failed to update archive state")
-    return {"status": "success"}
-
-
 @app.delete("/api/sessions/{session_id}")
-def delete_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
+def delete_session(session_id: str, user=Depends(require_authenticated_user)):
     try:
         delete_session_metadata(session_id)
-
-        sql_history = get_sql_chat_history(session_id)
-        sql_history.clear()
-
-        redis_history = get_redis_history(session_id)
-        redis_history.clear()
-
+        SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL).clear()
+        get_redis_history(session_id).clear()
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/export/{session_id}")
-def export_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
+def export_session(session_id: str, user=Depends(require_authenticated_user)):
     try:
         messages = list_chat_messages(session_id, dedupe=True)
 
@@ -629,7 +505,7 @@ def export_session(session_id: str, _: UserContext = Depends(require_authenticat
 
 
 @app.post("/api/import")
-def import_session(request: ImportRequest, _: UserContext = Depends(require_authenticated_user)):
+def import_session(request: ImportRequest, user=Depends(require_authenticated_user)):
     try:
         history = get_sql_chat_history(request.session_id)
         existing_messages = {(msg["type"], msg["content"]) for msg in list_chat_messages(request.session_id, dedupe=False)}
@@ -646,14 +522,9 @@ def import_session(request: ImportRequest, _: UserContext = Depends(require_auth
                 inserted += 1
             elif msg.type == "ai":
                 history.add_ai_message(msg.content)
-                inserted += 1
-            else:
-                skipped += 1
-                continue
-            existing_messages.add(key)
-
         set_session_category(request.session_id, request.category)
-        return {"status": "success", "session_id": request.session_id, "inserted": inserted, "skipped": skipped}
+        touch_session(request.session_id)
+        return {"status": "success", "session_id": request.session_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -669,7 +540,7 @@ def get_history_duplicates(_: UserContext = Depends(require_admin_user)):
 
 
 @app.get("/api/admin/configs")
-def get_admin_configs(_: UserContext = Depends(require_admin_user)):
+def get_admin_configs(user=Depends(require_admin_user)):
     configs = get_all_configs()
     masked = {}
     for k, v in configs.items():
@@ -686,11 +557,9 @@ def get_admin_configs(_: UserContext = Depends(require_admin_user)):
 
 
 @app.post("/api/admin/configs")
-def update_admin_configs(request: ConfigUpdateRequest, _: UserContext = Depends(require_admin_user)):
+def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admin_user)):
     for k, v in request.configs.items():
-        if v == CLEAR_VALUE_SENTINEL:
-            set_config(k, "")
-        elif v and "..." not in v: # Dont save masked passwords
+        if v and "..." not in v:
             set_config(k, v)
     return {"status": "success"}
 
@@ -850,7 +719,7 @@ def migrate_admin_configs():
     return {"status": "success", **result}
 
 @app.get("/api/configs/status")
-def get_configs_status(_: UserContext = Depends(require_authenticated_user)):
+def get_configs_status(user=Depends(require_authenticated_user)):
     configs = get_all_configs()
     return {
         "openai": bool(configs.get("openai_api_key")),
@@ -866,12 +735,12 @@ def get_configs_status(_: UserContext = Depends(require_authenticated_user)):
 
 
 @app.get("/api/admin/core-memories")
-def api_get_core_memories(_: UserContext = Depends(require_admin_user)):
+def api_get_core_memories(user=Depends(require_admin_user)):
     return {"core_memories": get_core_memories()}
 
 
 @app.delete("/api/admin/core-memories/{mem_id}")
-def api_delete_core_memory(mem_id: int, _: UserContext = Depends(require_admin_user)):
+def api_delete_core_memory(mem_id: int, user=Depends(require_admin_user)):
     success = delete_core_memory(mem_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to delete core memory")
@@ -879,70 +748,12 @@ def api_delete_core_memory(mem_id: int, _: UserContext = Depends(require_admin_u
 
 
 @app.get("/api/targets")
-def get_targets(_: UserContext = Depends(require_admin_user)):
+def get_targets(user=Depends(require_admin_user)):
     return get_network_targets()
 
 
-@app.post("/api/tasks")
-def api_create_task(request: TaskCreateRequest, _: UserContext = Depends(require_authenticated_user)):
-    task = create_task(
-        title=request.title,
-        description=request.description or "",
-        status=request.status,
-        priority=request.priority,
-        due_at=request.due_at,
-        session_id=request.session_id,
-    )
-    if not task:
-        raise HTTPException(status_code=500, detail="Failed to create task")
-    return {"task": task}
-
-
-@app.get("/api/tasks")
-def api_get_tasks(
-    status: Optional[str] = None,
-    priority: Optional[str] = None,
-    session_id: Optional[str] = None,
-    due_before: Optional[str] = None,
-    due_after: Optional[str] = None,
-    _: UserContext = Depends(require_authenticated_user),
-):
-    return {
-        "tasks": list_tasks(
-            status=status,
-            priority=priority,
-            session_id=session_id,
-            due_before=due_before,
-            due_after=due_after,
-        )
-    }
-
-
-@app.patch("/api/tasks/{task_id}")
-def api_patch_task(task_id: int, request: TaskUpdateRequest, _: UserContext = Depends(require_authenticated_user)):
-    task = update_task(
-        task_id=task_id,
-        title=request.title,
-        description=request.description,
-        status=request.status,
-        priority=request.priority,
-        due_at=request.due_at,
-        session_id=request.session_id,
-    )
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return {"task": task}
-
-
-@app.delete("/api/tasks/{task_id}")
-def api_delete_task(task_id: int, _: UserContext = Depends(require_authenticated_user)):
-    if not delete_task(task_id):
-        raise HTTPException(status_code=404, detail="Task not found")
-    return {"status": "success"}
-
-
 @app.post("/api/targets")
-def create_target(target: TargetModel, _: UserContext = Depends(require_admin_user)):
+def create_target(target: TargetModel, user=Depends(require_admin_user)):
     success = add_network_target(target.name, target.ip_address)
     if success:
         return {"status": "success"}
@@ -950,7 +761,7 @@ def create_target(target: TargetModel, _: UserContext = Depends(require_admin_us
 
 
 @app.delete("/api/targets/{target_id}")
-def remove_target(target_id: int, _: UserContext = Depends(require_admin_user)):
+def remove_target(target_id: int, user=Depends(require_admin_user)):
     success = delete_network_target(target_id)
     if success:
         return {"status": "success"}
@@ -958,15 +769,109 @@ def remove_target(target_id: int, _: UserContext = Depends(require_admin_user)):
 
 
 @app.post("/api/targets/run")
-def run_sweep_now(_: UserContext = Depends(require_admin_user)):
+def run_sweep_now(user=Depends(require_admin_user)):
     run_network_sweep()
     return {"status": "success"}
 
 
-@app.post("/api/admin/integrations/email/digest/run")
-def run_email_digest_now(_: UserContext = Depends(require_admin_user)):
-    run_email_digest_job()
+@app.post("/api/tasks")
+def api_create_task(request: TaskCreateRequest, user=Depends(require_authenticated_user)):
+    task_id = create_task(request.title, request.description, request.priority, request.due_at, request.session_id)
+    if not task_id:
+        raise HTTPException(status_code=500, detail="Failed to create task")
+    return {"status": "success", "id": task_id}
+
+
+@app.get("/api/tasks")
+def api_list_tasks(status: Optional[str] = None, user=Depends(require_authenticated_user)):
+    return {"tasks": list_tasks(status=status)}
+
+
+@app.patch("/api/tasks/{task_id}")
+def api_update_task(task_id: int, request: TaskUpdateRequest, user=Depends(require_authenticated_user)):
+    if not update_task(task_id, request.dict()):
+        raise HTTPException(status_code=500, detail="Failed to update task")
     return {"status": "success"}
+
+
+@app.delete("/api/tasks/{task_id}")
+def api_delete_task(task_id: int, user=Depends(require_authenticated_user)):
+    if not delete_task(task_id):
+        raise HTTPException(status_code=500, detail="Failed to delete task")
+    return {"status": "success"}
+
+
+def _decode_subject(raw_subject) -> str:
+    if not raw_subject:
+        return "(No Subject)"
+    parts = decode_header(raw_subject)
+    out = []
+    for chunk, enc in parts:
+        if isinstance(chunk, bytes):
+            out.append(chunk.decode(enc or "utf-8", errors="ignore"))
+        else:
+            out.append(chunk)
+    return "".join(out)
+
+
+@app.post("/api/email/summary/today")
+def summarize_today_email(request: EmailSummaryRequest, user=Depends(require_authenticated_user)):
+    configs = get_all_configs()
+    host = configs.get("imap_host")
+    username = configs.get("imap_username")
+    password = configs.get("imap_password")
+    if not host or not username or not password:
+        raise HTTPException(status_code=400, detail="Set imap_host, imap_username, imap_password in admin configs")
+
+    today = datetime.now().strftime("%d-%b-%Y")
+    items = []
+    try:
+        with imaplib.IMAP4_SSL(host) as mail:
+            mail.login(username, password)
+            mail.select("INBOX")
+            status, data = mail.search(None, f'(SINCE "{today}")')
+            if status != "OK":
+                raise HTTPException(status_code=500, detail="Failed to query mailbox")
+            for num in data[0].split()[-50:]:
+                _, msg_data = mail.fetch(num, "(RFC822)")
+                msg = email.message_from_bytes(msg_data[0][1])
+                frm = msg.get("From", "Unknown")
+                subject = _decode_subject(msg.get("Subject", ""))
+                date = msg.get("Date", "")
+                items.append(f"From: {frm}\nSubject: {subject}\nDate: {date}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Email fetch error: {e}")
+
+    if not items:
+        return {"summary": "No emails found for today.", "email_count": 0}
+
+    prompt = (
+        "Summarize today's emails into: key updates, urgent actions, follow-ups, and decisions.\n\n" +
+        "\n\n---\n\n".join(items)
+    )
+    result = chat_with_agent(
+        session_id="system_email_reports",
+        message=prompt,
+        model_type=request.model_type,
+        api_key=request.api_key,
+        memory_mode="indexed",
+        use_web_search=False,
+        attachments=[]
+    )
+    return {"summary": result.get("response") if isinstance(result, dict) else result, "email_count": len(items)}
+
+
+@app.get("/api/health")
+def health(user=Depends(require_admin_user)):
+    configs = get_all_configs()
+    return {
+        "status": "ok",
+        "time": datetime.now(timezone.utc).isoformat(),
+        "database_url_set": bool(DATABASE_URL),
+        "redis_url_set": bool(os.getenv("REDIS_URL")),
+        "web_search_ready": True,
+        "imap_ready": bool(configs.get("imap_host") and configs.get("imap_username") and configs.get("imap_password"))
+    }
 
 
 def get_latest_mtime(directories):
@@ -989,36 +894,11 @@ def get_latest_mtime(directories):
 
 
 @app.get("/api/status")
-def get_status(_: UserContext = Depends(require_authenticated_user)):
+def get_status(user=Depends(require_authenticated_user)):
     backend_path = os.path.dirname(__file__)
     frontend_path = os.path.join(backend_path, "..", "frontend")
     latest_mtime = get_latest_mtime([backend_path, frontend_path])
     return {"latest_mtime": latest_mtime}
-
-
-@app.get("/api/health")
-def get_health(_: UserContext = Depends(require_admin_user)):
-    db_health = _check_db_health()
-    redis_health = _check_redis_health()
-    model_health = _check_model_provider_health()
-    search_health = _check_search_provider_health()
-    scheduler_health = get_scheduler_diagnostics()
-    overall_ok = all([
-        db_health.get("ok"),
-        redis_health.get("ok"),
-        model_health.get("ok"),
-        search_health.get("ok"),
-    ])
-    return {
-        "ok": overall_ok,
-        "checks": {
-            "db": db_health,
-            "redis": redis_health,
-            "model_provider": model_health,
-            "search_provider": search_health,
-            "scheduler": scheduler_health,
-        },
-    }
 
 
 if os.path.exists(UPLOAD_DIR):
