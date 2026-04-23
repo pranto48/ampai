@@ -6,17 +6,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
-from langchain_community.chat_message_histories import SQLChatMessageHistory
 from passlib.context import CryptContext
 from pydantic import BaseModel
+from redis import Redis
 from zoneinfo import ZoneInfo
-
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
-from fastapi.security import OAuth2PasswordRequestForm
 
 from agent import chat_with_agent, get_redis_history, get_llm
 from database import (
@@ -40,7 +37,10 @@ from database import (
     set_session_pinned,
     touch_session_updated_at,
     update_task,
+    engine,
 )
+from logging_utils import configure_logging, get_logger, reset_request_id, set_request_id
+from memory_indexer import MemoryIndexer
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
     refresh_access_token as refresh_gmail_access_token,
@@ -49,7 +49,7 @@ from integrations.outlook_graph import (
     fetch_todays_messages as fetch_outlook_todays_messages,
     refresh_access_token as refresh_outlook_access_token,
 )
-from scheduler import run_network_sweep, run_email_digest_job, start_scheduler
+from scheduler import get_scheduler_diagnostics, run_email_digest_job, run_network_sweep, start_scheduler
 
 from sqlalchemy import text
 
@@ -305,6 +305,43 @@ def _check_search_provider_health() -> dict:
     if fallback == "custom":
         return {"ok": bool(configs.get("custom_web_search_url")), "provider": "custom"}
     return {"ok": True, "provider": "duckduckgo"}
+
+
+def _check_vector_index_health() -> dict:
+    model_type = (get_all_configs().get("default_model") or "ollama").strip().lower()
+    try:
+        indexer = MemoryIndexer(model_type=model_type)
+        if not getattr(indexer, "enabled", False):
+            return {"ok": False, "details": "Vector index unavailable", "provider": model_type}
+        return {"ok": True, "provider": model_type}
+    except Exception as exc:
+        return {"ok": False, "provider": model_type, "details": str(exc)}
+
+
+def _build_config_sanity() -> dict:
+    configs = get_all_configs()
+    default_model = (configs.get("default_model") or "ollama").strip().lower()
+    required_keys = {
+        "openai": ["openai_api_key"],
+        "gemini": ["gemini_api_key"],
+        "anthropic": ["anthropic_api_key"],
+        "openrouter": ["openrouter_api_key"],
+        "anythingllm": ["anythingllm_base_url"],
+        "generic": ["generic_base_url"],
+    }.get(default_model, [])
+    missing = [key for key in required_keys if not (configs.get(key) or "").strip()]
+
+    digest_hour = int(configs.get("email_digest_hour") or 7)
+    digest_minute = int(configs.get("email_digest_minute") or 30)
+    schedule_ok = 0 <= digest_hour <= 23 and 0 <= digest_minute <= 59
+    return {
+        "default_model": default_model,
+        "required_keys_ok": not missing,
+        "missing_required_keys": missing,
+        "digest_schedule_ok": schedule_ok,
+        "email_digest_hour": digest_hour,
+        "email_digest_minute": digest_minute,
+    }
 
 
 def _get_current_user(access_token: Optional[str] = None) -> UserContext:
@@ -767,13 +804,13 @@ def get_status(_: UserContext = Depends(require_authenticated_user)):
 def get_health(_: UserContext = Depends(require_admin_user)):
     db_health = _check_db_health()
     redis_health = _check_redis_health()
-    model_health = _check_model_provider_health()
+    vector_health = _check_vector_index_health()
     search_health = _check_search_provider_health()
     scheduler_health = get_scheduler_diagnostics()
     overall_ok = all([
         db_health.get("ok"),
         redis_health.get("ok"),
-        model_health.get("ok"),
+        vector_health.get("ok"),
         search_health.get("ok"),
     ])
     return {
@@ -781,10 +818,22 @@ def get_health(_: UserContext = Depends(require_admin_user)):
         "checks": {
             "db": db_health,
             "redis": redis_health,
-            "model_provider": model_health,
+            "vector_index": vector_health,
             "search_provider": search_health,
             "scheduler": scheduler_health,
         },
+    }
+
+
+@app.get("/api/admin/diagnostics")
+def get_admin_diagnostics(_: UserContext = Depends(require_admin_user)):
+    scheduler_diag = get_scheduler_diagnostics()
+    errors = [v for v in (scheduler_diag.get("last_errors") or {}).values() if v]
+    return {
+        "recent_scheduler_run": scheduler_diag.get("last_run", {}),
+        "last_errors": scheduler_diag.get("last_errors", {}),
+        "config_sanity": _build_config_sanity(),
+        "status": "ok" if not errors else "warning",
     }
 
 

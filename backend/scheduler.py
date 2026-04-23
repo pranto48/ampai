@@ -3,7 +3,15 @@ import re
 import json
 import time
 from apscheduler.schedulers.background import BackgroundScheduler
-from database import get_network_targets, list_tasks, engine, get_config, set_config
+from database import (
+    engine,
+    get_config,
+    get_network_targets,
+    get_sql_chat_history,
+    list_tasks,
+    set_config,
+    set_session_category,
+)
 from sqlalchemy import text
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -22,6 +30,7 @@ from logging_utils import get_logger
 scheduler = BackgroundScheduler()
 logger = get_logger(__name__)
 LAST_RUN = {"network_sweep": None, "task_reminders": None}
+LAST_ERRORS = {"network_sweep": None, "task_reminders": None, "email_digest": None}
 
 def ping_target(ip_address: str) -> dict:
     try:
@@ -62,6 +71,7 @@ def ping_target(ip_address: str) -> dict:
 
 def run_network_sweep():
     LAST_RUN["network_sweep"] = datetime.now(timezone.utc).isoformat()
+    LAST_ERRORS["network_sweep"] = None
     logger.info("Running scheduled network sweep")
     targets = get_network_targets()
     if not targets:
@@ -91,10 +101,12 @@ def run_network_sweep():
         history.add_ai_message(ai_message)
     except Exception as e:
         logger.exception("Error saving network sweep report to DB", exc_info=e)
+        LAST_ERRORS["network_sweep"] = str(e)
 
 
 def run_task_reminders():
     LAST_RUN["task_reminders"] = datetime.now(timezone.utc).isoformat()
+    LAST_ERRORS["task_reminders"] = None
     logger.info("Running scheduled task reminders")
     now = datetime.now(timezone.utc)
     soon = now + timedelta(hours=24)
@@ -141,6 +153,7 @@ def run_task_reminders():
         logger.info("Task reminders recorded", extra={"reminder_count": len(reminder_lines)})
     except Exception as e:
         logger.exception("Error saving task reminders", exc_info=e)
+        LAST_ERRORS["task_reminders"] = str(e)
 
 
 def _load_email_credentials(provider: str):
@@ -171,6 +184,7 @@ def _ensure_access_token(provider: str) -> str:
 
 
 def run_email_digest_job():
+    LAST_ERRORS["email_digest"] = None
     provider = (get_config("email_digest_provider", "outlook") or "outlook").strip().lower()
     tz_name = (get_config("email_digest_timezone", "UTC") or "UTC").strip()
     max_results = int(get_config("email_digest_max_results", "25") or "25")
@@ -188,11 +202,12 @@ def run_email_digest_job():
         else:
             messages = fetch_outlook_todays_messages(token, tz=tz_name, max_results=max_results)
     except Exception as exc:
-        print(f"Email digest job failed before summarization: {exc}")
+        logger.exception("Email digest job failed before summarization", exc_info=exc, extra={"provider": provider})
+        LAST_ERRORS["email_digest"] = str(exc)
         return
 
     if not messages:
-        print("Email digest job: no messages found for today.")
+        logger.info("Email digest job: no messages found for today", extra={"provider": provider})
         return
 
     digest_lines = []
@@ -221,7 +236,7 @@ def run_email_digest_job():
         use_web_search=False,
         attachments=[],
     )
-    print(f"Email digest job saved to {session_id}.")
+    logger.info("Email digest job saved", extra={"session_id": session_id, "provider": provider})
 
 def start_scheduler():
     if not scheduler.running:
@@ -253,5 +268,6 @@ def get_scheduler_diagnostics() -> dict:
     return {
         "running": scheduler.running,
         "last_run": LAST_RUN,
+        "last_errors": LAST_ERRORS,
         "jobs": [job.id for job in scheduler.get_jobs()],
     }

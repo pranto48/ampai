@@ -88,6 +88,16 @@
         </div>
 
         <div class="card">
+            <h2>Admin Diagnostics</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Recent scheduler runs, last job errors, and config sanity checks.</p>
+            <div style="display: flex; align-items: center; gap: 10px; margin-top: 12px;">
+                <button id="refresh-admin-diagnostics-btn" class="btn" style="width: auto;">Refresh Diagnostics</button>
+                <span id="admin-diagnostics-updated-at" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
+            </div>
+            <pre id="admin-diagnostics-content" style="margin-top: 14px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; font-size: 0.82rem; color: var(--text-secondary); white-space: pre-wrap;"></pre>
+        </div>
+
+        <div class="card">
             <h2>Import Memory</h2>
             <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Restore a memory session exported from another Ampai server.</p>
             <div class="import-section">

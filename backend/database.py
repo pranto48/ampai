@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
 from cryptography.fernet import Fernet, InvalidToken
+from logging_utils import get_logger
 
 # Allow overriding for local testing vs docker
 # Default to Postgres container format
@@ -88,7 +89,7 @@ def migrate_session_metadata_schema():
                 conn.execute(text("UPDATE session_metadata SET updated_at = NOW() WHERE updated_at IS NULL"))
             conn.commit()
     except Exception as e:
-        print(f"Error migrating session metadata schema: {e}")
+        logger.exception("Error migrating session metadata schema", exc_info=e)
 
 
 migrate_session_metadata_schema()
@@ -210,7 +211,7 @@ def _upsert_session_metadata(session_id: str, category: Optional[str] = None, pi
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error upserting session metadata: {e}")
+        logger.exception("Error upserting session metadata", exc_info=e)
         return False
 
 
