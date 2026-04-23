@@ -8,6 +8,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const apiKeyLabel = document.getElementById('api-key-label');
     const newChatBtn = document.getElementById('new-chat-btn');
     const sessionsList = document.getElementById('sessions-list');
+    const sessionSearchInput = document.getElementById('session-search');
+    const showArchivedToggle = document.getElementById('show-archived-toggle');
     const currentSessionTitle = document.getElementById('current-session-title');
     const currentSessionIdDisplay = document.getElementById('current-session-id');
     const sessionCategorySelect = document.getElementById('session-category');
@@ -26,6 +28,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentSessionId = generateSessionId();
     let currentSessionCategory = "Uncategorized";
     let currentView = 'chat';
+    let sessionFilters = { query: '', archived: false };
+    let sessionsById = {};
     currentSessionIdDisplay.textContent = currentSessionId;
 
     let globalConfigs = {};
@@ -69,6 +73,20 @@ document.addEventListener('DOMContentLoaded', () => {
         checkGlobalConfigs();
     };
     initializeApp();
+
+    if (sessionSearchInput) {
+        sessionSearchInput.addEventListener('input', () => {
+            sessionFilters.query = sessionSearchInput.value.trim();
+            loadSessions();
+        });
+    }
+
+    if (showArchivedToggle) {
+        showArchivedToggle.addEventListener('change', () => {
+            sessionFilters.archived = showArchivedToggle.checked;
+            loadSessions();
+        });
+    }
 
     if (mobileMenuBtn && sidebar) {
         mobileMenuBtn.addEventListener('click', () => {
@@ -272,6 +290,8 @@ document.addEventListener('DOMContentLoaded', () => {
     newChatBtn.addEventListener('click', () => {
         currentView = 'chat';
         currentSessionId = generateSessionId();
+        currentSessionCategory = "Uncategorized";
+        sessionCategorySelect.value = "Uncategorized";
         currentSessionIdDisplay.textContent = currentSessionId;
         chatMessages.innerHTML = `
             <div class="message ai-message welcome-message">
@@ -471,20 +491,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadSessions() {
         try {
-            const response = await fetch('/api/sessions');
+            const params = new URLSearchParams();
+            if (sessionFilters.query) params.set('query', sessionFilters.query);
+            params.set('archived', String(sessionFilters.archived));
+            const response = await fetch(`/api/sessions?${params.toString()}`);
             const data = await response.json();
-            
+
             sessionsList.innerHTML = '';
             if (data.sessions && data.sessions.length > 0) {
-                // Group sessions by category
+                data.sessions.sort((a, b) => {
+                    if ((b.pinned ? 1 : 0) !== (a.pinned ? 1 : 0)) return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+                    return new Date(b.updated_at || 0) - new Date(a.updated_at || 0);
+                });
+                sessionsById = {};
                 const groups = {};
                 data.sessions.forEach(s => {
+                    sessionsById[s.session_id] = s;
                     if (!groups[s.category]) groups[s.category] = [];
-                    groups[s.category].push(s.session_id);
+                    groups[s.category].push(s);
                 });
-                
+
                 for (const [category, ids] of Object.entries(groups)) {
-                    // Create Category Header
                     const header = document.createElement('div');
                     header.className = 'category-header';
                     header.style.fontSize = '0.75rem';
@@ -495,19 +522,71 @@ document.addEventListener('DOMContentLoaded', () => {
                     header.style.fontWeight = 'bold';
                     header.textContent = category;
                     sessionsList.appendChild(header);
-                    
-                    ids.forEach(sessionId => {
+
+                    ids.forEach((session) => {
+                        const sessionId = session.session_id;
                         const li = document.createElement('li');
                         li.className = 'session-item';
+                        li.dataset.sessionId = sessionId;
+                        li.style.display = 'flex';
+                        li.style.justifyContent = 'space-between';
+                        li.style.alignItems = 'center';
                         if (sessionId === currentSessionId) {
                             li.classList.add('active');
                             sessionCategorySelect.value = category; // Update dropdown for active
                         }
-                        li.textContent = sessionId;
-                        li.onclick = () => {
-                            sessionCategorySelect.value = category;
+
+                        const label = document.createElement('span');
+                        label.textContent = `${session.pinned ? '📌 ' : ''}${sessionId}`;
+                        label.style.flex = '1';
+                        label.style.overflow = 'hidden';
+                        label.style.textOverflow = 'ellipsis';
+                        label.style.whiteSpace = 'nowrap';
+                        label.onclick = () => {
+                            sessionCategorySelect.value = session.category;
                             loadSessionHistory(sessionId);
-                        }
+                        };
+
+                        const controls = document.createElement('span');
+                        controls.style.display = 'flex';
+                        controls.style.gap = '6px';
+
+                        const pinBtn = document.createElement('button');
+                        pinBtn.className = 'btn icon-btn';
+                        pinBtn.style.width = 'auto';
+                        pinBtn.style.padding = '2px 6px';
+                        pinBtn.textContent = session.pinned ? '📌' : '📍';
+                        pinBtn.title = session.pinned ? 'Unpin session' : 'Pin session';
+                        pinBtn.onclick = async (event) => {
+                            event.stopPropagation();
+                            await fetch(`/api/sessions/${sessionId}/pin`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ value: !session.pinned }),
+                            });
+                            loadSessions();
+                        };
+
+                        const archiveBtn = document.createElement('button');
+                        archiveBtn.className = 'btn icon-btn';
+                        archiveBtn.style.width = 'auto';
+                        archiveBtn.style.padding = '2px 6px';
+                        archiveBtn.textContent = session.archived ? '♻️' : '🗄️';
+                        archiveBtn.title = session.archived ? 'Unarchive session' : 'Archive session';
+                        archiveBtn.onclick = async (event) => {
+                            event.stopPropagation();
+                            await fetch(`/api/sessions/${sessionId}/archive`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ value: !session.archived }),
+                            });
+                            loadSessions();
+                        };
+
+                        controls.appendChild(pinBtn);
+                        controls.appendChild(archiveBtn);
+                        li.appendChild(label);
+                        li.appendChild(controls);
                         sessionsList.appendChild(li);
                     });
                 }
@@ -526,9 +605,13 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Update UI active state
         document.querySelectorAll('.session-item').forEach(el => {
-            if (el.textContent === sessionId) el.classList.add('active');
+            if (el.dataset.sessionId === sessionId) el.classList.add('active');
             else el.classList.remove('active');
         });
+        if (sessionsById[sessionId]?.category) {
+            sessionCategorySelect.value = sessionsById[sessionId].category;
+            currentSessionCategory = sessionsById[sessionId].category;
+        }
 
         try {
             chatMessages.innerHTML = '<div style="text-align:center; color:var(--text-secondary); margin-top:20px;">Loading memory...</div>';

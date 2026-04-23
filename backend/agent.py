@@ -3,21 +3,24 @@ import re
 import json
 import urllib.parse
 import urllib.request
-from langchain_community.chat_message_histories import SQLChatMessageHistory, RedisChatMessageHistory
+from langchain_community.chat_message_histories import RedisChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from memory_indexer import MemoryIndexer
 from typing import List, Dict, Any
 
+from logging_utils import get_logger
+
 # Models
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_models import ChatOllama
-from database import DATABASE_URL, get_config, get_core_memories, add_core_memory, create_task
+from database import get_config, get_core_memories, add_core_memory, create_task, get_sql_chat_history
 
 from langchain_core.chat_history import BaseChatMessageHistory
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+logger = get_logger(__name__)
 
 def get_redis_history(session_id: str):
     return RedisChatMessageHistory(session_id, url=REDIS_URL)
@@ -234,7 +237,7 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
             )
         else:
             error_msg = web_search_status["error"]
-            print(f"Web search error: {error_msg}")
+            logger.warning("Web search failed", extra={"error": error_msg})
             web_context = (
                 "\n\n--- LIVE WEB SEARCH STATUS ---\n"
                 f"Web search failed with error: {error_msg}\n"
@@ -258,7 +261,7 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
                         "image_url": {"url": f"data:{attachment['type']};base64,{encoded_string}"}
                     })
             except Exception as e:
-                print(f"Image read error: {e}")
+                logger.exception("Image read error", exc_info=e)
 
     agent_directives = (
         "You are an intelligent AI assistant with a global memory system.\n"
@@ -337,7 +340,7 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
             indexer = MemoryIndexer(model_type)
             indexer.add_fact(fact_to_save)
         except Exception as e:
-            print(f"Failed to add fact to PGVector: {e}")
+            logger.exception("Failed to add fact to PGVector", exc_info=e)
             
         # Strip the tag from the final response sent to user
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
@@ -386,7 +389,7 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
             content += f"\n\n✅ Created {len(created_tasks)} task(s): #{', #'.join(str(tid) for tid in created_tasks)}"
     
     # Save Raw History to PostgreSQL for Admin Logging/Export
-    sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+    sql_history = get_sql_chat_history(session_id)
     
     # Store images locally as markdown in raw history
     message_log = message

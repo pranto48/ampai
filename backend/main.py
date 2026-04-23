@@ -15,9 +15,11 @@ from passlib.context import CryptContext
 from pydantic import BaseModel
 from zoneinfo import ZoneInfo
 
-from agent import chat_with_agent, get_redis_history
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
+from fastapi.security import OAuth2PasswordRequestForm
+
+from agent import chat_with_agent, get_redis_history, get_llm
 from database import (
-    DATABASE_URL,
     add_network_target,
     create_task,
     delete_core_memory,
@@ -29,10 +31,14 @@ from database import (
     get_config,
     get_core_memories,
     get_network_targets,
+    get_sql_chat_history,
     list_tasks,
     migrate_app_config_encryption,
     set_config,
+    set_session_archived,
     set_session_category,
+    set_session_pinned,
+    touch_session_updated_at,
     update_task,
 )
 from integrations.gmail_api import (
@@ -47,6 +53,8 @@ from scheduler import run_network_sweep, run_email_digest_job, start_scheduler
 
 from sqlalchemy import text
 
+configure_logging()
+logger = get_logger(__name__)
 app = FastAPI()
 CLEAR_VALUE_SENTINEL = "__CLEAR__"
 SECRET_CONFIG_KEYS = {
@@ -92,6 +100,28 @@ def startup_event():
     start_scheduler()
     migrate_app_config_encryption()
 
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    token = set_request_id(request_id)
+    request.state.request_id = request_id
+    started = datetime.now(timezone.utc)
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("HTTP request failed", extra={"path": request.url.path, "method": request.method})
+        reset_request_id(token)
+        raise
+    elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+    logger.info(
+        "HTTP request completed",
+        extra={"path": request.url.path, "method": request.method, "status_code": response.status_code, "elapsed_ms": elapsed_ms},
+    )
+    reset_request_id(token)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
 class ChatRequest(BaseModel):
     session_id: str
     message: str
@@ -104,6 +134,10 @@ class ChatRequest(BaseModel):
 
 class CategoryRequest(BaseModel):
     category: str
+
+
+class SessionStateRequest(BaseModel):
+    value: bool = True
 
 
 class ImportMessage(BaseModel):
@@ -229,6 +263,50 @@ def _create_access_token(data: Dict[str, str]) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
+def _check_db_health() -> dict:
+    try:
+        if not engine:
+            return {"ok": False, "details": "DB engine unavailable"}
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"ok": True}
+    except Exception as exc:
+        logger.exception("DB health check failed", exc_info=exc)
+        return {"ok": False, "details": str(exc)}
+
+
+def _check_redis_health() -> dict:
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+        redis_client = Redis.from_url(redis_url, socket_timeout=2)
+        redis_client.ping()
+        return {"ok": True}
+    except Exception as exc:
+        logger.exception("Redis health check failed", exc_info=exc)
+        return {"ok": False, "details": str(exc)}
+
+
+def _check_model_provider_health() -> dict:
+    provider = (get_all_configs().get("default_model") or "ollama").strip().lower()
+    try:
+        get_llm(provider)
+        return {"ok": True, "provider": provider}
+    except Exception as exc:
+        return {"ok": False, "provider": provider, "details": str(exc)}
+
+
+def _check_search_provider_health() -> dict:
+    configs = get_all_configs()
+    fallback = (configs.get("web_fallback_provider") or "").strip().lower()
+    if fallback == "serpapi":
+        return {"ok": bool(configs.get("serpapi_api_key")), "provider": "serpapi"}
+    if fallback == "bing":
+        return {"ok": bool(configs.get("bing_api_key")), "provider": "bing"}
+    if fallback == "custom":
+        return {"ok": bool(configs.get("custom_web_search_url")), "provider": "custom"}
+    return {"ok": True, "provider": "duckduckgo"}
+
+
 def _get_current_user(access_token: Optional[str] = None) -> UserContext:
     if not access_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
@@ -302,6 +380,7 @@ def chat(request: ChatRequest, _: UserContext = Depends(require_authenticated_us
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
         )
+        touch_session_updated_at(request.session_id)
         return {
             "response": response.get("content", ""),
             "web_search_status": response.get("web_search_status"),
@@ -385,7 +464,7 @@ async def upload_file(file: UploadFile = File(...), _: UserContext = Depends(req
                     reader = PyPDF2.PdfReader(pdf_file)
                     extracted_text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
             except Exception as e:
-                print(f"PDF Parsing error: {e}")
+                logger.exception("PDF parsing error", exc_info=e)
         elif file_ext.lower() in [".txt", ".csv", ".json", ".md", ".py", ".js", ".html", ".css"]:
             with open(file_path, "r", encoding="utf-8") as text_file:
                 extracted_text = text_file.read()
@@ -401,14 +480,19 @@ async def upload_file(file: UploadFile = File(...), _: UserContext = Depends(req
 
 
 @app.get("/api/sessions")
-def get_sessions(_: UserContext = Depends(require_authenticated_user)):
-    return {"sessions": get_all_sessions()}
+def get_sessions(
+    query: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    archived: Optional[bool] = Query(default=None),
+    _: UserContext = Depends(require_authenticated_user),
+):
+    return {"sessions": get_all_sessions(query=query, category=category, archived=archived)}
 
 
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+        history = get_sql_chat_history(session_id)
         messages = []
         for msg in history.messages:
             messages.append({"type": msg.type, "content": msg.content})
@@ -425,12 +509,26 @@ def update_category(session_id: str, request: CategoryRequest, _: UserContext = 
     return {"status": "success"}
 
 
+@app.patch("/api/sessions/{session_id}/pin")
+def update_pin(session_id: str, request: SessionStateRequest, _: UserContext = Depends(require_authenticated_user)):
+    if not set_session_pinned(session_id, request.value):
+        raise HTTPException(status_code=500, detail="Failed to update pin state")
+    return {"status": "success"}
+
+
+@app.patch("/api/sessions/{session_id}/archive")
+def update_archive(session_id: str, request: SessionStateRequest, _: UserContext = Depends(require_authenticated_user)):
+    if not set_session_archived(session_id, request.value):
+        raise HTTPException(status_code=500, detail="Failed to update archive state")
+    return {"status": "success"}
+
+
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
         delete_session_metadata(session_id)
 
-        sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+        sql_history = get_sql_chat_history(session_id)
         sql_history.clear()
 
         redis_history = get_redis_history(session_id)
@@ -444,7 +542,7 @@ def delete_session(session_id: str, _: UserContext = Depends(require_authenticat
 @app.get("/api/export/{session_id}")
 def export_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+        history = get_sql_chat_history(session_id)
         messages = [{"type": msg.type, "content": msg.content} for msg in history.messages]
 
         sessions = get_all_sessions()
@@ -462,16 +560,29 @@ def export_session(session_id: str, _: UserContext = Depends(require_authenticat
 @app.post("/api/import")
 def import_session(request: ImportRequest, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=request.session_id, connection_string=DATABASE_URL)
+        history = get_sql_chat_history(request.session_id)
+        existing_messages = {(msg.type, msg.content) for msg in history.messages}
+        inserted = 0
+        skipped = 0
 
         for msg in request.messages:
+            key = (msg.type, msg.content)
+            if key in existing_messages:
+                skipped += 1
+                continue
             if msg.type == "human":
                 history.add_user_message(msg.content)
+                inserted += 1
             elif msg.type == "ai":
                 history.add_ai_message(msg.content)
+                inserted += 1
+            else:
+                skipped += 1
+                continue
+            existing_messages.add(key)
 
         set_session_category(request.session_id, request.category)
-        return {"status": "success", "session_id": request.session_id}
+        return {"status": "success", "session_id": request.session_id, "inserted": inserted, "skipped": skipped}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -650,6 +761,31 @@ def get_status(_: UserContext = Depends(require_authenticated_user)):
     frontend_path = os.path.join(backend_path, "..", "frontend")
     latest_mtime = get_latest_mtime([backend_path, frontend_path])
     return {"latest_mtime": latest_mtime}
+
+
+@app.get("/api/health")
+def get_health(_: UserContext = Depends(require_admin_user)):
+    db_health = _check_db_health()
+    redis_health = _check_redis_health()
+    model_health = _check_model_provider_health()
+    search_health = _check_search_provider_health()
+    scheduler_health = get_scheduler_diagnostics()
+    overall_ok = all([
+        db_health.get("ok"),
+        redis_health.get("ok"),
+        model_health.get("ok"),
+        search_health.get("ok"),
+    ])
+    return {
+        "ok": overall_ok,
+        "checks": {
+            "db": db_health,
+            "redis": redis_health,
+            "model_provider": model_health,
+            "search_provider": search_health,
+            "scheduler": scheduler_health,
+        },
+    }
 
 
 if os.path.exists(UPLOAD_DIR):

@@ -17,7 +17,11 @@ from integrations.outlook_graph import (
     refresh_access_token as refresh_outlook_access_token,
 )
 
+from logging_utils import get_logger
+
 scheduler = BackgroundScheduler()
+logger = get_logger(__name__)
+LAST_RUN = {"network_sweep": None, "task_reminders": None}
 
 def ping_target(ip_address: str) -> dict:
     try:
@@ -57,10 +61,11 @@ def ping_target(ip_address: str) -> dict:
         return {"status": "Error", "avg_ping": "N/A", "details": str(e)}
 
 def run_network_sweep():
-    print("Running scheduled network sweep...")
+    LAST_RUN["network_sweep"] = datetime.now(timezone.utc).isoformat()
+    logger.info("Running scheduled network sweep")
     targets = get_network_targets()
     if not targets:
-        print("No network targets configured.")
+        logger.info("No network targets configured")
         return
 
     report_lines = ["Link Status Overview:"]
@@ -73,37 +78,24 @@ def run_network_sweep():
         report_lines.append(line)
     
     final_report = "\n".join(report_lines)
-    print("Network Sweep Complete:\n", final_report)
+    logger.info("Network sweep complete", extra={"report": final_report, "targets_count": len(targets)})
     
     # Save the report to the "System Reports" chat session in the DB
     session_id = "system_reports"
     try:
-        with engine.connect() as conn:
-            # Ensure session metadata exists
-            upsert_meta = text(
-                "INSERT INTO session_metadata (session_id, category) VALUES (:s, :c) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category"
-            )
-            conn.execute(upsert_meta, {"s": session_id, "c": "System Reports"})
-            
-            # Save the message
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ai_message = f"**Automated Network Report ({timestamp})**\n```\n{final_report}\n```"
-            
-            # Add a user trigger message to make the UI look normal
-            ins_user = text("INSERT INTO message_store (session_id, message) VALUES (:s, :m)")
-            conn.execute(ins_user, {"s": session_id, "m": f"Run daily network sweep for {timestamp}"})
-            
-            ins_ai = text("INSERT INTO message_store (session_id, message) VALUES (:s, :m)")
-            conn.execute(ins_ai, {"s": session_id, "m": ai_message})
-            
-            conn.commit()
+        set_session_category(session_id, "System Reports")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ai_message = f"**Automated Network Report ({timestamp})**\n```\n{final_report}\n```"
+        history = get_sql_chat_history(session_id)
+        history.add_user_message(f"Run daily network sweep for {timestamp}")
+        history.add_ai_message(ai_message)
     except Exception as e:
-        print(f"Error saving report to DB: {e}")
+        logger.exception("Error saving network sweep report to DB", exc_info=e)
 
 
 def run_task_reminders():
-    print("Running scheduled task reminders...")
+    LAST_RUN["task_reminders"] = datetime.now(timezone.utc).isoformat()
+    logger.info("Running scheduled task reminders")
     now = datetime.now(timezone.utc)
     soon = now + timedelta(hours=24)
     pending_tasks = list_tasks(due_before=soon.isoformat())
@@ -128,7 +120,7 @@ def run_task_reminders():
             reminder_lines.append(f"⏰ Due soon: #{task['id']} {task['title']} (due {due_dt.isoformat()})")
 
     if not reminder_lines:
-        print("No task reminders needed.")
+        logger.info("No task reminders needed")
         return
 
     session_id = "system_tasks"
@@ -146,9 +138,9 @@ def run_task_reminders():
             conn.execute(ins_user, {"s": session_id, "m": f"Run task reminder check at {timestamp}"})
             conn.execute(ins_user, {"s": session_id, "m": f"**Task Reminder Report ({timestamp})**\n{summary}"})
             conn.commit()
-        print("Task reminders recorded.")
+        logger.info("Task reminders recorded", extra={"reminder_count": len(reminder_lines)})
     except Exception as e:
-        print(f"Error saving task reminders: {e}")
+        logger.exception("Error saving task reminders", exc_info=e)
 
 
 def _load_email_credentials(provider: str):
@@ -254,4 +246,12 @@ def start_scheduler():
             timezone=digest_timezone,
         )
         scheduler.start()
-        print("Background scheduler started.")
+        logger.info("Background scheduler started")
+
+
+def get_scheduler_diagnostics() -> dict:
+    return {
+        "running": scheduler.running,
+        "last_run": LAST_RUN,
+        "jobs": [job.id for job in scheduler.get_jobs()],
+    }

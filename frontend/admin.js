@@ -54,12 +54,54 @@ document.addEventListener('DOMContentLoaded', () => {
     const dirtyConfigKeys = new Set();
 
     const coreMemoriesContainer = document.getElementById('core-memories-container');
+    const refreshHealthBtn = document.getElementById('refresh-health-btn');
+    const healthStatusGrid = document.getElementById('health-status-grid');
+    const schedulerDiagnostics = document.getElementById('scheduler-diagnostics');
+    const healthUpdatedAt = document.getElementById('health-updated-at');
 
     loadAdminSessions();
     loadConfigs();
     loadCoreMemories();
+    loadSystemHealth();
     setupConfigChangeTracking();
     setupClearKeyButtons();
+    refreshHealthBtn.addEventListener('click', loadSystemHealth);
+
+    function renderHealthTile(name, ok, details) {
+        const tile = document.createElement('div');
+        tile.style.background = ok ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)';
+        tile.style.border = ok ? '1px solid rgba(16, 185, 129, 0.3)' : '1px solid rgba(239, 68, 68, 0.35)';
+        tile.style.borderRadius = '8px';
+        tile.style.padding = '10px';
+        tile.innerHTML = `
+            <div style="font-weight: 600; margin-bottom: 6px;">${name}</div>
+            <div style="font-size: 0.85rem; color: ${ok ? '#10b981' : '#ef4444'};">${ok ? 'Healthy' : 'Unhealthy'}</div>
+            ${details ? `<div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px;">${details}</div>` : ''}
+        `;
+        return tile;
+    }
+
+    async function loadSystemHealth() {
+        healthUpdatedAt.textContent = 'Loading health...';
+        try {
+            const response = await fetch('/api/health');
+            const data = await response.json();
+            const checks = data.checks || {};
+            healthStatusGrid.innerHTML = '';
+            healthStatusGrid.appendChild(renderHealthTile('Database', !!checks.db?.ok, checks.db?.details || ''));
+            healthStatusGrid.appendChild(renderHealthTile('Redis', !!checks.redis?.ok, checks.redis?.details || ''));
+            healthStatusGrid.appendChild(renderHealthTile('Model Provider', !!checks.model_provider?.ok, checks.model_provider?.provider || checks.model_provider?.details || ''));
+            healthStatusGrid.appendChild(renderHealthTile('Search Provider', !!checks.search_provider?.ok, checks.search_provider?.provider || checks.search_provider?.details || ''));
+            const lastRun = checks.scheduler?.last_run || {};
+            schedulerDiagnostics.textContent = `Scheduler running: ${checks.scheduler?.running ? 'yes' : 'no'}\nLast network sweep: ${lastRun.network_sweep || 'N/A'}\nLast task reminders: ${lastRun.task_reminders || 'N/A'}\nJobs: ${(checks.scheduler?.jobs || []).join(', ') || 'none'}`;
+            healthUpdatedAt.textContent = `Updated at ${new Date().toLocaleString()}`;
+        } catch (error) {
+            healthStatusGrid.innerHTML = '';
+            healthStatusGrid.appendChild(renderHealthTile('System Health', false, error.message));
+            schedulerDiagnostics.textContent = 'Unable to load scheduler diagnostics.';
+            healthUpdatedAt.textContent = 'Health check failed';
+        }
+    }
 
     function setupConfigChangeTracking() {
         for (const [key, input] of Object.entries(configInputs)) {
