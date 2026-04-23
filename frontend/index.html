@@ -9,11 +9,14 @@
 </head>
 <body>
     <div class="app-container">
-        <div style="position: fixed; top: 12px; right: 12px; z-index: 10000; display: flex; gap: 8px; align-items: center;">
+        <div class="user-menu-container">
             <span id="auth-user" class="badge"></span>
             <span id="auth-role" class="badge"></span>
-            <a href="admin.html" class="btn" style="width: auto; text-decoration: none;">Admin</a>
-            <button class="btn" data-logout-btn style="width: auto;">Logout</button>
+            <button class="btn user-menu-trigger" type="button" data-user-menu-btn>Menu ▾</button>
+            <div class="user-menu-panel" data-user-menu-panel>
+                <a href="admin.html" class="user-menu-item">Admin Panel</a>
+                <button class="user-menu-item" data-logout-btn type="button">Logout</button>
+            </div>
         </div>
         <!-- Update Banner -->
         <div id="update-banner" class="update-banner" style="display: none;">
