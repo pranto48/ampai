@@ -9,6 +9,12 @@
 </head>
 <body>
     <div class="app-container">
+        <div style="position: fixed; top: 12px; right: 12px; z-index: 10000; display: flex; gap: 8px; align-items: center;">
+            <span id="auth-user" class="badge"></span>
+            <span id="auth-role" class="badge"></span>
+            <a href="admin.html" class="btn" style="width: auto; text-decoration: none;">Admin</a>
+            <button class="btn" data-logout-btn style="width: auto;">Logout</button>
+        </div>
         <!-- Update Banner -->
         <div id="update-banner" class="update-banner" style="display: none;">
             <span>Ampai update available! A file has been changed.</span>
@@ -40,12 +46,6 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                 New Session
             </button>
-            
-            <div class="admin-link" style="margin-top: 10px;">
-                <a href="admin.html" class="btn" style="background-color: transparent; border: 1px solid var(--accent-color); color: var(--accent-color); text-decoration: none; display: block; text-align: center;">
-                    Admin Panel
-                </a>
-            </div>
             
             <div class="settings-section">
                 <label for="model-select">Model Provider</label>
@@ -141,6 +141,7 @@
         </main>
     </div>
 
+    <script src="auth.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

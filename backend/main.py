@@ -1,30 +1,47 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
 import os
-from typing import List, Dict, Optional
-import json
-from pydantic import BaseModel
-from typing import Optional, List, Dict
-from datetime import datetime
 import shutil
-
-from database import (
-    get_all_sessions, set_session_category, delete_session_metadata, DATABASE_URL,
-    get_all_configs, set_config, get_core_memories, delete_core_memory,
-    get_network_targets, add_network_target, delete_network_target
-)
-from agent import chat_with_agent, get_redis_history
-from scheduler import start_scheduler, run_network_sweep
-from langchain_community.chat_message_histories import SQLChatMessageHistory
-
 import uuid
-import os
+
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
+from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.staticfiles import StaticFiles
+from jose import JWTError, jwt
+from langchain_community.chat_message_histories import SQLChatMessageHistory
+from passlib.context import CryptContext
+from pydantic import BaseModel
+
+from agent import chat_with_agent, get_redis_history
+from database import (
+    DATABASE_URL,
+    add_network_target,
+    delete_core_memory,
+    delete_network_target,
+    delete_session_metadata,
+    get_all_configs,
+    get_all_sessions,
+    get_core_memories,
+    get_network_targets,
+    set_config,
+    set_session_category,
+)
+from scheduler import run_network_sweep, start_scheduler
 
 app = FastAPI()
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET environment variable is required")
+
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 
 class Attachment(BaseModel):
     filename: str
@@ -32,13 +49,11 @@ class Attachment(BaseModel):
     type: str
     extracted_text: Optional[str] = None
 
+
 class TargetModel(BaseModel):
     name: str
     ip_address: str
 
-@app.on_event("startup")
-def startup_event():
-    start_scheduler()
 
 class ChatRequest(BaseModel):
     session_id: str
@@ -49,23 +64,133 @@ class ChatRequest(BaseModel):
     use_web_search: bool = False
     attachments: List[Attachment] = []
 
+
 class CategoryRequest(BaseModel):
     category: str
+
 
 class ImportMessage(BaseModel):
     type: str
     content: str
+
 
 class ImportRequest(BaseModel):
     session_id: str
     category: str
     messages: List[ImportMessage]
 
+
 class ConfigUpdateRequest(BaseModel):
     configs: Dict[str, str]
 
+
+class UserLoginResponse(BaseModel):
+    username: str
+    role: str
+
+
+class UserContext(BaseModel):
+    username: str
+    role: str
+
+
+def _build_user_store() -> Dict[str, Dict[str, str]]:
+    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
+
+    user_username = os.getenv("USER_USERNAME", "user")
+    user_password = os.getenv("USER_PASSWORD", "user123")
+
+    return {
+        admin_username: {
+            "role": "admin",
+            "password_hash": pwd_context.hash(admin_password),
+        },
+        user_username: {
+            "role": "user",
+            "password_hash": pwd_context.hash(user_password),
+        },
+    }
+
+
+USERS = _build_user_store()
+
+
+@app.on_event("startup")
+def startup_event():
+    start_scheduler()
+
+
+def _create_access_token(data: Dict[str, str]) -> str:
+    payload = data.copy()
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRY_MINUTES)
+    payload.update({"exp": expiry})
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _get_current_user(access_token: Optional[str] = None) -> UserContext:
+    if not access_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    try:
+        payload = jwt.decode(access_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        username = payload.get("sub")
+        role = payload.get("role")
+        if not username or role not in {"admin", "user"}:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+        return UserContext(username=username, role=role)
+    except JWTError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
+
+
+def get_current_user_from_cookie(request: Request):
+    token = request.cookies.get("access_token")
+    return _get_current_user(token)
+
+
+def require_authenticated_user(current_user: UserContext = Depends(get_current_user_from_cookie)) -> UserContext:
+    return current_user
+
+
+def require_admin_user(current_user: UserContext = Depends(get_current_user_from_cookie)) -> UserContext:
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return current_user
+
+
+@app.post("/api/auth/login", response_model=UserLoginResponse)
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = USERS.get(form_data.username)
+    if not user or not pwd_context.verify(form_data.password, user["password_hash"]):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+
+    token = _create_access_token({"sub": form_data.username, "role": user["role"]})
+    response = Response(content=UserLoginResponse(username=form_data.username, role=user["role"]).model_dump_json(), media_type="application/json")
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=JWT_EXPIRY_MINUTES * 60,
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout():
+    response = Response(content='{"status":"success"}', media_type="application/json")
+    response.delete_cookie("access_token")
+    return response
+
+
+@app.get("/api/auth/me", response_model=UserContext)
+def auth_me(current_user: UserContext = Depends(require_authenticated_user)):
+    return current_user
+
+
 @app.post("/api/chat")
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, _: UserContext = Depends(require_authenticated_user)):
     try:
         response = chat_with_agent(
             session_id=request.session_id,
@@ -74,26 +199,28 @@ def chat(request: ChatRequest):
             api_key=request.api_key,
             memory_mode=request.memory_mode,
             use_web_search=request.use_web_search,
-            attachments=[a.dict() for a in request.attachments]
+            attachments=[a.dict() for a in request.attachments],
         )
         return {"response": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), _: UserContext = Depends(require_authenticated_user)):
     try:
         file_ext = os.path.splitext(file.filename)[1]
         unique_filename = f"{uuid.uuid4()}{file_ext}"
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
-        
+
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-            
+
         extracted_text = None
         if file_ext.lower() == ".pdf":
             try:
                 import PyPDF2
+
                 with open(file_path, "rb") as pdf_file:
                     reader = PyPDF2.PdfReader(pdf_file)
                     extracted_text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
@@ -102,95 +229,95 @@ async def upload_file(file: UploadFile = File(...)):
         elif file_ext.lower() in [".txt", ".csv", ".json", ".md", ".py", ".js", ".html", ".css"]:
             with open(file_path, "r", encoding="utf-8") as text_file:
                 extracted_text = text_file.read()
-                
+
         return {
             "filename": file.filename,
             "url": f"/uploads/{unique_filename}",
             "type": file.content_type,
-            "extracted_text": extracted_text
+            "extracted_text": extracted_text,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/api/sessions")
-def get_sessions():
+def get_sessions(_: UserContext = Depends(require_authenticated_user)):
     return {"sessions": get_all_sessions()}
 
+
 @app.get("/api/history/{session_id}")
-def get_history(session_id: str):
+def get_history(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
         history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
         messages = []
         for msg in history.messages:
-            messages.append({
-                "type": msg.type, # "human" or "ai"
-                "content": msg.content
-            })
+            messages.append({"type": msg.type, "content": msg.content})
         return {"messages": messages}
     except Exception as e:
         return {"messages": [], "error": str(e)}
 
+
 @app.post("/api/sessions/{session_id}/category")
-def update_category(session_id: str, request: CategoryRequest):
+def update_category(session_id: str, request: CategoryRequest, _: UserContext = Depends(require_authenticated_user)):
     success = set_session_category(session_id, request.category)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to update category")
     return {"status": "success"}
 
+
 @app.delete("/api/sessions/{session_id}")
-def delete_session(session_id: str):
+def delete_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
         delete_session_metadata(session_id)
-        
+
         sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
         sql_history.clear()
-        
+
         redis_history = get_redis_history(session_id)
         redis_history.clear()
-        
+
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/api/export/{session_id}")
-def export_session(session_id: str):
+def export_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
         history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
         messages = [{"type": msg.type, "content": msg.content} for msg in history.messages]
-        
+
         sessions = get_all_sessions()
         category = "Uncategorized"
         for s in sessions:
             if s["session_id"] == session_id:
                 category = s["category"]
                 break
-                
-        return {
-            "session_id": session_id,
-            "category": category,
-            "messages": messages
-        }
+
+        return {"session_id": session_id, "category": category, "messages": messages}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/api/import")
-def import_session(request: ImportRequest):
+def import_session(request: ImportRequest, _: UserContext = Depends(require_authenticated_user)):
     try:
         history = SQLChatMessageHistory(session_id=request.session_id, connection_string=DATABASE_URL)
-        
+
         for msg in request.messages:
             if msg.type == "human":
                 history.add_user_message(msg.content)
             elif msg.type == "ai":
                 history.add_ai_message(msg.content)
-        
+
         set_session_category(request.session_id, request.category)
         return {"status": "success", "session_id": request.session_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/api/admin/configs")
-def get_admin_configs():
+def get_admin_configs(_: UserContext = Depends(require_admin_user)):
     configs = get_all_configs()
     masked = {}
     for k, v in configs.items():
@@ -200,15 +327,17 @@ def get_admin_configs():
             masked[k] = v
     return masked
 
+
 @app.post("/api/admin/configs")
-def update_admin_configs(request: ConfigUpdateRequest):
+def update_admin_configs(request: ConfigUpdateRequest, _: UserContext = Depends(require_admin_user)):
     for k, v in request.configs.items():
-        if v and "..." not in v: # Dont save masked passwords
+        if v and "..." not in v:  # Dont save masked passwords
             set_config(k, v)
     return {"status": "success"}
 
+
 @app.get("/api/configs/status")
-def get_configs_status():
+def get_configs_status(_: UserContext = Depends(require_authenticated_user)):
     configs = get_all_configs()
     return {
         "openai": bool(configs.get("openai_api_key")),
@@ -217,42 +346,49 @@ def get_configs_status():
         "generic": bool(configs.get("generic_base_url")),
         "openrouter": bool(configs.get("openrouter_api_key")),
         "anythingllm": bool(configs.get("anythingllm_base_url")),
-        "default_model": configs.get("default_model")
+        "default_model": configs.get("default_model"),
     }
 
+
 @app.get("/api/admin/core-memories")
-def api_get_core_memories():
+def api_get_core_memories(_: UserContext = Depends(require_admin_user)):
     return {"core_memories": get_core_memories()}
 
+
 @app.delete("/api/admin/core-memories/{mem_id}")
-def api_delete_core_memory(mem_id: int):
+def api_delete_core_memory(mem_id: int, _: UserContext = Depends(require_admin_user)):
     success = delete_core_memory(mem_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to delete core memory")
     return {"status": "success"}
 
-# --- Network Targets API ---
+
 @app.get("/api/targets")
-def get_targets():
+def get_targets(_: UserContext = Depends(require_admin_user)):
     return get_network_targets()
 
+
 @app.post("/api/targets")
-def create_target(target: TargetModel):
+def create_target(target: TargetModel, _: UserContext = Depends(require_admin_user)):
     success = add_network_target(target.name, target.ip_address)
-    if success: return {"status": "success"}
+    if success:
+        return {"status": "success"}
     raise HTTPException(status_code=500, detail="Failed to add target")
 
+
 @app.delete("/api/targets/{target_id}")
-def remove_target(target_id: int):
+def remove_target(target_id: int, _: UserContext = Depends(require_admin_user)):
     success = delete_network_target(target_id)
-    if success: return {"status": "success"}
+    if success:
+        return {"status": "success"}
     raise HTTPException(status_code=500, detail="Failed to delete target")
 
+
 @app.post("/api/targets/run")
-def run_sweep_now():
-    # Run synchronously for immediate feedback
+def run_sweep_now(_: UserContext = Depends(require_admin_user)):
     run_network_sweep()
     return {"status": "success"}
+
 
 def get_latest_mtime(directories):
     latest = 0
@@ -261,7 +397,7 @@ def get_latest_mtime(directories):
             continue
         for root, _, files in os.walk(directory):
             for file in files:
-                if file.endswith('.pyc') or '__pycache__' in root or file.endswith('.db') or file.endswith('.db-journal'):
+                if file.endswith(".pyc") or "__pycache__" in root or file.endswith(".db") or file.endswith(".db-journal"):
                     continue
                 filepath = os.path.join(root, file)
                 try:
@@ -272,14 +408,15 @@ def get_latest_mtime(directories):
                     pass
     return latest
 
+
 @app.get("/api/status")
-def get_status():
+def get_status(_: UserContext = Depends(require_authenticated_user)):
     backend_path = os.path.dirname(__file__)
     frontend_path = os.path.join(backend_path, "..", "frontend")
     latest_mtime = get_latest_mtime([backend_path, frontend_path])
     return {"latest_mtime": latest_mtime}
 
-# Mount static files
+
 if os.path.exists(UPLOAD_DIR):
     app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 

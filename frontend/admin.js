@@ -28,9 +28,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const coreMemoriesContainer = document.getElementById('core-memories-container');
 
-    loadAdminSessions();
-    loadConfigs();
-    loadCoreMemories();
+    const initializeAdmin = async () => {
+        const user = await enforceAuth({ requiredRole: 'admin' });
+        if (!user) return;
+        loadAdminSessions();
+        loadConfigs();
+        loadCoreMemories();
+    };
+    initializeAdmin();
 
     async function loadCoreMemories() {
         try {
