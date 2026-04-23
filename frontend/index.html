@@ -9,6 +9,12 @@
 </head>
 <body>
     <div class="app-container">
+        <div style="position: fixed; top: 12px; right: 12px; z-index: 10000; display: flex; gap: 8px; align-items: center;">
+            <span id="auth-user" class="badge"></span>
+            <span id="auth-role" class="badge"></span>
+            <a href="admin.html" class="btn" data-admin-link style="width: auto; text-decoration: none;">Admin</a>
+            <button class="btn" data-logout-btn style="width: auto;">Logout</button>
+        </div>
         <!-- Update Banner -->
         <div id="update-banner" class="update-banner" style="display: none;">
             <span>Ampai update available! A file has been changed.</span>
@@ -40,11 +46,12 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                 New Session
             </button>
-            
-            <div class="admin-link" style="margin-top: 10px;">
-                <a href="admin.html" class="btn" style="background-color: transparent; border: 1px solid var(--accent-color); color: var(--accent-color); text-decoration: none; display: block; text-align: center;">
-                    Admin Panel
-                </a>
+            <div class="settings-section" style="margin-top: 10px;">
+                <label>Workspace</label>
+                <div style="display:flex; gap:8px;">
+                    <button id="sidebar-chat-btn" class="btn" style="width:auto; padding:6px 10px;">Chat</button>
+                    <button id="tasks-view-btn" class="btn" style="width:auto; padding:6px 10px;">Tasks</button>
+                </div>
             </div>
             
             <div class="settings-section">
@@ -72,6 +79,14 @@
                 <ul id="sessions-list">
                     <!-- Sessions will be loaded here -->
                 </ul>
+            </div>
+
+            <div class="sessions-container" style="margin-top: 16px;">
+                <h3>Tasks</h3>
+                <div id="task-quick-add" style="display: flex; gap: 6px;">
+                    <input id="task-quick-add-input" class="modern-input" placeholder="Quick add task from chat..." style="font-size: 0.8rem; padding: 8px;" />
+                    <button id="task-quick-add-btn" class="btn icon-btn" title="Add Task">+</button>
+                </div>
             </div>
         </aside>
 
@@ -109,6 +124,9 @@
                         <button id="archive-session-btn" class="btn" style="width:auto; padding:6px 10px; font-size:0.8rem;">🗄️ Archive</button>
                         <button id="delete-session-btn" class="btn icon-btn" title="Delete Session" style="background-color: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); padding: 6px;">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                        </button>
+                        <button id="summarize-email-btn" class="btn" title="Summarize today's inbox" style="width:auto; padding:6px 10px; border:1px solid rgba(16,185,129,0.4); background:rgba(16,185,129,0.15); color:#10b981;">
+                            Summarize today’s email
                         </button>
                     </div>
                 </div>
@@ -148,6 +166,7 @@
         </main>
     </div>
 
+    <script src="auth.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

@@ -3,9 +3,12 @@ from datetime import datetime, timezone
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, select, inspect, text, Boolean
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
+CHAT_HISTORY_TABLE = os.getenv("CHAT_HISTORY_TABLE", "chat_message_store")
 
 engine = None
 metadata = MetaData()
+ENCRYPTED_PREFIX = "enc::"
+logger = get_logger(__name__)
 
 # LangChain SQLChatMessageHistory compatibility table.
 message_store = Table(
@@ -98,7 +101,7 @@ def get_all_sessions(query: str = "", include_archived: bool = False):
     try:
         with engine.connect() as conn:
             inspector = inspect(engine)
-            if not inspector.has_table("message_store"):
+            if not inspector.has_table(CHAT_HISTORY_TABLE):
                 return []
 
             _ensure_session_metadata_columns(conn)
@@ -142,11 +145,57 @@ def get_all_sessions(query: str = "", include_archived: bool = False):
             output.sort(key=lambda x: (not x["pinned"], x.get("updated_at") or "", x["session_id"]), reverse=False)
             return output
     except Exception as e:
-        print(f"Error fetching sessions: {e}")
+        logger.exception("Error fetching sessions", exc_info=e)
         return []
 
 
 def set_session_category(session_id: str, category: str):
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            _ensure_session_metadata_columns(conn)
+            upsert_stmt = text(
+                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, FALSE, FALSE, :u) "
+                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category, updated_at = EXCLUDED.updated_at"
+            )
+            conn.execute(upsert_stmt, {"s": session_id, "c": category, "u": _now_iso()})
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.exception("Error listing chat messages", extra={"session_id": session_id}, exc_info=e)
+        return []
+
+
+def set_session_category(session_id: str, category: str):
+    return _upsert_session_metadata(session_id=session_id, category=category)
+
+
+def set_session_pinned(session_id: str, value: bool):
+    return _upsert_session_metadata(session_id=session_id, pinned=value)
+
+
+def set_session_archived(session_id: str, value: bool):
+    return _upsert_session_metadata(session_id=session_id, archived=value)
+
+
+def touch_session_updated_at(session_id: str):
+    return _upsert_session_metadata(session_id=session_id, touch_updated_at=True)
+
+
+def set_session_pinned(session_id: str, pinned: bool):
+    return _upsert_session_metadata(session_id, pinned=pinned, touch_updated_at=True)
+
+
+def set_session_archived(session_id: str, archived: bool):
+    return _upsert_session_metadata(session_id, archived=archived, touch_updated_at=True)
+
+
+def touch_session_updated_at(session_id: str):
+    return _upsert_session_metadata(session_id, touch_updated_at=True)
+
+
+def set_session_flags(session_id: str, pinned: bool = None, archived: bool = None):
     if not engine:
         return False
     try:
@@ -160,7 +209,7 @@ def set_session_category(session_id: str, category: str):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error setting category: {e}")
+        print(f"Error setting session flags: {e}")
         return False
 
 
@@ -202,7 +251,7 @@ def delete_session_metadata(session_id: str):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error deleting session metadata: {e}")
+        logger.exception("Error deleting session metadata", exc_info=e)
         return False
 
 
@@ -214,7 +263,7 @@ def get_config(key: str, default=None):
             result = conn.execute(stmt).first()
             return result[0] if result else default
     except Exception as e:
-        print(f"Error getting config {key}: {e}")
+        logger.exception("Error getting config", extra={"config_key": key}, exc_info=e)
         return default
 
 
@@ -226,11 +275,11 @@ def set_config(key: str, value: str):
                 "INSERT INTO app_configs (config_key, config_value) VALUES (:k, :v) "
                 "ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value"
             )
-            conn.execute(upsert_stmt, {"k": key, "v": value})
+            conn.execute(upsert_stmt, {"k": key, "v": encrypt_config_value(value)})
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error setting config {key}: {e}")
+        logger.exception("Error setting config", extra={"config_key": key}, exc_info=e)
         return False
 
 
@@ -243,7 +292,7 @@ def get_all_configs():
             stmt = select(app_configs.c.config_key, app_configs.c.config_value)
             return {row[0]: row[1] for row in conn.execute(stmt)}
     except Exception as e:
-        print(f"Error getting all configs: {e}")
+        logger.exception("Error getting all configs", exc_info=e)
         return {}
 
 
@@ -255,7 +304,7 @@ def add_core_memory(fact: str):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error adding core memory: {e}")
+        logger.exception("Error adding core memory", exc_info=e)
         return False
 
 
@@ -268,7 +317,7 @@ def get_core_memories():
             stmt = select(core_memories.c.id, core_memories.c.fact)
             return [{"id": row[0], "fact": row[1]} for row in conn.execute(stmt)]
     except Exception as e:
-        print(f"Error getting core memories: {e}")
+        logger.exception("Error getting core memories", exc_info=e)
         return []
 
 
@@ -280,7 +329,7 @@ def delete_core_memory(mem_id: int):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error deleting core memory: {e}")
+        logger.exception("Error deleting core memory", exc_info=e)
         return False
 
 
@@ -293,7 +342,7 @@ def get_network_targets():
             stmt = select(network_targets.c.id, network_targets.c.name, network_targets.c.ip_address)
             return [{"id": row[0], "name": row[1], "ip_address": row[2]} for row in conn.execute(stmt)]
     except Exception as e:
-        print(f"Error getting network targets: {e}")
+        logger.exception("Error getting network targets", exc_info=e)
         return []
 
 
@@ -305,7 +354,7 @@ def add_network_target(name: str, ip_address: str):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error adding network target: {e}")
+        logger.exception("Error adding network target", exc_info=e)
         return False
 
 
@@ -317,7 +366,7 @@ def delete_network_target(target_id: int):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error deleting network target: {e}")
+        print(f"Error deleting task: {e}")
         return False
 
 
