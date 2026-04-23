@@ -9,11 +9,14 @@
 </head>
 <body>
     <div class="app-container">
-        <div style="position: fixed; top: 12px; right: 12px; z-index: 10000; display: flex; gap: 8px; align-items: center;">
+        <div class="user-menu-container">
             <span id="auth-user" class="badge"></span>
             <span id="auth-role" class="badge"></span>
-            <a href="admin.html" class="btn" style="width: auto; text-decoration: none;">Admin</a>
-            <button class="btn" data-logout-btn style="width: auto;">Logout</button>
+            <button class="btn user-menu-trigger" type="button" data-user-menu-btn>Menu ▾</button>
+            <div class="user-menu-panel" data-user-menu-panel>
+                <a href="admin.html" class="user-menu-item">Admin Panel</a>
+                <button class="user-menu-item" data-logout-btn type="button">Logout</button>
+            </div>
         </div>
         <!-- Update Banner -->
         <div id="update-banner" class="update-banner" style="display: none;">
@@ -38,8 +41,11 @@
         <!-- Sidebar -->
         <aside class="sidebar">
             <div class="sidebar-header">
-                <h2>AI Agent</h2>
-                <span class="badge">Memory Active</span>
+                <h2 id="agent-display-name">AI Agent</h2>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <span class="badge">Memory Active</span>
+                    <button id="sidebar-minimize-btn" class="btn icon-btn" type="button" title="Toggle sidebar" style="width:auto; padding:4px 8px;">⇔</button>
+                </div>
             </div>
             
             <button id="new-chat-btn" class="btn primary-btn">
@@ -117,6 +123,7 @@
                         <button id="delete-session-btn" class="btn icon-btn" title="Delete Session" style="background-color: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); padding: 6px;">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                         </button>
+                        <button id="fullscreen-chat-btn" class="btn icon-btn" title="Toggle Fullscreen Chat" style="padding:6px;">⛶</button>
                         <button id="summarize-email-btn" class="btn" title="Summarize today's inbox" style="width:auto; padding:6px 10px; border:1px solid rgba(16,185,129,0.4); background:rgba(16,185,129,0.15); color:#10b981;">
                             Summarize Today’s Email
                         </button>

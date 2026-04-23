@@ -14,12 +14,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const currentSessionIdDisplay = document.getElementById('current-session-id');
     const sessionCategorySelect = document.getElementById('session-category');
     const deleteSessionBtn = document.getElementById('delete-session-btn');
+    const fullscreenChatBtn = document.getElementById('fullscreen-chat-btn');
     const attachBtn = document.getElementById('attach-btn');
     const fileInput = document.getElementById('file-input');
     const attachmentPreview = document.getElementById('attachment-preview');
     const webSearchToggle = document.getElementById('web-search-toggle');
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
     const sidebar = document.querySelector('.sidebar');
+    const sidebarMinimizeBtn = document.getElementById('sidebar-minimize-btn');
+    const agentDisplayName = document.getElementById('agent-display-name');
     const tasksViewBtn = document.getElementById('tasks-view-btn');
     const taskQuickAddInput = document.getElementById('task-quick-add-input');
     const taskQuickAddBtn = document.getElementById('task-quick-add-btn');
@@ -33,6 +36,20 @@ document.addEventListener('DOMContentLoaded', () => {
     currentSessionIdDisplay.textContent = currentSessionId;
 
     let globalConfigs = {};
+    let isUserAway = false;
+
+    function toggleFullscreenChat() {
+        const container = document.querySelector('.app-container');
+        if (!container) return;
+        container.classList.toggle('chat-fullscreen');
+        localStorage.setItem('chat_fullscreen', container.classList.contains('chat-fullscreen') ? '1' : '0');
+    }
+
+    function setSidebarMinimized(minimized) {
+        if (!sidebar) return;
+        sidebar.classList.toggle('minimized', !!minimized);
+        localStorage.setItem('sidebar_minimized', minimized ? '1' : '0');
+    }
 
     async function checkGlobalConfigs() {
         try {
@@ -41,6 +58,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (globalConfigs.default_model && !sessionStorage.getItem('model_set')) {
                 modelSelect.value = globalConfigs.default_model;
                 sessionStorage.setItem('model_set', 'true');
+            }
+            if (agentDisplayName) {
+                agentDisplayName.textContent = globalConfigs.chat_agent_name || 'AI Agent';
             }
             updateApiKeyVisibility();
         } catch (e) {
@@ -73,6 +93,31 @@ document.addEventListener('DOMContentLoaded', () => {
         checkGlobalConfigs();
     };
     initializeApp();
+
+    if (sidebar) {
+        const savedMinimized = localStorage.getItem('sidebar_minimized');
+        const shouldAutoMinimize = window.innerWidth < 1200;
+        setSidebarMinimized(savedMinimized ? savedMinimized === '1' : shouldAutoMinimize);
+    }
+
+    const appContainer = document.querySelector('.app-container');
+    if (appContainer && localStorage.getItem('chat_fullscreen') === '1') {
+        appContainer.classList.add('chat-fullscreen');
+    }
+
+    if (sidebarMinimizeBtn) {
+        sidebarMinimizeBtn.addEventListener('click', () => {
+            setSidebarMinimized(!sidebar.classList.contains('minimized'));
+        });
+    }
+
+    if (fullscreenChatBtn) {
+        fullscreenChatBtn.addEventListener('click', toggleFullscreenChat);
+    }
+
+    window.addEventListener('blur', () => { isUserAway = true; });
+    window.addEventListener('focus', () => { isUserAway = false; });
+    document.addEventListener('visibilitychange', () => { isUserAway = document.hidden; });
 
     if (sessionSearchInput) {
         sessionSearchInput.addEventListener('input', () => {
@@ -205,7 +250,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const formData = new FormData();
                 formData.append('file', files[i]);
                 try {
-                    const response = await fetch('/api/upload', {
+                    const response = await fetch(`/api/upload?session_id=${encodeURIComponent(currentSessionId)}`, {
                         method: 'POST',
                         body: formData
                     });
@@ -373,6 +418,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 appendMessage('ai', data.response, false, data.web_search_status);
                 // Refresh sessions list in case this was a new session
                 loadSessions();
+                if (isUserAway) {
+                    if ('Notification' in window) {
+                        if (Notification.permission === 'granted') {
+                            new Notification('AmpAI Reply Ready', { body: data.response?.slice(0, 120) || 'New AI reply received.' });
+                        } else if (Notification.permission !== 'denied') {
+                            Notification.requestPermission();
+                        }
+                    }
+                    fetch('/api/notifications/chat-reply', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            session_id: currentSessionId,
+                            reply_preview: data.response || '',
+                        }),
+                    }).catch(() => {});
+                }
             } else {
                 appendMessage('ai', `Error: ${data.detail || 'Something went wrong.'}`);
             }

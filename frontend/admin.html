@@ -68,12 +68,62 @@
     <div class="admin-container">
         <div class="admin-header">
             <h1>Admin Dashboard</h1>
-            <div style="display: flex; align-items: center; gap: 8px;">
+            <div class="user-menu-container" style="position: static;">
                 <span id="auth-user" class="badge"></span>
                 <span id="auth-role" class="badge"></span>
-                <a href="index.html" class="btn" style="background: rgba(255,255,255,0.1); color: white; text-decoration: none;">&larr; Back to Chat</a>
-                <button class="btn" data-logout-btn style="width: auto;">Logout</button>
+                <button class="btn user-menu-trigger" type="button" data-user-menu-btn>Menu ▾</button>
+                <div class="user-menu-panel" data-user-menu-panel>
+                    <a href="index.html" class="user-menu-item">&larr; Back to Chat</a>
+                    <button class="user-menu-item" data-logout-btn type="button">Logout</button>
+                </div>
             </div>
+        </div>
+
+        <div class="card">
+            <h2>Admin Password</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Change the admin password used for login.</p>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 14px;">
+                <div>
+                    <label style="display:block; margin-bottom:6px;">Current Password</label>
+                    <input type="password" id="admin-current-password" class="modern-input" placeholder="Current password">
+                </div>
+                <div>
+                    <label style="display:block; margin-bottom:6px;">New Password</label>
+                    <input type="password" id="admin-new-password" class="modern-input" placeholder="At least 8 characters">
+                </div>
+            </div>
+            <div style="margin-top: 12px; display: flex; gap: 10px; align-items: center;">
+                <button id="admin-change-password-btn" class="btn primary-btn" style="width: auto;">Change Password</button>
+                <span id="admin-password-status" style="font-size: 0.9rem;"></span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>User Management</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Create, edit, and delete users for login access.</p>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 14px;">
+                <input id="new-user-username" class="modern-input" placeholder="Username">
+                <input id="new-user-password" class="modern-input" type="password" placeholder="Password (min 8)">
+                <select id="new-user-role" class="modern-input">
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                </select>
+                <button id="create-user-btn" class="btn primary-btn" style="width: auto;">Create User</button>
+            </div>
+            <div id="user-status" style="margin-top: 10px; font-size: 0.9rem;"></div>
+
+            <table class="data-table" style="margin-top: 14px;">
+                <thead>
+                    <tr>
+                        <th>Username</th>
+                        <th>Role</th>
+                        <th>Password</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="users-tbody"></tbody>
+            </table>
         </div>
 
         <div class="card">
@@ -161,6 +211,36 @@
                     <option value="openrouter">OpenRouter (Free Models)</option>
                     <option value="anythingllm">AnythingLLM Workspace</option>
                 </select>
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin: 10px 0 6px;">Agent Display Name</label>
+                <input type="text" id="config-chat-agent-name" class="modern-input" placeholder="AI Agent" style="max-width: 320px;">
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin: 10px 0 6px;">Agent Avatar URL</label>
+                <input type="text" id="config-chat-agent-avatar-url" class="modern-input" placeholder="https://.../avatar.png" style="max-width: 520px;">
+            </div>
+
+            <div style="margin-bottom: 20px;">
+                <h3>Backup Destination (Local/FTP)</h3>
+                <select id="config-backup-mode" class="modern-input" style="max-width: 200px; margin-bottom: 10px;">
+                    <option value="local">Local</option>
+                    <option value="ftp">FTP</option>
+                </select>
+                <input type="text" id="config-backup-local-path" class="modern-input" placeholder="/tmp/ampai_backups" style="max-width: 520px; margin-bottom: 10px;">
+                <input type="text" id="config-backup-ftp-host" class="modern-input" placeholder="FTP Host" style="max-width: 320px; margin-bottom: 8px;">
+                <input type="text" id="config-backup-ftp-user" class="modern-input" placeholder="FTP User" style="max-width: 320px; margin-bottom: 8px;">
+                <input type="password" id="config-backup-ftp-password" class="modern-input" placeholder="FTP Password" style="max-width: 320px; margin-bottom: 8px;">
+                <input type="text" id="config-backup-ftp-path" class="modern-input" placeholder="/remote/path" style="max-width: 520px;">
+                <button id="run-backup-btn" class="btn" style="width:auto; margin-top:10px;">Run Backup Now</button>
+                <span id="backup-status" style="margin-left:10px; font-size:0.9rem;"></span>
+            </div>
+
+            <div style="margin-bottom: 20px;">
+                <h3>Email Notifications (Resend)</h3>
+                <input type="password" id="config-resend-api-key" class="modern-input" placeholder="Resend API key" style="max-width: 420px; margin-bottom: 8px;">
+                <input type="text" id="config-resend-from-email" class="modern-input" placeholder="from@yourdomain.com" style="max-width: 420px; margin-bottom: 8px;">
+                <input type="text" id="config-notification-email-to" class="modern-input" placeholder="alerts@yourdomain.com" style="max-width: 420px;">
+                <label style="display:flex; align-items:center; gap:8px; margin-top:10px; color:var(--text-secondary); font-size:0.9rem;">
+                    <input type="checkbox" id="config-chat-reply-email-notifications">
+                    Enable email when chat reply is ready and user is away
+                </label>
             </div>
 
             <div style="margin-bottom: 20px;">
@@ -276,6 +356,36 @@
                     <!-- Loaded via JS -->
                 </tbody>
             </table>
+        </div>
+
+        <div class="card">
+            <h2>User Media Attachments</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Uploaded files grouped by user accounts.</p>
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>User</th>
+                        <th>Session</th>
+                        <th>File</th>
+                        <th>Type</th>
+                    </tr>
+                </thead>
+                <tbody id="media-tbody"></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>Memory Share Groups</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem;">Create groups and share session IDs internally.</p>
+            <div style="display:grid; grid-template-columns:2fr 2fr 1fr auto; gap:8px; margin-top:10px;">
+                <input id="group-name" class="modern-input" placeholder="Group name">
+                <input id="group-members" class="modern-input" placeholder="Members (comma usernames)">
+                <input id="group-session-id" class="modern-input" placeholder="Session to share">
+                <button id="create-group-btn" class="btn primary-btn" style="width:auto;">Create Group</button>
+            </div>
+            <button id="share-group-session-btn" class="btn" style="width:auto; margin-top:8px;">Share Session to Latest Group</button>
+            <div id="group-status" style="margin-top:8px; font-size:0.9rem;"></div>
+            <ul id="groups-list" style="margin-top:10px; padding-left:18px;"></ul>
         </div>
     </div>
 
