@@ -182,6 +182,22 @@ class EmailSummaryTodayRequest(BaseModel):
     session_id: str = "system_email_reports"
 
 
+class EmailProviderConnectRequest(BaseModel):
+    provider: str
+    credentials: Dict[str, str]
+
+
+class EmailProviderDisconnectRequest(BaseModel):
+    provider: str
+
+
+class EmailDigestScheduleRequest(BaseModel):
+    provider: str = "outlook"
+    hour: int = 7
+    minute: int = 30
+    timezone: str = "UTC"
+
+
 class UserLoginResponse(BaseModel):
     username: str
     role: str
@@ -225,6 +241,17 @@ def _load_integration_credentials(provider: str) -> Dict[str, str]:
 
 def _save_integration_credentials(provider: str, credentials: Dict[str, str]) -> None:
     set_config(f"integration_email_{provider}_credentials", json.dumps(credentials))
+
+
+def _sanitize_email_credentials(credentials: Dict[str, str]) -> Dict[str, str]:
+    allowed_keys = {"client_id", "client_secret", "refresh_token", "access_token", "expires_at", "tenant_id"}
+    sanitized = {k: v for k, v in credentials.items() if k in allowed_keys}
+    if "expires_at" in sanitized:
+        try:
+            sanitized["expires_at"] = int(sanitized["expires_at"])
+        except Exception:
+            sanitized["expires_at"] = 0
+    return sanitized
 
 
 def _ensure_valid_email_access_token(provider: str) -> str:
@@ -733,6 +760,63 @@ def run_sweep_now(_: UserContext = Depends(require_admin_user)):
 @app.post("/api/admin/integrations/email/digest/run")
 def run_email_digest_now(_: UserContext = Depends(require_admin_user)):
     run_email_digest_job()
+    return {"status": "success"}
+
+
+@app.get("/api/admin/integrations/email/status")
+def get_email_integration_status(_: UserContext = Depends(require_admin_user)):
+    out = {}
+    for provider in ("outlook", "gmail"):
+        creds = _load_integration_credentials(provider)
+        out[provider] = {
+            "connected": bool(creds.get("refresh_token") or creds.get("access_token")),
+            "expires_at": int(creds.get("expires_at") or 0),
+        }
+    return out
+
+
+@app.post("/api/admin/integrations/email/connect")
+def connect_email_integration(request: EmailProviderConnectRequest, _: UserContext = Depends(require_admin_user)):
+    provider = request.provider.strip().lower()
+    if provider not in {"outlook", "gmail"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+    if not isinstance(request.credentials, dict) or not request.credentials:
+        raise HTTPException(status_code=400, detail="Credentials JSON is required")
+    creds = _sanitize_email_credentials(request.credentials)
+    if not (creds.get("refresh_token") or creds.get("access_token")):
+        raise HTTPException(status_code=400, detail="Provide at least refresh_token or access_token")
+    _save_integration_credentials(provider, creds)
+    return {"status": "success", "provider": provider}
+
+
+@app.post("/api/admin/integrations/email/disconnect")
+def disconnect_email_integration(request: EmailProviderDisconnectRequest, _: UserContext = Depends(require_admin_user)):
+    provider = request.provider.strip().lower()
+    if provider not in {"outlook", "gmail"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+    _save_integration_credentials(provider, {})
+    if get_config("email_digest_provider", "outlook") == provider:
+        set_config("email_digest_provider", "outlook")
+    return {"status": "success", "provider": provider}
+
+
+@app.post("/api/admin/integrations/email/schedule")
+def update_email_digest_schedule(request: EmailDigestScheduleRequest, _: UserContext = Depends(require_admin_user)):
+    provider = request.provider.strip().lower()
+    if provider not in {"outlook", "gmail"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+    if request.hour < 0 or request.hour > 23:
+        raise HTTPException(status_code=400, detail="Hour must be 0-23")
+    if request.minute < 0 or request.minute > 59:
+        raise HTTPException(status_code=400, detail="Minute must be 0-59")
+    try:
+        ZoneInfo(request.timezone)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid timezone: {request.timezone}") from exc
+    set_config("email_digest_provider", provider)
+    set_config("email_digest_hour", str(request.hour))
+    set_config("email_digest_minute", str(request.minute))
+    set_config("email_digest_timezone", request.timezone)
     return {"status": "success"}
 
 

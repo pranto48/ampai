@@ -21,7 +21,7 @@ from logging_utils import get_logger
 
 scheduler = BackgroundScheduler()
 logger = get_logger(__name__)
-LAST_RUN = {"network_sweep": None, "task_reminders": None}
+LAST_RUN = {"network_sweep": None, "task_reminders": None, "email_digest": None}
 
 def ping_target(ip_address: str) -> dict:
     try:
@@ -171,6 +171,7 @@ def _ensure_access_token(provider: str) -> str:
 
 
 def run_email_digest_job():
+    LAST_RUN["email_digest"] = datetime.now(timezone.utc).isoformat()
     provider = (get_config("email_digest_provider", "outlook") or "outlook").strip().lower()
     tz_name = (get_config("email_digest_timezone", "UTC") or "UTC").strip()
     max_results = int(get_config("email_digest_max_results", "25") or "25")
