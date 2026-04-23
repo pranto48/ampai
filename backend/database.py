@@ -1,14 +1,7 @@
 import os
-import json
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Tuple
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
-from cryptography.fernet import Fernet, InvalidToken
-from langchain_community.chat_message_histories import SQLChatMessageHistory
-from logging_utils import get_logger
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, select, inspect, text, Boolean
 
-# Allow overriding for local testing vs docker
-# Default to Postgres container format
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
 CHAT_HISTORY_TABLE = os.getenv("CHAT_HISTORY_TABLE", "chat_message_store")
 
@@ -17,6 +10,7 @@ metadata = MetaData()
 ENCRYPTED_PREFIX = "enc::"
 logger = get_logger(__name__)
 
+# LangChain SQLChatMessageHistory compatibility table.
 message_store = Table(
     'message_store', metadata,
     Column('id', Integer, primary_key=True),
@@ -28,9 +22,9 @@ session_metadata = Table(
     'session_metadata', metadata,
     Column('session_id', String, primary_key=True),
     Column('category', String, default='Uncategorized'),
-    Column('pinned', Integer, nullable=False, default=0),
-    Column('archived', Integer, nullable=False, default=0),
-    Column('updated_at', DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    Column('pinned', Boolean, default=False),
+    Column('archived', Boolean, default=False),
+    Column('updated_at', String, default=lambda: datetime.now(timezone.utc).isoformat())
 )
 
 app_configs = Table(
@@ -53,18 +47,22 @@ network_targets = Table(
 )
 
 tasks = Table(
-    "tasks",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("title", String, nullable=False),
-    Column("description", String),
-    Column("status", String, nullable=False, default="todo"),
-    Column("priority", String, nullable=False, default="medium"),
-    Column("due_at", DateTime(timezone=True), nullable=True),
-    Column("session_id", String, nullable=True),
-    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    'tasks', metadata,
+    Column('id', Integer, primary_key=True, autoincrement=True),
+    Column('title', String),
+    Column('description', String),
+    Column('status', String, default='todo'),
+    Column('priority', String, default='medium'),
+    Column('due_at', String),
+    Column('session_id', String),
+    Column('created_at', String, default=lambda: datetime.now(timezone.utc).isoformat()),
+    Column('updated_at', String, default=lambda: datetime.now(timezone.utc).isoformat())
 )
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
 
 try:
     engine = create_engine(DATABASE_URL)
@@ -72,178 +70,32 @@ try:
 except Exception:
     pass
 
-DEFAULT_APP_CONFIG_KEYS = [
-    "web_search_secondary_provider",
-    "web_fallback_provider",
-    "serpapi_api_key",
-    "bing_api_key",
-    "custom_web_search_url",
-    "custom_web_search_api_key",
-]
+
+def _ensure_session_metadata_columns(conn):
+    # Lightweight runtime migration for existing deployments.
+    conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS pinned BOOLEAN DEFAULT FALSE"))
+    conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE"))
+    conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS updated_at VARCHAR"))
 
 
-def ensure_default_app_config_keys():
+def touch_session(session_id: str):
     if not engine:
         return
     try:
         with engine.connect() as conn:
-            for key in DEFAULT_APP_CONFIG_KEYS:
-                upsert_stmt = text(
-                    "INSERT INTO app_configs (config_key, config_value) VALUES (:k, :v) "
-                    "ON CONFLICT (config_key) DO NOTHING"
-                )
-                conn.execute(upsert_stmt, {"k": key, "v": ""})
-            conn.commit()
-    except Exception as e:
-        logger.exception("Error ensuring default config keys", exc_info=e)
-
-
-def migrate_session_metadata_schema():
-    if not engine:
-        return
-    try:
-        with engine.connect() as conn:
-            inspector = inspect(engine)
-            if not inspector.has_table("session_metadata"):
-                return
-            columns = {col["name"] for col in inspector.get_columns("session_metadata")}
-            if "pinned" not in columns:
-                conn.execute(text("ALTER TABLE session_metadata ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"))
-            if "archived" not in columns:
-                conn.execute(text("ALTER TABLE session_metadata ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"))
-            if "updated_at" not in columns:
-                conn.execute(text("ALTER TABLE session_metadata ADD COLUMN updated_at TIMESTAMPTZ"))
-                conn.execute(text("UPDATE session_metadata SET updated_at = NOW() WHERE updated_at IS NULL"))
-            conn.commit()
-    except Exception as e:
-        logger.exception("Error migrating session metadata schema", exc_info=e)
-
-
-migrate_session_metadata_schema()
-ensure_default_app_config_keys()
-
-
-def _load_fernet_keys() -> List[Fernet]:
-    active_key = os.getenv("CONFIG_ENCRYPTION_KEY")
-    previous_keys = os.getenv("CONFIG_ENCRYPTION_PREVIOUS_KEYS", "")
-
-    keys = []
-    if active_key:
-        keys.append(active_key)
-    if previous_keys:
-        keys.extend([k.strip() for k in previous_keys.split(",") if k.strip()])
-
-    fernets: List[Fernet] = []
-    for key in keys:
-        try:
-            fernets.append(Fernet(key.encode()))
-        except Exception:
-            logger.warning("Invalid config encryption key provided; skipping key")
-    return fernets
-
-
-def encrypt_config_value(value: Optional[str]) -> Optional[str]:
-    if value is None or value == "":
-        return value
-    if value.startswith(ENCRYPTED_PREFIX):
-        return value
-
-    fernets = _load_fernet_keys()
-    if not fernets:
-        return value
-
-    token = fernets[0].encrypt(value.encode("utf-8")).decode("utf-8")
-    return f"{ENCRYPTED_PREFIX}{token}"
-
-
-def decrypt_config_value(value: Optional[str]) -> Optional[str]:
-    if value is None or value == "":
-        return value
-    if not value.startswith(ENCRYPTED_PREFIX):
-        return value
-
-    token = value[len(ENCRYPTED_PREFIX):]
-    fernets = _load_fernet_keys()
-    for f in fernets:
-        try:
-            return f.decrypt(token.encode("utf-8")).decode("utf-8")
-        except InvalidToken:
-            continue
-        except Exception:
-            continue
-    return None
-
-
-def migrate_app_config_encryption() -> dict:
-    if not engine:
-        return {"updated": 0, "failed": 0, "checked": 0}
-
-    updated = 0
-    failed = 0
-    checked = 0
-
-    try:
-        with engine.connect() as conn:
-            stmt = select(app_configs.c.config_key, app_configs.c.config_value)
-            rows = conn.execute(stmt).fetchall()
-            for key, value in rows:
-                checked += 1
-                if value is None or value == "":
-                    continue
-
-                current_plain = decrypt_config_value(value)
-                if current_plain is None:
-                    failed += 1
-                    continue
-
-                reencrypted = encrypt_config_value(current_plain)
-                if reencrypted != value:
-                    upsert_stmt = text(
-                        "INSERT INTO app_configs (config_key, config_value) VALUES (:k, :v) "
-                        "ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value"
-                    )
-                    conn.execute(upsert_stmt, {"k": key, "v": reencrypted})
-                    updated += 1
-            conn.commit()
-    except Exception as e:
-        logger.exception("Error migrating app config encryption", exc_info=e)
-
-    return {"updated": updated, "failed": failed, "checked": checked}
-
-def _upsert_session_metadata(session_id: str, category: Optional[str] = None, pinned: Optional[bool] = None, archived: Optional[bool] = None, touch_updated_at: bool = False):
-    if not engine:
-        return False
-    try:
-        with engine.connect() as conn:
+            _ensure_session_metadata_columns(conn)
             upsert_stmt = text(
-                """
-                INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at)
-                VALUES (:s, COALESCE(:c, 'Uncategorized'), COALESCE(:p, 0), COALESCE(:a, 0), NOW())
-                ON CONFLICT (session_id) DO UPDATE SET
-                    category = COALESCE(:c, session_metadata.category),
-                    pinned = COALESCE(:p, session_metadata.pinned),
-                    archived = COALESCE(:a, session_metadata.archived),
-                    updated_at = CASE WHEN :touch = 1 THEN NOW() ELSE session_metadata.updated_at END
-                """
+                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) "
+                "VALUES (:s, :c, FALSE, FALSE, :u) "
+                "ON CONFLICT (session_id) DO UPDATE SET updated_at = EXCLUDED.updated_at"
             )
-            conn.execute(
-                upsert_stmt,
-                {
-                    "s": session_id,
-                    "c": category,
-                    "p": int(pinned) if pinned is not None else None,
-                    "a": int(archived) if archived is not None else None,
-                    "touch": 1 if touch_updated_at else 0,
-                },
-            )
+            conn.execute(upsert_stmt, {"s": session_id, "c": "Uncategorized", "u": _now_iso()})
             conn.commit()
-            return True
     except Exception as e:
-        logger.exception("Error upserting session metadata", exc_info=e)
-        return False
+        print(f"Error touching session: {e}")
 
 
-def get_all_sessions(query: Optional[str] = None, category: Optional[str] = None, archived: Optional[bool] = None):
+def get_all_sessions(query: str = "", include_archived: bool = False):
     if not engine:
         return []
     try:
@@ -252,132 +104,64 @@ def get_all_sessions(query: Optional[str] = None, category: Optional[str] = None
             if not inspector.has_table(CHAT_HISTORY_TABLE):
                 return []
 
-            # Derive sessions from the same canonical SQL history table used by /api/history.
-            session_rows = conn.execute(
-                text(
-                    f"SELECT id, session_id, message FROM {CHAT_HISTORY_TABLE} "
-                    "WHERE session_id IS NOT NULL ORDER BY id ASC"
-                )
-            ).fetchall()
+            _ensure_session_metadata_columns(conn)
 
-            # Safeguard: filter malformed/partial records and dedupe duplicated message rows.
-            by_session = {}
-            for _, session_id, raw_message in session_rows:
-                if not session_id or not raw_message:
-                    continue
-                parsed = _parse_chat_payload(raw_message)
-                if not parsed:
-                    continue
+            # Canonical source: message_store table used by SQLChatMessageHistory.
+            stmt_sessions = select(message_store.c.session_id).distinct()
+            session_ids = [row[0] for row in conn.execute(stmt_sessions) if row[0]]
 
-                msg_type, content = parsed
-
-                bucket = by_session.setdefault(session_id, {"roles": set(), "fingerprints": set()})
-                fingerprint = f"{msg_type}:{content}"
-                if fingerprint in bucket["fingerprints"]:
-                    continue
-                bucket["fingerprints"].add(fingerprint)
-                bucket["roles"].add(msg_type)
-
-            # Include sessions that have at least one valid message.
-            session_ids = sorted([session_id for session_id, data in by_session.items() if data["fingerprints"]])
-            
-            # Fetch metadata
-            stmt_cats = select(
+            stmt_meta = select(
                 session_metadata.c.session_id,
                 session_metadata.c.category,
                 session_metadata.c.pinned,
                 session_metadata.c.archived,
                 session_metadata.c.updated_at,
             )
-            cats_result = conn.execute(stmt_cats)
             meta_map = {
                 row[0]: {
                     "category": row[1] or "Uncategorized",
                     "pinned": bool(row[2]),
                     "archived": bool(row[3]),
-                    "updated_at": row[4].isoformat() if row[4] else None,
+                    "updated_at": row[4],
                 }
-                for row in cats_result
+                for row in conn.execute(stmt_meta)
             }
-            
+
             output = []
+            q = query.lower().strip()
             for s_id in session_ids:
-                meta = meta_map.get(s_id, {})
-                output.append({
-                    "session_id": s_id,
-                    "category": meta.get("category", "Uncategorized"),
-                    "pinned": meta.get("pinned", False),
-                    "archived": meta.get("archived", False),
-                    "updated_at": meta.get("updated_at"),
+                meta = meta_map.get(s_id, {
+                    "category": "Uncategorized",
+                    "pinned": False,
+                    "archived": False,
+                    "updated_at": None,
                 })
-            if query:
-                query_l = query.lower()
-                output = [
-                    s for s in output
-                    if query_l in s["session_id"].lower() or query_l in (s["category"] or "").lower()
-                ]
-            if category:
-                output = [s for s in output if s["category"] == category]
-            if archived is not None:
-                output = [s for s in output if s["archived"] is archived]
-            output.sort(key=lambda s: (s["pinned"], s["updated_at"] or ""), reverse=True)
+                if not include_archived and meta["archived"]:
+                    continue
+                if q and q not in s_id.lower() and q not in meta["category"].lower():
+                    continue
+                output.append({"session_id": s_id, **meta})
+
+            output.sort(key=lambda x: (not x["pinned"], x.get("updated_at") or "", x["session_id"]), reverse=False)
             return output
     except Exception as e:
         logger.exception("Error fetching sessions", exc_info=e)
         return []
 
 
-def get_sql_chat_history(session_id: str) -> SQLChatMessageHistory:
-    return SQLChatMessageHistory(
-        session_id=session_id,
-        connection_string=DATABASE_URL,
-        table_name=CHAT_HISTORY_TABLE,
-    )
-
-
-def _parse_chat_payload(raw_message: str) -> Optional[Tuple[str, str]]:
-    try:
-        payload = json.loads(raw_message)
-    except (TypeError, json.JSONDecodeError):
-        return None
-
-    msg_type = payload.get("type")
-    content = ((payload.get("data") or {}).get("content")) if isinstance(payload, dict) else None
-    if msg_type not in {"human", "ai"} or not isinstance(content, str):
-        return None
-    return msg_type, content
-
-
-def list_chat_messages(session_id: str, dedupe: bool = True) -> List[Dict[str, str]]:
-    """
-    Read canonical SQL chat history with optional duplicate filtering.
-    Duplicate key is (msg_type, content) within a session.
-    """
+def set_session_category(session_id: str, category: str):
     if not engine:
         return []
     try:
         with engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    f"SELECT message FROM {CHAT_HISTORY_TABLE} "
-                    "WHERE session_id = :session_id ORDER BY id ASC"
-                ),
-                {"session_id": session_id},
-            ).fetchall()
-
-        messages: List[Dict[str, str]] = []
-        seen = set()
-        for (raw_message,) in rows:
-            parsed = _parse_chat_payload(raw_message)
-            if not parsed:
-                continue
-            msg_type, content = parsed
-            fingerprint = (msg_type, content)
-            if dedupe and fingerprint in seen:
-                continue
-            seen.add(fingerprint)
-            messages.append({"type": msg_type, "content": content})
-        return messages
+            _ensure_session_metadata_columns(conn)
+            upsert_stmt = text(
+                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, FALSE, FALSE, :u) "
+                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category, updated_at = EXCLUDED.updated_at"
+            )
+            conn.execute(upsert_stmt, {"s": session_id, "c": category, "u": _now_iso()})
+            conn.commit()
+            return True
     except Exception as e:
         logger.exception("Error listing chat messages", extra={"session_id": session_id}, exc_info=e)
         return []
@@ -431,6 +215,36 @@ def set_session_archived(session_id: str, archived: bool):
 def touch_session_updated_at(session_id: str):
     return _upsert_session_metadata(session_id, touch_updated_at=True)
 
+
+def set_session_flags(session_id: str, pinned: bool = None, archived: bool = None):
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            _ensure_session_metadata_columns(conn)
+            touch = _now_iso()
+            existing = conn.execute(select(session_metadata).where(session_metadata.c.session_id == session_id)).first()
+            category = existing.category if existing else "Uncategorized"
+            curr_pinned = bool(existing.pinned) if existing else False
+            curr_archived = bool(existing.archived) if existing else False
+            upsert_stmt = text(
+                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, :p, :a, :u) "
+                "ON CONFLICT (session_id) DO UPDATE SET pinned = EXCLUDED.pinned, archived = EXCLUDED.archived, updated_at = EXCLUDED.updated_at"
+            )
+            conn.execute(upsert_stmt, {
+                "s": session_id,
+                "c": category,
+                "p": curr_pinned if pinned is None else pinned,
+                "a": curr_archived if archived is None else archived,
+                "u": touch,
+            })
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error setting session flags: {e}")
+        return False
+
+
 def delete_session_metadata(session_id: str):
     if not engine: return False
     try:
@@ -443,19 +257,18 @@ def delete_session_metadata(session_id: str):
         logger.exception("Error deleting session metadata", exc_info=e)
         return False
 
+
 def get_config(key: str, default=None):
     if not engine: return default
     try:
         with engine.connect() as conn:
             stmt = select(app_configs.c.config_value).where(app_configs.c.config_key == key)
             result = conn.execute(stmt).first()
-            if result:
-                decrypted = decrypt_config_value(result[0])
-                return decrypted if decrypted is not None else default
-            return default
+            return result[0] if result else default
     except Exception as e:
         logger.exception("Error getting config", extra={"config_key": key}, exc_info=e)
         return default
+
 
 def set_config(key: str, value: str):
     if not engine: return False
@@ -472,91 +285,87 @@ def set_config(key: str, value: str):
         logger.exception("Error setting config", extra={"config_key": key}, exc_info=e)
         return False
 
+
 def get_all_configs():
     if not engine: return {}
     try:
         with engine.connect() as conn:
-            from sqlalchemy import inspect
-            if not inspect(engine).has_table("app_configs"): return {}
+            if not inspect(engine).has_table("app_configs"):
+                return {}
             stmt = select(app_configs.c.config_key, app_configs.c.config_value)
-            result = conn.execute(stmt)
-            output = {}
-            for row in result:
-                decrypted = decrypt_config_value(row[1])
-                output[row[0]] = decrypted if decrypted is not None else ""
-            return output
+            return {row[0]: row[1] for row in conn.execute(stmt)}
     except Exception as e:
         logger.exception("Error getting all configs", exc_info=e)
         return {}
+
 
 def add_core_memory(fact: str):
     if not engine: return False
     try:
         with engine.connect() as conn:
-            stmt = text("INSERT INTO core_memories (fact) VALUES (:f)")
-            conn.execute(stmt, {"f": fact})
+            conn.execute(text("INSERT INTO core_memories (fact) VALUES (:f)"), {"f": fact})
             conn.commit()
             return True
     except Exception as e:
         logger.exception("Error adding core memory", exc_info=e)
         return False
 
+
 def get_core_memories():
     if not engine: return []
     try:
         with engine.connect() as conn:
-            from sqlalchemy import inspect
-            if not inspect(engine).has_table("core_memories"): return []
+            if not inspect(engine).has_table("core_memories"):
+                return []
             stmt = select(core_memories.c.id, core_memories.c.fact)
-            result = conn.execute(stmt)
-            return [{"id": row[0], "fact": row[1]} for row in result]
+            return [{"id": row[0], "fact": row[1]} for row in conn.execute(stmt)]
     except Exception as e:
         logger.exception("Error getting core memories", exc_info=e)
         return []
+
 
 def delete_core_memory(mem_id: int):
     if not engine: return False
     try:
         with engine.connect() as conn:
-            stmt = text("DELETE FROM core_memories WHERE id = :id")
-            conn.execute(stmt, {"id": mem_id})
+            conn.execute(text("DELETE FROM core_memories WHERE id = :id"), {"id": mem_id})
             conn.commit()
             return True
     except Exception as e:
         logger.exception("Error deleting core memory", exc_info=e)
         return False
 
+
 def get_network_targets():
     if not engine: return []
     try:
         with engine.connect() as conn:
-            from sqlalchemy import inspect
-            if not inspect(engine).has_table("network_targets"): return []
+            if not inspect(engine).has_table("network_targets"):
+                return []
             stmt = select(network_targets.c.id, network_targets.c.name, network_targets.c.ip_address)
-            result = conn.execute(stmt)
-            return [{"id": row[0], "name": row[1], "ip_address": row[2]} for row in result]
+            return [{"id": row[0], "name": row[1], "ip_address": row[2]} for row in conn.execute(stmt)]
     except Exception as e:
         logger.exception("Error getting network targets", exc_info=e)
         return []
+
 
 def add_network_target(name: str, ip_address: str):
     if not engine: return False
     try:
         with engine.connect() as conn:
-            stmt = text("INSERT INTO network_targets (name, ip_address) VALUES (:n, :i)")
-            conn.execute(stmt, {"n": name, "i": ip_address})
+            conn.execute(text("INSERT INTO network_targets (name, ip_address) VALUES (:n, :i)"), {"n": name, "i": ip_address})
             conn.commit()
             return True
     except Exception as e:
         logger.exception("Error adding network target", exc_info=e)
         return False
 
+
 def delete_network_target(target_id: int):
     if not engine: return False
     try:
         with engine.connect() as conn:
-            stmt = text("DELETE FROM network_targets WHERE id = :id")
-            conn.execute(stmt, {"id": target_id})
+            conn.execute(text("DELETE FROM network_targets WHERE id = :id"), {"id": target_id})
             conn.commit()
             return True
     except Exception as e:
@@ -707,4 +516,71 @@ def delete_task(task_id: int):
             return result.rowcount > 0
     except Exception as e:
         logger.exception("Error deleting task", exc_info=e)
+        return False
+
+
+def create_task(title: str, description: str = "", priority: str = "medium", due_at: str = None, session_id: str = None):
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            now = _now_iso()
+            stmt = text(
+                "INSERT INTO tasks (title, description, status, priority, due_at, session_id, created_at, updated_at) "
+                "VALUES (:t, :d, 'todo', :p, :due, :sid, :c, :u) RETURNING id"
+            )
+            res = conn.execute(stmt, {"t": title, "d": description, "p": priority, "due": due_at, "sid": session_id, "c": now, "u": now})
+            task_id = res.scalar()
+            conn.commit()
+            return task_id
+    except Exception as e:
+        print(f"Error creating task: {e}")
+        return None
+
+
+def list_tasks(status: str = None):
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            query = select(tasks)
+            if status:
+                query = query.where(tasks.c.status == status)
+            rows = conn.execute(query).fetchall()
+            return [dict(r._mapping) for r in rows]
+    except Exception as e:
+        print(f"Error listing tasks: {e}")
+        return []
+
+
+def update_task(task_id: int, updates: dict):
+    if not engine:
+        return False
+    try:
+        allowed = {"title", "description", "status", "priority", "due_at", "session_id"}
+        safe_updates = {k: v for k, v in updates.items() if k in allowed and v is not None}
+        if not safe_updates:
+            return False
+        safe_updates["updated_at"] = _now_iso()
+        set_clause = ", ".join([f"{k} = :{k}" for k in safe_updates.keys()])
+        safe_updates["id"] = task_id
+        with engine.connect() as conn:
+            conn.execute(text(f"UPDATE tasks SET {set_clause} WHERE id = :id"), safe_updates)
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error updating task: {e}")
+        return False
+
+
+def delete_task(task_id: int):
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_id})
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error deleting task: {e}")
         return False

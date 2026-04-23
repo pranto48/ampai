@@ -1,4 +1,34 @@
 document.addEventListener('DOMContentLoaded', () => {
+    async function ensureAuth() {
+        let token = localStorage.getItem('ampai_token');
+        if (!token) {
+            token = prompt('Enter AMPAI token (user/admin):') || '';
+            if (!token) return false;
+            localStorage.setItem('ampai_token', token);
+        }
+        try {
+            const loginRes = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ token })
+            });
+            if (!loginRes.ok) throw new Error('Invalid token');
+            const data = await loginRes.json();
+            localStorage.setItem('ampai_role', data.role);
+            return true;
+        } catch (e) {
+            alert('Authentication failed: ' + e.message);
+            localStorage.removeItem('ampai_token');
+            return false;
+        }
+    }
+
+    async function apiFetch(url, options = {}) {
+        const token = localStorage.getItem('ampai_token') || '';
+        const headers = options.headers || {};
+        headers['Authorization'] = `Bearer ${token}`;
+        return fetch(url, { ...options, headers });
+    }
     const chatMessages = document.getElementById('chat-messages');
     const messageInput = document.getElementById('message-input');
     const sendBtn = document.getElementById('send-btn');
@@ -18,6 +48,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const fileInput = document.getElementById('file-input');
     const attachmentPreview = document.getElementById('attachment-preview');
     const webSearchToggle = document.getElementById('web-search-toggle');
+    const sessionSearchInput = document.getElementById('session-search');
+    const showArchivedToggle = document.getElementById('show-archived');
+    const pinSessionBtn = document.getElementById('pin-session-btn');
+    const archiveSessionBtn = document.getElementById('archive-session-btn');
+    const summarizeEmailBtn = document.getElementById('summarize-email-btn');
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
     const sidebar = document.querySelector('.sidebar');
     const tasksViewBtn = document.getElementById('tasks-view-btn');
@@ -38,7 +73,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function checkGlobalConfigs() {
         try {
-            const res = await fetch('/api/configs/status');
+            const res = await apiFetch('/api/configs/status');
             globalConfigs = await res.json();
             if (globalConfigs.default_model && !sessionStorage.getItem('model_set')) {
                 modelSelect.value = globalConfigs.default_model;
@@ -68,27 +103,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    const initializeApp = async () => {
-        const user = await enforceAuth();
-        if (!user) return;
+    // Load existing sessions on startup
+    ensureAuth().then((ok) => {
+        if (!ok) return;
         loadSessions();
         checkGlobalConfigs();
-    };
-    initializeApp();
-
-    if (sessionSearchInput) {
-        sessionSearchInput.addEventListener('input', () => {
-            sessionFilters.query = sessionSearchInput.value.trim();
-            loadSessions();
-        });
-    }
-
-    if (showArchivedToggle) {
-        showArchivedToggle.addEventListener('change', () => {
-            sessionFilters.archived = showArchivedToggle.checked;
-            loadSessions();
-        });
-    }
+        loadTasks();
+    });
 
     if (mobileMenuBtn && sidebar) {
         mobileMenuBtn.addEventListener('click', () => {
@@ -163,7 +184,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const newCategory = e.target.value;
         currentSessionCategory = newCategory;
         try {
-            await fetch(`/api/sessions/${currentSessionId}/category`, {
+            await apiFetch(`/api/sessions/${currentSessionId}/category`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ category: newCategory })
@@ -178,7 +199,7 @@ document.addEventListener('DOMContentLoaded', () => {
         deleteSessionBtn.addEventListener('click', async () => {
             if (!confirm(`Are you sure you want to permanently delete session: ${currentSessionId}?`)) return;
             try {
-                const response = await fetch(`/api/sessions/${currentSessionId}`, { method: 'DELETE' });
+                const response = await apiFetch(`/api/sessions/${currentSessionId}`, { method: 'DELETE' });
                 if (response.ok) {
                     newChatBtn.click();
                     loadSessions();
@@ -213,7 +234,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const formData = new FormData();
                 formData.append('file', files[i]);
                 try {
-                    const response = await fetch('/api/upload', {
+                    const response = await apiFetch('/api/upload', {
                         method: 'POST',
                         body: formData
                     });
@@ -295,6 +316,46 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+
+    if (sessionSearchInput) {
+        sessionSearchInput.addEventListener('input', () => loadSessions());
+    }
+    if (showArchivedToggle) {
+        showArchivedToggle.addEventListener('change', () => loadSessions());
+    }
+    if (pinSessionBtn) {
+        pinSessionBtn.addEventListener('click', async () => {
+            await apiFetch(`/api/sessions/${currentSessionId}/pin`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ value: true })
+            });
+            loadSessions();
+        });
+    }
+    if (archiveSessionBtn) {
+        archiveSessionBtn.addEventListener('click', async () => {
+            await apiFetch(`/api/sessions/${currentSessionId}/archive`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ value: true })
+            });
+            loadSessions();
+        });
+    }
+    if (summarizeEmailBtn) {
+        summarizeEmailBtn.addEventListener('click', async () => {
+            appendMessage('user', 'Summarize today email report', true);
+            const res = await apiFetch('/api/email/summary/today', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model_type: modelSelect.value, api_key: apiKeyInput.value || null })
+            });
+            const data = await res.json();
+            appendMessage('ai', data.summary || data.detail || 'No summary available');
+        });
+    }
+
     newChatBtn.addEventListener('click', () => {
         currentView = 'chat';
         currentSessionId = generateSessionId();
@@ -358,7 +419,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const typingId = showTypingIndicator();
 
         try {
-            const response = await fetch('/api/chat', {
+            const response = await apiFetch('/api/chat', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -378,7 +439,10 @@ document.addEventListener('DOMContentLoaded', () => {
             removeTypingIndicator(typingId);
             
             if (response.ok) {
-                appendMessage('ai', data.response, false, data.search_metadata || data.web_search_status);
+                appendMessage('ai', data.response || data.detail || 'No response');
+                if (data.web_search && data.web_search.enabled) {
+                    appendMessage('ai', `🌐 Web search: ${data.web_search.status} (${data.web_search.provider || 'none'})`);
+                }
                 // Refresh sessions list in case this was a new session
                 loadSessions();
             } else {
@@ -499,10 +563,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadSessions() {
         try {
-            const params = new URLSearchParams();
-            if (sessionFilters.query) params.set('query', sessionFilters.query);
-            params.set('archived', String(sessionFilters.archived));
-            const response = await fetch(`/api/sessions?${params.toString()}`);
+            const query = encodeURIComponent(sessionSearchInput ? sessionSearchInput.value.trim() : '');
+            const archived = showArchivedToggle && showArchivedToggle.checked ? 'true' : 'false';
+            const response = await apiFetch(`/api/sessions?query=${query}&archived=${archived}`);
             const data = await response.json();
 
             sessionsList.innerHTML = '';
@@ -624,7 +687,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             chatMessages.innerHTML = '<div style="text-align:center; color:var(--text-secondary); margin-top:20px;">Loading memory...</div>';
             
-            const response = await fetch(`/api/history/${sessionId}`);
+            const response = await apiFetch(`/api/history/${sessionId}`);
             const data = await response.json();
             
             chatMessages.innerHTML = '';
@@ -785,7 +848,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function checkUpdates() {
         try {
-            const response = await fetch('/api/status');
+            const response = await apiFetch('/api/status');
             if (!response.ok) return;
             const data = await response.json();
             
@@ -830,7 +893,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const pollInterval = setInterval(async () => {
                 attempts++;
                 try {
-                    const res = await fetch('/api/status');
+                    const res = await apiFetch('/api/status');
                     if (res.ok) {
                         if (wasOffline || attempts > 3) {
                             addSyncLog("Backend is stable and online!", "#3b82f6");
@@ -853,4 +916,43 @@ document.addEventListener('DOMContentLoaded', () => {
             }, 1000);
         });
     }
+    // --- Tasks ---
+    const tasksBox = document.createElement('div');
+    tasksBox.style.marginTop = '10px';
+    tasksBox.innerHTML = `
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
+            <input id="quick-task-title" class="modern-input" placeholder="Quick task" style="font-size:0.8rem; padding:6px;" />
+            <button id="quick-task-add" class="btn" style="width:auto; padding:6px 10px;">+ Task</button>
+        </div>
+        <div id="task-list" style="max-height:130px; overflow:auto; font-size:0.8rem;"></div>
+    `;
+    document.querySelector('.sessions-container')?.prepend(tasksBox);
+
+    async function loadTasks() {
+        try {
+            const res = await apiFetch('/api/tasks');
+            if (!res.ok) return;
+            const data = await res.json();
+            const list = document.getElementById('task-list');
+            if (!list) return;
+            const tasks = data.tasks || [];
+            list.innerHTML = tasks.slice(0, 10).map(t => `<div style="padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.06)">${t.status === 'done' ? '✅' : '📝'} ${t.title}</div>`).join('') || '<div style="color:var(--text-secondary)">No tasks</div>';
+        } catch (e) { console.error(e); }
+    }
+
+    document.addEventListener('click', async (e) => {
+        if (e.target && e.target.id === 'quick-task-add') {
+            const input = document.getElementById('quick-task-title');
+            const title = input?.value?.trim();
+            if (!title) return;
+            await apiFetch('/api/tasks', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title, session_id: currentSessionId })
+            });
+            input.value = '';
+            loadTasks();
+        }
+    });
+
 });

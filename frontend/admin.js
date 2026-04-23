@@ -1,4 +1,33 @@
 document.addEventListener('DOMContentLoaded', () => {
+    async function ensureAuth() {
+        const token = localStorage.getItem('ampai_token') || '';
+        if (!token) {
+            alert('Please login from chat page first.');
+            window.location.href = 'index.html';
+            return false;
+        }
+        const res = await apiFetch('/api/auth/whoami', { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!res.ok) {
+            alert('Authentication expired.');
+            localStorage.removeItem('ampai_token');
+            window.location.href = 'index.html';
+            return false;
+        }
+        const who = await res.json();
+        if (who.role !== 'admin') {
+            alert('Admin token required.');
+            window.location.href = 'index.html';
+            return false;
+        }
+        return true;
+    }
+
+    async function apiFetch(url, options = {}) {
+        const token = localStorage.getItem('ampai_token') || '';
+        const headers = options.headers || {};
+        headers['Authorization'] = `Bearer ${token}`;
+        return fetch(url, { ...options, headers });
+    }
     const memoriesTbody = document.getElementById('memories-tbody');
     const importFile = document.getElementById('import-file');
     const importBtn = document.getElementById('import-btn');
@@ -20,6 +49,9 @@ document.addEventListener('DOMContentLoaded', () => {
         'anthropic_api_key': document.getElementById('config-anthropic-key'),
         'openrouter_api_key': document.getElementById('config-openrouter-key'),
         'openrouter_model': document.getElementById('config-openrouter-model'),
+        'imap_host': document.getElementById('config-imap-host'),
+        'imap_username': document.getElementById('config-imap-username'),
+        'imap_password': document.getElementById('config-imap-password'),
         'anythingllm_base_url': document.getElementById('config-anythingllm-url'),
         'anythingllm_api_key': document.getElementById('config-anythingllm-key'),
         'anythingllm_workspace': document.getElementById('config-anythingllm-workspace'),
@@ -66,204 +98,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const saveEmailScheduleBtn = document.getElementById('save-email-schedule-btn');
     const emailScheduleStatus = document.getElementById('email-schedule-status');
 
-    loadAdminSessions();
-    loadConfigs();
-    loadCoreMemories();
-    loadSystemHealth();
-    loadEmailIntegrationStatus();
-    setupConfigChangeTracking();
-    setupClearKeyButtons();
-    refreshHealthBtn.addEventListener('click', loadSystemHealth);
-    connectEmailProviderBtn?.addEventListener('click', connectEmailProvider);
-    disconnectEmailProviderBtn?.addEventListener('click', disconnectEmailProvider);
-    saveEmailScheduleBtn?.addEventListener('click', saveEmailSchedule);
-    emailProviderSelect?.addEventListener('change', loadEmailIntegrationStatus);
-
-    function getSelectedCredentialText() {
-        return emailProviderSelect?.value === 'gmail'
-            ? (configInputs.integration_email_gmail_credentials.value || '').trim()
-            : (configInputs.integration_email_outlook_credentials.value || '').trim();
-    }
-
-    async function loadEmailIntegrationStatus() {
-        try {
-            const response = await fetch('/api/admin/integrations/email/status');
-            const data = await response.json();
-            const provider = emailProviderSelect?.value || 'outlook';
-            const details = data[provider] || {};
-            const isConnected = !!details.connected;
-            emailProviderStatus.textContent = isConnected
-                ? `${provider} connected${details.expires_at ? ` (expires at ${new Date(details.expires_at * 1000).toLocaleString()})` : ''}`
-                : `${provider} not connected`;
-            emailProviderStatus.style.color = isConnected ? '#10b981' : 'var(--text-secondary)';
-        } catch (error) {
-            emailProviderStatus.textContent = `Failed to load integration status: ${error.message}`;
-            emailProviderStatus.style.color = '#ef4444';
-        }
-    }
-
-    async function connectEmailProvider() {
-        const provider = emailProviderSelect?.value || 'outlook';
-        let credentials;
-        try {
-            credentials = JSON.parse(getSelectedCredentialText() || '{}');
-        } catch (error) {
-            emailProviderStatus.textContent = 'Invalid credentials JSON.';
-            emailProviderStatus.style.color = '#ef4444';
-            return;
-        }
-
-        try {
-            const response = await fetch('/api/admin/integrations/email/connect', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ provider, credentials })
-            });
-            const data = await response.json();
-            if (!response.ok) throw new Error(data.detail || 'Failed to connect provider');
-            emailProviderStatus.textContent = `${provider} connected successfully.`;
-            emailProviderStatus.style.color = '#10b981';
-            await loadEmailIntegrationStatus();
-        } catch (error) {
-            emailProviderStatus.textContent = `Connect failed: ${error.message}`;
-            emailProviderStatus.style.color = '#ef4444';
-        }
-    }
-
-    async function disconnectEmailProvider() {
-        const provider = emailProviderSelect?.value || 'outlook';
-        try {
-            const response = await fetch('/api/admin/integrations/email/disconnect', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ provider })
-            });
-            const data = await response.json();
-            if (!response.ok) throw new Error(data.detail || 'Failed to disconnect provider');
-            emailProviderStatus.textContent = `${provider} disconnected.`;
-            emailProviderStatus.style.color = 'var(--text-secondary)';
-            await loadEmailIntegrationStatus();
-        } catch (error) {
-            emailProviderStatus.textContent = `Disconnect failed: ${error.message}`;
-            emailProviderStatus.style.color = '#ef4444';
-        }
-    }
-
-    async function saveEmailSchedule() {
-        const payload = {
-            hour: Number.parseInt(configInputs.email_digest_hour.value || '7', 10),
-            minute: Number.parseInt(configInputs.email_digest_minute.value || '30', 10),
-            timezone: (configInputs.email_digest_timezone.value || 'UTC').trim(),
-            provider: (configInputs.email_digest_provider.value || 'outlook').trim().toLowerCase()
-        };
-        emailScheduleStatus.textContent = 'Saving...';
-        emailScheduleStatus.style.color = 'var(--text-secondary)';
-        try {
-            const response = await fetch('/api/admin/integrations/email/schedule', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            const data = await response.json();
-            if (!response.ok) throw new Error(data.detail || 'Failed to save schedule');
-            emailScheduleStatus.textContent = 'Email digest schedule saved.';
-            emailScheduleStatus.style.color = '#10b981';
-            setTimeout(() => { emailScheduleStatus.textContent = ''; }, 4000);
-        } catch (error) {
-            emailScheduleStatus.textContent = `Schedule save failed: ${error.message}`;
-            emailScheduleStatus.style.color = '#ef4444';
-        }
-    }
-
-    function renderHealthTile(name, ok, details) {
-        const tile = document.createElement('div');
-        tile.style.background = ok ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)';
-        tile.style.border = ok ? '1px solid rgba(16, 185, 129, 0.3)' : '1px solid rgba(239, 68, 68, 0.35)';
-        tile.style.borderRadius = '8px';
-        tile.style.padding = '10px';
-        tile.innerHTML = `
-            <div style="font-weight: 600; margin-bottom: 6px;">${name}</div>
-            <div style="font-size: 0.85rem; color: ${ok ? '#10b981' : '#ef4444'};">${ok ? 'Healthy' : 'Unhealthy'}</div>
-            ${details ? `<div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px;">${details}</div>` : ''}
-        `;
-        return tile;
-    }
-
-    async function loadSystemHealth() {
-        healthUpdatedAt.textContent = 'Loading health...';
-        try {
-            const response = await fetch('/api/health');
-            const data = await response.json();
-            const checks = data.checks || {};
-            healthStatusGrid.innerHTML = '';
-            healthStatusGrid.appendChild(renderHealthTile('Database', !!checks.db?.ok, checks.db?.details || ''));
-            healthStatusGrid.appendChild(renderHealthTile('Redis', !!checks.redis?.ok, checks.redis?.details || ''));
-            healthStatusGrid.appendChild(renderHealthTile('Vector Index', !!checks.vector_index?.ok, checks.vector_index?.provider || checks.vector_index?.details || ''));
-            healthStatusGrid.appendChild(renderHealthTile('Search Provider', !!checks.search_provider?.ok, checks.search_provider?.provider || checks.search_provider?.details || ''));
-            const lastRun = checks.scheduler?.last_run || {};
-            schedulerDiagnostics.textContent = `Scheduler running: ${checks.scheduler?.running ? 'yes' : 'no'}\nLast network sweep: ${lastRun.network_sweep || 'N/A'}\nLast task reminders: ${lastRun.task_reminders || 'N/A'}\nJobs: ${(checks.scheduler?.jobs || []).join(', ') || 'none'}`;
-            healthUpdatedAt.textContent = `Updated at ${new Date().toLocaleString()}`;
-        } catch (error) {
-            healthStatusGrid.innerHTML = '';
-            healthStatusGrid.appendChild(renderHealthTile('System Health', false, error.message));
-            schedulerDiagnostics.textContent = 'Unable to load scheduler diagnostics.';
-            healthUpdatedAt.textContent = 'Health check failed';
-        }
-    }
-
-    async function loadAdminDiagnostics() {
-        adminDiagnosticsUpdatedAt.textContent = 'Loading diagnostics...';
-        try {
-            const response = await fetch('/api/admin/diagnostics');
-            const data = await response.json();
-            const lastRun = data.recent_scheduler_run || {};
-            const lastErrors = data.last_errors || {};
-            const sanity = data.config_sanity || {};
-
-            adminDiagnosticsContent.textContent = `Status: ${data.status || 'unknown'}\n\nRecent scheduler runs:\n- Network sweep: ${lastRun.network_sweep || 'N/A'}\n- Task reminders: ${lastRun.task_reminders || 'N/A'}\n\nLast errors:\n- Network sweep: ${lastErrors.network_sweep || 'None'}\n- Task reminders: ${lastErrors.task_reminders || 'None'}\n- Email digest: ${lastErrors.email_digest || 'None'}\n\nConfig sanity:\n- Default model: ${sanity.default_model || 'N/A'}\n- Required keys valid: ${sanity.required_keys_ok ? 'yes' : 'no'}\n- Missing keys: ${(sanity.missing_required_keys || []).join(', ') || 'none'}\n- Digest schedule valid: ${sanity.digest_schedule_ok ? 'yes' : 'no'} (${sanity.email_digest_hour ?? 'N/A'}:${sanity.email_digest_minute ?? 'N/A'})`;
-            adminDiagnosticsUpdatedAt.textContent = `Updated at ${new Date().toLocaleString()}`;
-        } catch (error) {
-            adminDiagnosticsContent.textContent = `Unable to load admin diagnostics: ${error.message}`;
-            adminDiagnosticsUpdatedAt.textContent = 'Diagnostics check failed';
-        }
-    }
-
-    function setupConfigChangeTracking() {
-        for (const [key, input] of Object.entries(configInputs)) {
-            input.addEventListener('input', () => {
-                if (input.value !== (initialConfigValues[key] ?? '')) {
-                    dirtyConfigKeys.add(key);
-                } else {
-                    dirtyConfigKeys.delete(key);
-                }
-            });
-        }
-    }
-
-    function setupClearKeyButtons() {
-        for (const [key, input] of Object.entries(configInputs)) {
-            if (!SECRET_CONFIG_KEYS.has(key)) continue;
-
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'btn';
-            btn.textContent = 'Clear';
-            btn.style.marginTop = '6px';
-            btn.style.padding = '4px 10px';
-            btn.style.fontSize = '0.8rem';
-            btn.onclick = () => {
-                input.value = '';
-                dirtyConfigKeys.add(key);
-                configStatus.textContent = `Marked ${key} for clearing. Click Save Configs to apply.`;
-                configStatus.style.color = "var(--text-secondary)";
-            };
-            input.insertAdjacentElement('afterend', btn);
-        }
-    }
+    ensureAuth().then((ok) => { if (!ok) return; loadAdminSessions(); loadConfigs(); loadCoreMemories(); loadHealth(); });
 
     async function loadCoreMemories() {
         try {
-            const res = await fetch('/api/admin/core-memories');
+            const res = await apiFetch('/api/admin/core-memories');
             const data = await res.json();
             coreMemoriesContainer.innerHTML = '';
             
@@ -292,7 +131,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     delBtn.style.fontSize = '1.2rem';
                     delBtn.style.lineHeight = '1';
                     delBtn.onclick = async () => {
-                        await fetch(`/api/admin/core-memories/${mem.id}`, { method: 'DELETE' });
+                        await apiFetch(`/api/admin/core-memories/${mem.id}`, { method: 'DELETE' });
                         loadCoreMemories();
                     };
                     
@@ -310,7 +149,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadConfigs() {
         try {
-            const res = await fetch('/api/admin/configs');
+            const res = await apiFetch('/api/admin/configs');
             const data = await res.json();
             for (const [key, input] of Object.entries(configInputs)) {
                 if (data[key]) {
@@ -348,7 +187,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const res = await fetch('/api/admin/configs', {
+            const res = await apiFetch('/api/admin/configs', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ configs: payload })
@@ -371,7 +210,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadAdminSessions() {
         try {
-            const response = await fetch('/api/sessions');
+            const response = await apiFetch('/api/sessions');
             const data = await response.json();
             
             memoriesTbody.innerHTML = '';
@@ -428,7 +267,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function exportMemory(sessionId) {
         try {
-            const response = await fetch(`/api/export/${sessionId}`);
+            const response = await apiFetch(`/api/export/${sessionId}`);
             const data = await response.json();
             
             const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
@@ -449,7 +288,7 @@ document.addEventListener('DOMContentLoaded', () => {
         logModal.classList.add('show');
 
         try {
-            const res = await fetch(`/api/history/${sessionId}`);
+            const res = await apiFetch(`/api/history/${sessionId}`);
             const data = await res.json();
             
             modalChatBox.innerHTML = ''; // clear loading
@@ -486,6 +325,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+
+    async function loadHealth() {
+        try {
+            const res = await apiFetch('/api/health');
+            if (!res.ok) return;
+            const data = await res.json();
+            const el = document.createElement('div');
+            el.className = 'card';
+            el.innerHTML = `<h2>Diagnostics</h2><pre style="white-space:pre-wrap;">${JSON.stringify(data, null, 2)}</pre>`;
+            document.querySelector('.admin-container')?.appendChild(el);
+        } catch (e) { console.error(e); }
+    }
+
     closeModalBtn.addEventListener('click', () => {
         logModal.classList.remove('show');
     });
@@ -519,7 +371,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 importStatus.textContent = "Importing...";
                 importStatus.style.color = "var(--text-secondary)";
 
-                const response = await fetch('/api/import', {
+                const response = await apiFetch('/api/import', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
