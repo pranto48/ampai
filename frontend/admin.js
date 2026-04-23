@@ -24,6 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'anythingllm_api_key': document.getElementById('config-anythingllm-key'),
         'anythingllm_workspace': document.getElementById('config-anythingllm-workspace'),
         'default_model': document.getElementById('config-default-model'),
+        'web_search_secondary_provider': document.getElementById('config-web-search-secondary-provider'),
         'web_fallback_provider': document.getElementById('config-web-fallback-provider'),
         'serpapi_api_key': document.getElementById('config-serpapi-key'),
         'bing_api_key': document.getElementById('config-bing-key'),
@@ -58,6 +59,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const healthStatusGrid = document.getElementById('health-status-grid');
     const schedulerDiagnostics = document.getElementById('scheduler-diagnostics');
     const healthUpdatedAt = document.getElementById('health-updated-at');
+    const refreshAdminDiagnosticsBtn = document.getElementById('refresh-admin-diagnostics-btn');
+    const adminDiagnosticsUpdatedAt = document.getElementById('admin-diagnostics-updated-at');
+    const adminDiagnosticsContent = document.getElementById('admin-diagnostics-content');
 
     const initializeAdmin = async () => {
         const user = await enforceAuth({ requiredRole: 'admin' });
@@ -71,6 +75,9 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     initializeAdmin();
     refreshHealthBtn.addEventListener('click', loadSystemHealth);
+    refreshAdminDiagnosticsBtn.addEventListener('click', loadAdminDiagnostics);
+    setInterval(loadSystemHealth, 30000);
+    setInterval(loadAdminDiagnostics, 30000);
 
     function renderHealthTile(name, ok, details) {
         const tile = document.createElement('div');
@@ -95,7 +102,7 @@ document.addEventListener('DOMContentLoaded', () => {
             healthStatusGrid.innerHTML = '';
             healthStatusGrid.appendChild(renderHealthTile('Database', !!checks.db?.ok, checks.db?.details || ''));
             healthStatusGrid.appendChild(renderHealthTile('Redis', !!checks.redis?.ok, checks.redis?.details || ''));
-            healthStatusGrid.appendChild(renderHealthTile('Model Provider', !!checks.model_provider?.ok, checks.model_provider?.provider || checks.model_provider?.details || ''));
+            healthStatusGrid.appendChild(renderHealthTile('Vector Index', !!checks.vector_index?.ok, checks.vector_index?.provider || checks.vector_index?.details || ''));
             healthStatusGrid.appendChild(renderHealthTile('Search Provider', !!checks.search_provider?.ok, checks.search_provider?.provider || checks.search_provider?.details || ''));
             const lastRun = checks.scheduler?.last_run || {};
             schedulerDiagnostics.textContent = `Scheduler running: ${checks.scheduler?.running ? 'yes' : 'no'}\nLast network sweep: ${lastRun.network_sweep || 'N/A'}\nLast task reminders: ${lastRun.task_reminders || 'N/A'}\nJobs: ${(checks.scheduler?.jobs || []).join(', ') || 'none'}`;
@@ -105,6 +112,23 @@ document.addEventListener('DOMContentLoaded', () => {
             healthStatusGrid.appendChild(renderHealthTile('System Health', false, error.message));
             schedulerDiagnostics.textContent = 'Unable to load scheduler diagnostics.';
             healthUpdatedAt.textContent = 'Health check failed';
+        }
+    }
+
+    async function loadAdminDiagnostics() {
+        adminDiagnosticsUpdatedAt.textContent = 'Loading diagnostics...';
+        try {
+            const response = await fetch('/api/admin/diagnostics');
+            const data = await response.json();
+            const lastRun = data.recent_scheduler_run || {};
+            const lastErrors = data.last_errors || {};
+            const sanity = data.config_sanity || {};
+
+            adminDiagnosticsContent.textContent = `Status: ${data.status || 'unknown'}\n\nRecent scheduler runs:\n- Network sweep: ${lastRun.network_sweep || 'N/A'}\n- Task reminders: ${lastRun.task_reminders || 'N/A'}\n\nLast errors:\n- Network sweep: ${lastErrors.network_sweep || 'None'}\n- Task reminders: ${lastErrors.task_reminders || 'None'}\n- Email digest: ${lastErrors.email_digest || 'None'}\n\nConfig sanity:\n- Default model: ${sanity.default_model || 'N/A'}\n- Required keys valid: ${sanity.required_keys_ok ? 'yes' : 'no'}\n- Missing keys: ${(sanity.missing_required_keys || []).join(', ') || 'none'}\n- Digest schedule valid: ${sanity.digest_schedule_ok ? 'yes' : 'no'} (${sanity.email_digest_hour ?? 'N/A'}:${sanity.email_digest_minute ?? 'N/A'})`;
+            adminDiagnosticsUpdatedAt.textContent = `Updated at ${new Date().toLocaleString()}`;
+        } catch (error) {
+            adminDiagnosticsContent.textContent = `Unable to load admin diagnostics: ${error.message}`;
+            adminDiagnosticsUpdatedAt.textContent = 'Diagnostics check failed';
         }
     }
 

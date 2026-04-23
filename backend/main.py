@@ -38,6 +38,8 @@ from database import (
     update_task,
     engine,
 )
+from logging_utils import configure_logging, get_logger, reset_request_id, set_request_id
+from memory_indexer import MemoryIndexer
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
     refresh_access_token as refresh_gmail_access_token,
@@ -247,7 +249,7 @@ def _check_model_provider_health() -> dict:
 
 def _check_search_provider_health() -> dict:
     configs = get_all_configs()
-    fallback = (configs.get("web_fallback_provider") or "").strip().lower()
+    fallback = (configs.get("web_search_secondary_provider") or configs.get("web_fallback_provider") or "").strip().lower()
     if fallback == "serpapi":
         return {"ok": bool(configs.get("serpapi_api_key")), "provider": "serpapi"}
     if fallback == "bing":
@@ -273,6 +275,7 @@ def chat(request: ChatRequest, _: UserContext = Depends(require_authenticated_us
         return {
             "response": response.get("content", ""),
             "web_search_status": response.get("web_search_status"),
+            "search_metadata": response.get("web_search_status"),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -324,6 +327,7 @@ def summarize_todays_email(request: EmailSummaryTodayRequest, _: UserContext = D
         use_web_search=False,
         attachments=[],
     )
+    touch_session_updated_at(request.session_id)
     return {
         "status": "success",
         "provider": provider,
@@ -412,6 +416,13 @@ def update_archive(session_id: str, request: SessionStateRequest, _: UserContext
     return {"status": "success"}
 
 
+@app.post("/api/sessions/{session_id}/unarchive")
+def unarchive_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
+    if not set_session_archived(session_id, False):
+        raise HTTPException(status_code=500, detail="Failed to unarchive session")
+    return {"status": "success"}
+
+
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
@@ -471,6 +482,8 @@ def import_session(request: ImportRequest, _: UserContext = Depends(require_auth
             existing_messages.add(key)
 
         set_session_category(request.session_id, request.category)
+        if inserted > 0:
+            touch_session_updated_at(request.session_id)
         return {"status": "success", "session_id": request.session_id, "inserted": inserted, "skipped": skipped}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -656,13 +669,13 @@ def get_status(_: UserContext = Depends(require_authenticated_user)):
 def get_health(_: UserContext = Depends(require_admin_user)):
     db_health = _check_db_health()
     redis_health = _check_redis_health()
-    model_health = _check_model_provider_health()
+    vector_health = _check_vector_index_health()
     search_health = _check_search_provider_health()
     scheduler_health = get_scheduler_diagnostics()
     overall_ok = all([
         db_health.get("ok"),
         redis_health.get("ok"),
-        model_health.get("ok"),
+        vector_health.get("ok"),
         search_health.get("ok"),
     ])
     return {
@@ -670,10 +683,22 @@ def get_health(_: UserContext = Depends(require_admin_user)):
         "checks": {
             "db": db_health,
             "redis": redis_health,
-            "model_provider": model_health,
+            "vector_index": vector_health,
             "search_provider": search_health,
             "scheduler": scheduler_health,
         },
+    }
+
+
+@app.get("/api/admin/diagnostics")
+def get_admin_diagnostics(_: UserContext = Depends(require_admin_user)):
+    scheduler_diag = get_scheduler_diagnostics()
+    errors = [v for v in (scheduler_diag.get("last_errors") or {}).values() if v]
+    return {
+        "recent_scheduler_run": scheduler_diag.get("last_run", {}),
+        "last_errors": scheduler_diag.get("last_errors", {}),
+        "config_sanity": _build_config_sanity(),
+        "status": "ok" if not errors else "warning",
     }
 
 
