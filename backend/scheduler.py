@@ -2,9 +2,17 @@ import subprocess
 import re
 import json
 import time
+import urllib.request
 from apscheduler.schedulers.background import BackgroundScheduler
-from database import get_network_targets, list_tasks, engine, get_config, set_config
-from sqlalchemy import text
+from database import (
+    get_network_targets,
+    list_tasks,
+    get_config,
+    set_config,
+    get_sql_chat_history,
+    set_session_category,
+    auto_complete_due_tasks,
+)
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from agent import chat_with_agent
@@ -22,6 +30,28 @@ from logging_utils import get_logger
 scheduler = BackgroundScheduler()
 logger = get_logger(__name__)
 LAST_RUN = {"network_sweep": None, "task_reminders": None}
+
+
+def _send_resend_email(subject: str, body_text: str):
+    api_key = (get_config("resend_api_key") or "").strip()
+    from_email = (get_config("resend_from_email") or "").strip()
+    to_email = (get_config("notification_email_to") or "").strip()
+    if not api_key or not from_email or not to_email:
+        return False
+    payload = json.dumps(
+        {"from": from_email, "to": [to_email], "subject": subject, "text": body_text}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception:
+        return False
 
 def ping_target(ip_address: str) -> dict:
     try:
@@ -119,25 +149,26 @@ def run_task_reminders():
         else:
             reminder_lines.append(f"⏰ Due soon: #{task['id']} {task['title']} (due {due_dt.isoformat()})")
 
-    if not reminder_lines:
+    auto_completed = auto_complete_due_tasks()
+
+    if not reminder_lines and auto_completed == 0:
         logger.info("No task reminders needed")
         return
 
     session_id = "system_tasks"
     timestamp = now.strftime("%Y-%m-%d %H:%M:%S UTC")
     summary = "\n".join(reminder_lines)
+    if auto_completed:
+        summary = (summary + "\n" if summary else "") + f"✅ Auto-completed tasks at/after due time: {auto_completed}"
     try:
-        with engine.connect() as conn:
-            upsert_meta = text(
-                "INSERT INTO session_metadata (session_id, category) VALUES (:s, :c) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category"
-            )
-            conn.execute(upsert_meta, {"s": session_id, "c": "System Tasks"})
-
-            ins_user = text("INSERT INTO message_store (session_id, message) VALUES (:s, :m)")
-            conn.execute(ins_user, {"s": session_id, "m": f"Run task reminder check at {timestamp}"})
-            conn.execute(ins_user, {"s": session_id, "m": f"**Task Reminder Report ({timestamp})**\n{summary}"})
-            conn.commit()
+        set_session_category(session_id, "System Tasks")
+        history = get_sql_chat_history(session_id)
+        history.add_user_message(f"Run task reminder check at {timestamp}")
+        history.add_ai_message(f"**Task Reminder Report ({timestamp})**\n{summary}")
+        _send_resend_email(
+            subject=f"AmpAI Task Reminder Report ({timestamp})",
+            body_text=summary,
+        )
         logger.info("Task reminders recorded", extra={"reminder_count": len(reminder_lines)})
     except Exception as e:
         logger.exception("Error saving task reminders", exc_info=e)

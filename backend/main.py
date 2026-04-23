@@ -3,6 +3,7 @@ import os
 import shutil
 import time
 import uuid
+import ftplib
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -10,7 +11,6 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, Up
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
-from langchain_community.chat_message_histories import SQLChatMessageHistory
 from passlib.context import CryptContext
 from pydantic import BaseModel
 from zoneinfo import ZoneInfo
@@ -31,6 +31,22 @@ from database import (
     get_config,
     get_core_memories,
     get_network_targets,
+    get_duplicate_message_counts,
+    get_user,
+    list_users as db_list_users,
+    create_user as db_create_user,
+    update_user as db_update_user,
+    delete_user as db_delete_user,
+    ensure_default_users,
+    add_media_asset,
+    list_media_assets,
+    create_memory_group,
+    add_user_to_memory_group,
+    share_session_to_group,
+    list_memory_groups_for_user,
+    list_shared_sessions_for_user,
+    export_all_sessions_for_backup,
+    list_chat_messages,
     get_sql_chat_history,
     list_tasks,
     migrate_app_config_encryption,
@@ -155,6 +171,32 @@ class ConfigUpdateRequest(BaseModel):
     configs: Dict[str, str]
 
 
+class AdminPasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class AdminUserCreateRequest(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+
+
+class AdminUserUpdateRequest(BaseModel):
+    role: Optional[str] = None
+    password: Optional[str] = None
+
+
+class MemoryGroupCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    members: List[str] = []
+
+
+class MemoryGroupShareRequest(BaseModel):
+    session_id: str
+
+
 class TaskCreateRequest(BaseModel):
     title: str
     description: Optional[str] = ""
@@ -192,26 +234,31 @@ class UserContext(BaseModel):
     role: str
 
 
-def _build_user_store() -> Dict[str, Dict[str, str]]:
+def _bootstrap_default_users() -> None:
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
-    admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
+    admin_password = os.getenv("ADMIN_PASSWORD", "password")
+    persisted_admin_hash = get_config("admin_password_hash")
 
     user_username = os.getenv("USER_USERNAME", "user")
     user_password = os.getenv("USER_PASSWORD", "user123")
 
-    return {
-        admin_username: {
-            "role": "admin",
-            "password_hash": pwd_context.hash(admin_password),
-        },
-        user_username: {
-            "role": "user",
-            "password_hash": pwd_context.hash(user_password),
-        },
-    }
+    ensure_default_users(
+        [
+            {
+                "username": admin_username,
+                "role": "admin",
+                "password_hash": persisted_admin_hash or pwd_context.hash(admin_password),
+            },
+            {
+                "username": user_username,
+                "role": "user",
+                "password_hash": pwd_context.hash(user_password),
+            },
+        ]
+    )
 
 
-USERS = _build_user_store()
+_bootstrap_default_users()
 
 
 def _load_integration_credentials(provider: str) -> Dict[str, str]:
@@ -339,11 +386,11 @@ def require_admin_user(current_user: UserContext = Depends(get_current_user_from
 
 @app.post("/api/auth/login", response_model=UserLoginResponse)
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = USERS.get(form_data.username)
+    user = get_user(form_data.username)
     if not user or not pwd_context.verify(form_data.password, user["password_hash"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
-    token = _create_access_token({"sub": form_data.username, "role": user["role"]})
+    token = _create_access_token({"sub": user["username"], "role": user["role"]})
     response = Response(content=UserLoginResponse(username=form_data.username, role=user["role"]).model_dump_json(), media_type="application/json")
     response.set_cookie(
         key="access_token",
@@ -446,7 +493,11 @@ def summarize_todays_email(request: EmailSummaryTodayRequest, _: UserContext = D
 
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), _: UserContext = Depends(require_authenticated_user)):
+async def upload_file(
+    file: UploadFile = File(...),
+    session_id: Optional[str] = None,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     try:
         file_ext = os.path.splitext(file.filename)[1]
         unique_filename = f"{uuid.uuid4()}{file_ext}"
@@ -469,14 +520,32 @@ async def upload_file(file: UploadFile = File(...), _: UserContext = Depends(req
             with open(file_path, "r", encoding="utf-8") as text_file:
                 extracted_text = text_file.read()
 
-        return {
+        payload = {
             "filename": file.filename,
             "url": f"/uploads/{unique_filename}",
             "type": file.content_type,
             "extracted_text": extracted_text,
         }
+        add_media_asset(
+            username=current_user.username,
+            session_id=session_id,
+            filename=file.filename,
+            url=payload["url"],
+            mime_type=file.content_type,
+        )
+        return payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/media")
+def get_media_assets(
+    username: Optional[str] = Query(default=None),
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    if current_user.role != "admin":
+        username = current_user.username
+    return {"media": list_media_assets(username=username)}
 
 
 @app.get("/api/sessions")
@@ -484,18 +553,21 @@ def get_sessions(
     query: Optional[str] = Query(default=None),
     category: Optional[str] = Query(default=None),
     archived: Optional[bool] = Query(default=None),
-    _: UserContext = Depends(require_authenticated_user),
+    current_user: UserContext = Depends(require_authenticated_user),
 ):
-    return {"sessions": get_all_sessions(query=query, category=category, archived=archived)}
+    sessions = get_all_sessions(query=query, category=category, archived=archived)
+    if current_user.role != "admin":
+        shared_ids = set(list_shared_sessions_for_user(current_user.username))
+        for session in sessions:
+            if session["session_id"] in shared_ids:
+                session["shared_via_group"] = True
+    return {"sessions": sessions}
 
 
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = get_sql_chat_history(session_id)
-        messages = []
-        for msg in history.messages:
-            messages.append({"type": msg.type, "content": msg.content})
+        messages = list_chat_messages(session_id, dedupe=True)
         return {"messages": messages}
     except Exception as e:
         return {"messages": [], "error": str(e)}
@@ -542,8 +614,7 @@ def delete_session(session_id: str, _: UserContext = Depends(require_authenticat
 @app.get("/api/export/{session_id}")
 def export_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = get_sql_chat_history(session_id)
-        messages = [{"type": msg.type, "content": msg.content} for msg in history.messages]
+        messages = list_chat_messages(session_id, dedupe=True)
 
         sessions = get_all_sessions()
         category = "Uncategorized"
@@ -561,7 +632,7 @@ def export_session(session_id: str, _: UserContext = Depends(require_authenticat
 def import_session(request: ImportRequest, _: UserContext = Depends(require_authenticated_user)):
     try:
         history = get_sql_chat_history(request.session_id)
-        existing_messages = {(msg.type, msg.content) for msg in history.messages}
+        existing_messages = {(msg["type"], msg["content"]) for msg in list_chat_messages(request.session_id, dedupe=False)}
         inserted = 0
         skipped = 0
 
@@ -585,6 +656,16 @@ def import_session(request: ImportRequest, _: UserContext = Depends(require_auth
         return {"status": "success", "session_id": request.session_id, "inserted": inserted, "skipped": skipped}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/history/duplicates")
+def get_history_duplicates(_: UserContext = Depends(require_admin_user)):
+    duplicates = get_duplicate_message_counts()
+    return {
+        "sessions_with_duplicates": len(duplicates),
+        "duplicate_messages": sum(duplicates.values()),
+        "by_session": duplicates,
+    }
 
 
 @app.get("/api/admin/configs")
@@ -613,6 +694,156 @@ def update_admin_configs(request: ConfigUpdateRequest, _: UserContext = Depends(
             set_config(k, v)
     return {"status": "success"}
 
+
+@app.post("/api/admin/change-password")
+def admin_change_password(
+    request: AdminPasswordChangeRequest,
+    current_user: UserContext = Depends(require_admin_user),
+):
+    user = get_user(current_user.username)
+    if not user:
+        raise HTTPException(status_code=404, detail="Admin user not found")
+
+    if not pwd_context.verify(request.current_password, user["password_hash"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    if len(request.new_password or "") < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+
+    new_hash = pwd_context.hash(request.new_password)
+    if not db_update_user(current_user.username, password_hash=new_hash):
+        raise HTTPException(status_code=500, detail="Failed to update admin password")
+    set_config("admin_password_hash", new_hash)
+    return {"status": "success"}
+
+
+@app.get("/api/admin/users")
+def admin_list_users(_: UserContext = Depends(require_admin_user)):
+    return {"users": db_list_users()}
+
+
+@app.post("/api/admin/users")
+def admin_create_user(request: AdminUserCreateRequest, _: UserContext = Depends(require_admin_user)):
+    username = (request.username or "").strip()
+    role = (request.role or "user").strip().lower()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if len(request.password or "") < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if role not in {"admin", "user"}:
+        raise HTTPException(status_code=400, detail="Role must be admin or user")
+    if get_user(username):
+        raise HTTPException(status_code=409, detail="User already exists")
+    if not db_create_user(username=username, role=role, password_hash=pwd_context.hash(request.password)):
+        raise HTTPException(status_code=500, detail="Failed to create user")
+    return {"status": "success"}
+
+
+@app.patch("/api/admin/users/{username}")
+def admin_update_user(username: str, request: AdminUserUpdateRequest, current_user: UserContext = Depends(require_admin_user)):
+    username = username.strip()
+    existing = get_user(username)
+    if not existing:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    role = request.role.strip().lower() if request.role is not None else None
+    if role is not None and role not in {"admin", "user"}:
+        raise HTTPException(status_code=400, detail="Role must be admin or user")
+    if request.password is not None and len(request.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if existing["username"] == current_user.username and role == "user":
+        raise HTTPException(status_code=400, detail="You cannot remove your own admin role")
+
+    password_hash = pwd_context.hash(request.password) if request.password else None
+    if not db_update_user(username=username, role=role, password_hash=password_hash):
+        raise HTTPException(status_code=500, detail="Failed to update user")
+    return {"status": "success"}
+
+
+@app.delete("/api/admin/users/{username}")
+def admin_delete_user(username: str, current_user: UserContext = Depends(require_admin_user)):
+    username = username.strip()
+    if username == current_user.username:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+    existing = get_user(username)
+    if not existing:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not db_delete_user(username):
+        raise HTTPException(status_code=500, detail="Failed to delete user")
+    return {"status": "success"}
+
+
+@app.post("/api/admin/memory-groups")
+def admin_create_memory_group(request: MemoryGroupCreateRequest, current_user: UserContext = Depends(require_admin_user)):
+    group_id = create_memory_group(
+        name=request.name.strip(),
+        description=(request.description or "").strip(),
+        created_by=current_user.username,
+    )
+    if not group_id:
+        raise HTTPException(status_code=500, detail="Failed to create group")
+    for member in request.members:
+        member_name = (member or "").strip()
+        if member_name:
+            add_user_to_memory_group(group_id, member_name)
+    return {"status": "success", "group_id": group_id}
+
+
+@app.get("/api/memory-groups")
+def get_memory_groups(current_user: UserContext = Depends(require_authenticated_user)):
+    return {"groups": list_memory_groups_for_user(current_user.username)}
+
+
+@app.post("/api/admin/memory-groups/{group_id}/members/{username}")
+def admin_add_group_member(group_id: int, username: str, _: UserContext = Depends(require_admin_user)):
+    if not add_user_to_memory_group(group_id, username.strip()):
+        raise HTTPException(status_code=500, detail="Failed to add member")
+    return {"status": "success"}
+
+
+@app.post("/api/admin/memory-groups/{group_id}/share")
+def admin_share_session(group_id: int, request: MemoryGroupShareRequest, _: UserContext = Depends(require_admin_user)):
+    if not share_session_to_group(group_id, request.session_id):
+        raise HTTPException(status_code=500, detail="Failed to share session")
+    return {"status": "success"}
+
+
+@app.post("/api/admin/backup/run")
+def run_backup(current_user: UserContext = Depends(require_admin_user)):
+    backup_mode = (get_config("backup_mode", "local") or "local").strip().lower()
+    snapshot = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "by": current_user.username,
+        "sessions": export_all_sessions_for_backup(),
+    }
+    serialized = json.dumps(snapshot, indent=2)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"ampai_backup_{timestamp}.json"
+
+    if backup_mode == "ftp":
+        host = get_config("backup_ftp_host")
+        user = get_config("backup_ftp_user")
+        password = get_config("backup_ftp_password")
+        remote_path = get_config("backup_ftp_path", "/")
+        if not host or not user or not password:
+            raise HTTPException(status_code=400, detail="FTP backup is not fully configured")
+        try:
+            with ftplib.FTP(host) as ftp:
+                ftp.login(user=user, passwd=password)
+                ftp.cwd(remote_path)
+                from io import BytesIO
+                ftp.storbinary(f"STOR {filename}", BytesIO(serialized.encode("utf-8")))
+            return {"status": "success", "mode": "ftp", "file": filename}
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"FTP backup failed: {exc}") from exc
+
+    local_dir = get_config("backup_local_path", "/tmp/ampai_backups")
+    os.makedirs(local_dir, exist_ok=True)
+    path = os.path.join(local_dir, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(serialized)
+    return {"status": "success", "mode": "local", "path": path}
+
 @app.post("/api/admin/configs/migrate")
 def migrate_admin_configs():
     result = migrate_app_config_encryption()
@@ -629,6 +860,8 @@ def get_configs_status(_: UserContext = Depends(require_authenticated_user)):
         "openrouter": bool(configs.get("openrouter_api_key")),
         "anythingllm": bool(configs.get("anythingllm_base_url")),
         "default_model": configs.get("default_model"),
+        "chat_agent_name": configs.get("chat_agent_name") or "AI Agent",
+        "chat_agent_avatar_url": configs.get("chat_agent_avatar_url") or "",
     }
 
 

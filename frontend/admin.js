@@ -34,7 +34,18 @@ document.addEventListener('DOMContentLoaded', () => {
         'email_digest_provider': document.getElementById('config-email-digest-provider'),
         'email_digest_hour': document.getElementById('config-email-digest-hour'),
         'email_digest_minute': document.getElementById('config-email-digest-minute'),
-        'email_digest_timezone': document.getElementById('config-email-digest-timezone')
+        'email_digest_timezone': document.getElementById('config-email-digest-timezone'),
+        'chat_agent_name': document.getElementById('config-chat-agent-name'),
+        'chat_agent_avatar_url': document.getElementById('config-chat-agent-avatar-url'),
+        'backup_mode': document.getElementById('config-backup-mode'),
+        'backup_local_path': document.getElementById('config-backup-local-path'),
+        'backup_ftp_host': document.getElementById('config-backup-ftp-host'),
+        'backup_ftp_user': document.getElementById('config-backup-ftp-user'),
+        'backup_ftp_password': document.getElementById('config-backup-ftp-password'),
+        'backup_ftp_path': document.getElementById('config-backup-ftp-path'),
+        'resend_api_key': document.getElementById('config-resend-api-key'),
+        'resend_from_email': document.getElementById('config-resend-from-email'),
+        'notification_email_to': document.getElementById('config-notification-email-to')
     };
     const SECRET_CONFIG_KEYS = new Set([
         'generic_api_key',
@@ -47,7 +58,9 @@ document.addEventListener('DOMContentLoaded', () => {
         'bing_api_key',
         'custom_web_search_api_key',
         'integration_email_outlook_credentials',
-        'integration_email_gmail_credentials'
+        'integration_email_gmail_credentials',
+        'backup_ftp_password',
+        'resend_api_key'
     ]);
     const CLEAR_VALUE_SENTINEL = "__CLEAR__";
     const initialConfigValues = {};
@@ -58,14 +71,52 @@ document.addEventListener('DOMContentLoaded', () => {
     const healthStatusGrid = document.getElementById('health-status-grid');
     const schedulerDiagnostics = document.getElementById('scheduler-diagnostics');
     const healthUpdatedAt = document.getElementById('health-updated-at');
+    const adminCurrentPasswordInput = document.getElementById('admin-current-password');
+    const adminNewPasswordInput = document.getElementById('admin-new-password');
+    const adminChangePasswordBtn = document.getElementById('admin-change-password-btn');
+    const adminPasswordStatus = document.getElementById('admin-password-status');
+    const usersTbody = document.getElementById('users-tbody');
+    const newUserUsername = document.getElementById('new-user-username');
+    const newUserPassword = document.getElementById('new-user-password');
+    const newUserRole = document.getElementById('new-user-role');
+    const createUserBtn = document.getElementById('create-user-btn');
+    const userStatus = document.getElementById('user-status');
+    const mediaTbody = document.getElementById('media-tbody');
+    const runBackupBtn = document.getElementById('run-backup-btn');
+    const backupStatus = document.getElementById('backup-status');
+    const groupNameInput = document.getElementById('group-name');
+    const groupMembersInput = document.getElementById('group-members');
+    const groupSessionIdInput = document.getElementById('group-session-id');
+    const createGroupBtn = document.getElementById('create-group-btn');
+    const shareGroupSessionBtn = document.getElementById('share-group-session-btn');
+    const groupsList = document.getElementById('groups-list');
+    const groupStatus = document.getElementById('group-status');
+    let latestGroupId = null;
 
-    loadAdminSessions();
-    loadConfigs();
-    loadCoreMemories();
-    loadSystemHealth();
-    setupConfigChangeTracking();
-    setupClearKeyButtons();
-    refreshHealthBtn.addEventListener('click', loadSystemHealth);
+    const initializeAdmin = async () => {
+        const user = await enforceAuth({ requiredRole: 'admin' });
+        if (!user) return;
+        loadAdminSessions();
+        loadConfigs();
+        loadCoreMemories();
+        loadSystemHealth();
+        loadUsers();
+        loadMediaAssets();
+        loadGroups();
+        setupConfigChangeTracking();
+        setupClearKeyButtons();
+        refreshHealthBtn.addEventListener('click', loadSystemHealth);
+        if (runBackupBtn) {
+            runBackupBtn.addEventListener('click', runBackupNow);
+        }
+        if (createGroupBtn) {
+            createGroupBtn.addEventListener('click', createGroup);
+        }
+        if (shareGroupSessionBtn) {
+            shareGroupSessionBtn.addEventListener('click', shareSessionToGroup);
+        }
+    };
+    initializeAdmin();
 
     function renderHealthTile(name, ok, details) {
         const tile = document.createElement('div');
@@ -420,4 +471,268 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         reader.readAsText(file);
     });
+
+    if (adminChangePasswordBtn) {
+        adminChangePasswordBtn.addEventListener('click', async () => {
+            const currentPassword = adminCurrentPasswordInput.value;
+            const newPassword = adminNewPasswordInput.value;
+            adminPasswordStatus.textContent = '';
+
+            if (!currentPassword || !newPassword) {
+                adminPasswordStatus.textContent = 'Enter current and new password.';
+                adminPasswordStatus.style.color = '#ef4444';
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/admin/change-password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        current_password: currentPassword,
+                        new_password: newPassword,
+                    }),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Failed to change password');
+                }
+                adminCurrentPasswordInput.value = '';
+                adminNewPasswordInput.value = '';
+                adminPasswordStatus.textContent = 'Password updated.';
+                adminPasswordStatus.style.color = '#10b981';
+            } catch (error) {
+                adminPasswordStatus.textContent = error.message;
+                adminPasswordStatus.style.color = '#ef4444';
+            }
+        });
+    }
+
+    async function loadUsers() {
+        try {
+            const response = await fetch('/api/admin/users');
+            const data = await response.json();
+            usersTbody.innerHTML = '';
+            const users = data.users || [];
+            if (!users.length) {
+                usersTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">No users</td></tr>';
+                return;
+            }
+
+            users.forEach((user) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${user.username}</td>
+                    <td>
+                        <select class="modern-input user-role-select" data-username="${user.username}" style="max-width:120px;">
+                            <option value="user" ${user.role === 'user' ? 'selected' : ''}>user</option>
+                            <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>admin</option>
+                        </select>
+                    </td>
+                    <td><input type="password" class="modern-input user-password-input" data-username="${user.username}" placeholder="New password" style="max-width:200px;"></td>
+                    <td>
+                        <button class="btn user-save-btn" data-username="${user.username}" style="width:auto; padding:6px 10px;">Save</button>
+                        <button class="btn user-delete-btn" data-username="${user.username}" style="width:auto; padding:6px 10px; background:rgba(239,68,68,0.15); color:#ef4444; border:1px solid rgba(239,68,68,0.35);">Delete</button>
+                    </td>
+                `;
+                usersTbody.appendChild(tr);
+            });
+
+            usersTbody.querySelectorAll('.user-save-btn').forEach((btn) => {
+                btn.addEventListener('click', async () => {
+                    const username = btn.dataset.username;
+                    const roleSelect = usersTbody.querySelector(`.user-role-select[data-username="${username}"]`);
+                    const passwordInput = usersTbody.querySelector(`.user-password-input[data-username="${username}"]`);
+                    const payload = { role: roleSelect.value };
+                    if (passwordInput.value.trim()) payload.password = passwordInput.value.trim();
+                    await updateUser(username, payload);
+                });
+            });
+
+            usersTbody.querySelectorAll('.user-delete-btn').forEach((btn) => {
+                btn.addEventListener('click', async () => {
+                    const username = btn.dataset.username;
+                    if (!confirm(`Delete user "${username}"?`)) return;
+                    await deleteUser(username);
+                });
+            });
+        } catch (error) {
+            userStatus.textContent = `Failed to load users: ${error.message}`;
+            userStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function createUser() {
+        const username = newUserUsername.value.trim();
+        const password = newUserPassword.value;
+        const role = newUserRole.value;
+        if (!username || !password) {
+            userStatus.textContent = 'Username and password are required.';
+            userStatus.style.color = '#ef4444';
+            return;
+        }
+        try {
+            const response = await fetch('/api/admin/users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, role }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to create user');
+            newUserUsername.value = '';
+            newUserPassword.value = '';
+            newUserRole.value = 'user';
+            userStatus.textContent = 'User created.';
+            userStatus.style.color = '#10b981';
+            loadUsers();
+        } catch (error) {
+            userStatus.textContent = error.message;
+            userStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function updateUser(username, payload) {
+        try {
+            const response = await fetch(`/api/admin/users/${encodeURIComponent(username)}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to update user');
+            userStatus.textContent = `Updated ${username}.`;
+            userStatus.style.color = '#10b981';
+            loadUsers();
+        } catch (error) {
+            userStatus.textContent = error.message;
+            userStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function deleteUser(username) {
+        try {
+            const response = await fetch(`/api/admin/users/${encodeURIComponent(username)}`, {
+                method: 'DELETE',
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to delete user');
+            userStatus.textContent = `Deleted ${username}.`;
+            userStatus.style.color = '#10b981';
+            loadUsers();
+        } catch (error) {
+            userStatus.textContent = error.message;
+            userStatus.style.color = '#ef4444';
+        }
+    }
+
+    if (createUserBtn) {
+        createUserBtn.addEventListener('click', createUser);
+    }
+
+    async function runBackupNow() {
+        backupStatus.textContent = 'Running backup...';
+        backupStatus.style.color = 'var(--text-secondary)';
+        try {
+            const response = await fetch('/api/admin/backup/run', { method: 'POST' });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Backup failed');
+            backupStatus.textContent = data.path || data.file || 'Backup completed';
+            backupStatus.style.color = '#10b981';
+        } catch (error) {
+            backupStatus.textContent = error.message;
+            backupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function loadGroups() {
+        try {
+            const response = await fetch('/api/memory-groups');
+            const data = await response.json();
+            const groups = data.groups || [];
+            groupsList.innerHTML = '';
+            latestGroupId = groups.length ? groups[0].id : null;
+            groups.forEach((g) => {
+                const li = document.createElement('li');
+                li.textContent = `#${g.id} ${g.name} (${g.created_by})`;
+                groupsList.appendChild(li);
+            });
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function createGroup() {
+        const name = groupNameInput.value.trim();
+        const members = groupMembersInput.value.split(',').map(s => s.trim()).filter(Boolean);
+        if (!name) {
+            groupStatus.textContent = 'Group name is required';
+            groupStatus.style.color = '#ef4444';
+            return;
+        }
+        try {
+            const response = await fetch('/api/admin/memory-groups', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, members, description: '' }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to create group');
+            latestGroupId = data.group_id;
+            groupStatus.textContent = `Created group #${latestGroupId}`;
+            groupStatus.style.color = '#10b981';
+            loadGroups();
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function shareSessionToGroup() {
+        const sessionId = groupSessionIdInput.value.trim();
+        if (!latestGroupId || !sessionId) {
+            groupStatus.textContent = 'Create/select a group and provide session id';
+            groupStatus.style.color = '#ef4444';
+            return;
+        }
+        try {
+            const response = await fetch(`/api/admin/memory-groups/${latestGroupId}/share`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: sessionId }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to share session');
+            groupStatus.textContent = `Shared ${sessionId} to group #${latestGroupId}`;
+            groupStatus.style.color = '#10b981';
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function loadMediaAssets() {
+        try {
+            const response = await fetch('/api/media');
+            const data = await response.json();
+            const media = data.media || [];
+            mediaTbody.innerHTML = '';
+            if (!media.length) {
+                mediaTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">No uploaded media found</td></tr>';
+                return;
+            }
+            media.forEach((m) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${m.username || ''}</td>
+                    <td>${m.session_id || ''}</td>
+                    <td><a href="${m.url}" target="_blank" rel="noopener noreferrer">${m.filename || ''}</a></td>
+                    <td>${m.mime_type || ''}</td>
+                `;
+                mediaTbody.appendChild(tr);
+            });
+        } catch (error) {
+            mediaTbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:#ef4444;">${error.message}</td></tr>`;
+        }
+    }
 });

@@ -20,6 +20,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const webSearchToggle = document.getElementById('web-search-toggle');
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
     const sidebar = document.querySelector('.sidebar');
+    const sidebarMinimizeBtn = document.getElementById('sidebar-minimize-btn');
+    const agentDisplayName = document.getElementById('agent-display-name');
     const tasksViewBtn = document.getElementById('tasks-view-btn');
     const taskQuickAddInput = document.getElementById('task-quick-add-input');
     const taskQuickAddBtn = document.getElementById('task-quick-add-btn');
@@ -34,6 +36,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let globalConfigs = {};
 
+    function setSidebarMinimized(minimized) {
+        if (!sidebar) return;
+        sidebar.classList.toggle('minimized', !!minimized);
+        localStorage.setItem('sidebar_minimized', minimized ? '1' : '0');
+    }
+
     async function checkGlobalConfigs() {
         try {
             const res = await fetch('/api/configs/status');
@@ -41,6 +49,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (globalConfigs.default_model && !sessionStorage.getItem('model_set')) {
                 modelSelect.value = globalConfigs.default_model;
                 sessionStorage.setItem('model_set', 'true');
+            }
+            if (agentDisplayName) {
+                agentDisplayName.textContent = globalConfigs.chat_agent_name || 'AI Agent';
             }
             updateApiKeyVisibility();
         } catch (e) {
@@ -73,6 +84,18 @@ document.addEventListener('DOMContentLoaded', () => {
         checkGlobalConfigs();
     };
     initializeApp();
+
+    if (sidebar) {
+        const savedMinimized = localStorage.getItem('sidebar_minimized');
+        const shouldAutoMinimize = window.innerWidth < 1200;
+        setSidebarMinimized(savedMinimized ? savedMinimized === '1' : shouldAutoMinimize);
+    }
+
+    if (sidebarMinimizeBtn) {
+        sidebarMinimizeBtn.addEventListener('click', () => {
+            setSidebarMinimized(!sidebar.classList.contains('minimized'));
+        });
+    }
 
     if (sessionSearchInput) {
         sessionSearchInput.addEventListener('input', () => {
@@ -205,7 +228,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const formData = new FormData();
                 formData.append('file', files[i]);
                 try {
-                    const response = await fetch('/api/upload', {
+                    const response = await fetch(`/api/upload?session_id=${encodeURIComponent(currentSessionId)}`, {
                         method: 'POST',
                         body: formData
                     });
