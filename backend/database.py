@@ -1,7 +1,7 @@
 import os
-from typing import Optional, List
-from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, select, inspect, text
+from datetime import datetime, timezone
+from typing import Optional
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
 
 # Allow overriding for local testing vs docker
 # Default to Postgres container format
@@ -41,6 +41,20 @@ network_targets = Table(
     Column('id', Integer, primary_key=True, autoincrement=True),
     Column('name', String),
     Column('ip_address', String)
+)
+
+tasks = Table(
+    "tasks",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("title", String, nullable=False),
+    Column("description", String),
+    Column("status", String, nullable=False, default="todo"),
+    Column("priority", String, nullable=False, default="medium"),
+    Column("due_at", DateTime(timezone=True), nullable=True),
+    Column("session_id", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
 
 try:
@@ -314,4 +328,150 @@ def delete_network_target(target_id: int):
             return True
     except Exception as e:
         print(f"Error deleting network target: {e}")
+        return False
+
+
+def _parse_iso_datetime(value: Optional[str]):
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def create_task(title: str, description: str = "", status: str = "todo", priority: str = "medium", due_at: Optional[str] = None, session_id: Optional[str] = None):
+    if not engine:
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        due_dt = _parse_iso_datetime(due_at)
+        with engine.connect() as conn:
+            stmt = text(
+                "INSERT INTO tasks (title, description, status, priority, due_at, session_id, created_at, updated_at) "
+                "VALUES (:title, :description, :status, :priority, :due_at, :session_id, :created_at, :updated_at) "
+                "RETURNING id"
+            )
+            result = conn.execute(stmt, {
+                "title": title,
+                "description": description,
+                "status": status,
+                "priority": priority,
+                "due_at": due_dt,
+                "session_id": session_id,
+                "created_at": now,
+                "updated_at": now,
+            })
+            task_id = result.scalar()
+            conn.commit()
+            return get_task_by_id(task_id)
+    except Exception as e:
+        print(f"Error creating task: {e}")
+        return None
+
+
+def get_task_by_id(task_id: int):
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            stmt = text("SELECT id, title, description, status, priority, due_at, session_id, created_at, updated_at FROM tasks WHERE id = :id")
+            row = conn.execute(stmt, {"id": task_id}).mappings().first()
+            if not row:
+                return None
+            return dict(row)
+    except Exception as e:
+        print(f"Error fetching task by id: {e}")
+        return None
+
+
+def list_tasks(status: Optional[str] = None, priority: Optional[str] = None, session_id: Optional[str] = None, due_before: Optional[str] = None, due_after: Optional[str] = None):
+    if not engine:
+        return []
+    try:
+        where_parts = []
+        params = {}
+        if status:
+            where_parts.append("status = :status")
+            params["status"] = status
+        if priority:
+            where_parts.append("priority = :priority")
+            params["priority"] = priority
+        if session_id:
+            where_parts.append("session_id = :session_id")
+            params["session_id"] = session_id
+        if due_before:
+            parsed = _parse_iso_datetime(due_before)
+            if parsed:
+                where_parts.append("due_at <= :due_before")
+                params["due_before"] = parsed
+        if due_after:
+            parsed = _parse_iso_datetime(due_after)
+            if parsed:
+                where_parts.append("due_at >= :due_after")
+                params["due_after"] = parsed
+
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        query = (
+            "SELECT id, title, description, status, priority, due_at, session_id, created_at, updated_at "
+            f"FROM tasks {where_sql} ORDER BY COALESCE(due_at, created_at) ASC, id DESC"
+        )
+        with engine.connect() as conn:
+            rows = conn.execute(text(query), params).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Error listing tasks: {e}")
+        return []
+
+
+def update_task(task_id: int, title: Optional[str] = None, description: Optional[str] = None, status: Optional[str] = None, priority: Optional[str] = None, due_at: Optional[str] = None, session_id: Optional[str] = None):
+    if not engine:
+        return None
+    try:
+        set_parts = ["updated_at = :updated_at"]
+        params = {"id": task_id, "updated_at": datetime.now(timezone.utc)}
+
+        if title is not None:
+            set_parts.append("title = :title")
+            params["title"] = title
+        if description is not None:
+            set_parts.append("description = :description")
+            params["description"] = description
+        if status is not None:
+            set_parts.append("status = :status")
+            params["status"] = status
+        if priority is not None:
+            set_parts.append("priority = :priority")
+            params["priority"] = priority
+        if due_at is not None:
+            params["due_at"] = _parse_iso_datetime(due_at) if due_at else None
+            set_parts.append("due_at = :due_at")
+        if session_id is not None:
+            set_parts.append("session_id = :session_id")
+            params["session_id"] = session_id
+
+        with engine.connect() as conn:
+            stmt = text(f"UPDATE tasks SET {', '.join(set_parts)} WHERE id = :id")
+            result = conn.execute(stmt, params)
+            conn.commit()
+            if result.rowcount == 0:
+                return None
+            return get_task_by_id(task_id)
+    except Exception as e:
+        print(f"Error updating task: {e}")
+        return None
+
+
+def delete_task(task_id: int):
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            stmt = text("DELETE FROM tasks WHERE id = :id")
+            result = conn.execute(stmt, {"id": task_id})
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        print(f"Error deleting task: {e}")
         return False

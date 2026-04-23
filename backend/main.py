@@ -19,15 +19,19 @@ from agent import chat_with_agent, get_redis_history
 from database import (
     DATABASE_URL,
     add_network_target,
+    create_task,
     delete_core_memory,
     delete_network_target,
+    delete_task,
     delete_session_metadata,
     get_all_configs,
     get_all_sessions,
     get_core_memories,
     get_network_targets,
+    list_tasks,
     set_config,
     set_session_category,
+    update_task,
 )
 from scheduler import run_network_sweep, start_scheduler
 
@@ -98,6 +102,24 @@ class ImportRequest(BaseModel):
 
 class ConfigUpdateRequest(BaseModel):
     configs: Dict[str, str]
+
+
+class TaskCreateRequest(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    status: str = "todo"
+    priority: str = "medium"
+    due_at: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class TaskUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    due_at: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class UserLoginResponse(BaseModel):
@@ -393,6 +415,64 @@ def api_delete_core_memory(mem_id: int, _: UserContext = Depends(require_admin_u
 @app.get("/api/targets")
 def get_targets(_: UserContext = Depends(require_admin_user)):
     return get_network_targets()
+
+
+@app.post("/api/tasks")
+def api_create_task(request: TaskCreateRequest, _: UserContext = Depends(require_authenticated_user)):
+    task = create_task(
+        title=request.title,
+        description=request.description or "",
+        status=request.status,
+        priority=request.priority,
+        due_at=request.due_at,
+        session_id=request.session_id,
+    )
+    if not task:
+        raise HTTPException(status_code=500, detail="Failed to create task")
+    return {"task": task}
+
+
+@app.get("/api/tasks")
+def api_get_tasks(
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    session_id: Optional[str] = None,
+    due_before: Optional[str] = None,
+    due_after: Optional[str] = None,
+    _: UserContext = Depends(require_authenticated_user),
+):
+    return {
+        "tasks": list_tasks(
+            status=status,
+            priority=priority,
+            session_id=session_id,
+            due_before=due_before,
+            due_after=due_after,
+        )
+    }
+
+
+@app.patch("/api/tasks/{task_id}")
+def api_patch_task(task_id: int, request: TaskUpdateRequest, _: UserContext = Depends(require_authenticated_user)):
+    task = update_task(
+        task_id=task_id,
+        title=request.title,
+        description=request.description,
+        status=request.status,
+        priority=request.priority,
+        due_at=request.due_at,
+        session_id=request.session_id,
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"task": task}
+
+
+@app.delete("/api/tasks/{task_id}")
+def api_delete_task(task_id: int, _: UserContext = Depends(require_authenticated_user)):
+    if not delete_task(task_id):
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"status": "success"}
 
 
 @app.post("/api/targets")
