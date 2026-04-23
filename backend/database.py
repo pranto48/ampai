@@ -2,9 +2,11 @@ import os
 import logging
 import hashlib
 import json
+import math
+import re
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Tuple
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, Boolean, select, inspect, text
+from typing import Any, List, Optional, Dict, Tuple
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
 from cryptography.fernet import Fernet, InvalidToken
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from logging_utils import get_logger
@@ -263,6 +265,7 @@ def _ensure_session_metadata_columns(conn):
     conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS pinned BOOLEAN DEFAULT FALSE"))
     conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE"))
     conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS updated_at VARCHAR"))
+    conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS owner_username VARCHAR"))
 
 
 def touch_session(session_id: str):
@@ -1574,4 +1577,232 @@ def export_all_sessions_for_backup():
         return []
 
 
-ensure_session_access_schema()
+
+def _to_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        normalized = value.replace('Z', '+00:00')
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _extract_snippet(content: str, query: str, radius: int = 70) -> str:
+    text_content = (content or '').strip()
+    if not text_content:
+        return ''
+    if not query:
+        return text_content[: min(len(text_content), radius * 2)]
+
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    match = pattern.search(text_content)
+    if not match:
+        return text_content[: min(len(text_content), radius * 2)]
+
+    start = max(0, match.start() - radius)
+    end = min(len(text_content), match.end() + radius)
+    snippet = text_content[start:end]
+    if start > 0:
+        snippet = '…' + snippet
+    if end < len(text_content):
+        snippet = snippet + '…'
+    return snippet
+
+
+def ensure_session_owner(session_id: str, username: str) -> bool:
+    if not engine or not session_id or not username:
+        return False
+    try:
+        with engine.connect() as conn:
+            _ensure_session_metadata_columns(conn)
+            conn.execute(text('ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS owner_username VARCHAR'))
+            conn.execute(
+                text(
+                    'INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at, owner_username) '
+                    'VALUES (:session_id, :category, FALSE, FALSE, :updated_at, :owner_username) '
+                    'ON CONFLICT (session_id) DO UPDATE SET '
+                    'owner_username = COALESCE(session_metadata.owner_username, EXCLUDED.owner_username), '
+                    'updated_at = EXCLUDED.updated_at'
+                ),
+                {
+                    'session_id': session_id,
+                    'category': 'Uncategorized',
+                    'updated_at': _now_iso(),
+                    'owner_username': username,
+                },
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.exception('Error ensuring session owner', exc_info=e)
+        return False
+
+
+def get_accessible_session_ids(username: str, is_admin: bool = False) -> set[str]:
+    if not engine:
+        return set()
+    try:
+        with engine.connect() as conn:
+            if is_admin:
+                rows = conn.execute(text(f'SELECT DISTINCT session_id FROM {CHAT_HISTORY_TABLE} WHERE session_id IS NOT NULL')).fetchall()
+                return {r[0] for r in rows if r[0]}
+
+            _ensure_session_metadata_columns(conn)
+            conn.execute(text('ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS owner_username VARCHAR'))
+            owned_rows = conn.execute(
+                text('SELECT session_id FROM session_metadata WHERE owner_username = :username'),
+                {'username': username},
+            ).fetchall()
+            shared_rows = conn.execute(
+                text(
+                    'SELECT DISTINCT s.session_id '
+                    'FROM memory_group_sessions s '
+                    'JOIN memory_group_members m ON m.group_id = s.group_id '
+                    'WHERE m.username = :username'
+                ),
+                {'username': username},
+            ).fetchall()
+
+        return {r[0] for r in owned_rows + shared_rows if r[0]}
+    except Exception as e:
+        logger.exception('Error loading accessible sessions', exc_info=e)
+        return set()
+
+
+def find_report_matches(
+    *,
+    username: str,
+    is_admin: bool = False,
+    keyword: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    session_id: Optional[str] = None,
+    category: Optional[str] = None,
+    shared_only: bool = False,
+    limit: int = 120,
+) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+
+    keyword = (keyword or '').strip()
+    lower_keyword = keyword.lower()
+    from_dt = _to_dt(date_from)
+    to_dt = _to_dt(date_to)
+    accessible_ids = get_accessible_session_ids(username=username, is_admin=is_admin)
+    shared_ids = set(list_shared_sessions_for_user(username)) if not is_admin else set()
+
+    if not is_admin:
+        if shared_only:
+            accessible_ids = accessible_ids.intersection(shared_ids)
+        if session_id and session_id not in accessible_ids:
+            return []
+        if not accessible_ids:
+            return []
+
+    filters = ['h.session_id IS NOT NULL']
+    params: Dict[str, Any] = {}
+    if session_id:
+        filters.append('h.session_id = :session_id')
+        params['session_id'] = session_id
+
+    if category:
+        filters.append('COALESCE(sm.category, :default_category) = :category')
+        params['default_category'] = 'Uncategorized'
+        params['category'] = category
+
+    if not is_admin:
+        filters.append('h.session_id = ANY(:accessible_ids)')
+        params['accessible_ids'] = sorted(accessible_ids)
+
+    where_sql = ' AND '.join(filters)
+    sql = text(
+        f"""
+        SELECT h.id, h.session_id, h.message, COALESCE(sm.category, 'Uncategorized') AS category, sm.updated_at, sm.owner_username
+        FROM {CHAT_HISTORY_TABLE} h
+        LEFT JOIN session_metadata sm ON sm.session_id = h.session_id
+        WHERE {where_sql}
+        ORDER BY h.id DESC
+        LIMIT :limit
+        """
+    )
+    params['limit'] = max(10, min(limit, 500))
+
+    now = datetime.now(timezone.utc)
+    ranked: List[Dict[str, Any]] = []
+
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(sql, params).mappings().all()
+
+        for row in rows:
+            parsed = _parse_chat_payload(row['message'])
+            if not parsed:
+                continue
+            msg_type, content = parsed
+            haystack = content.lower()
+            if lower_keyword and lower_keyword not in haystack:
+                continue
+
+            updated_dt = _to_dt(row.get('updated_at')) or now
+            if from_dt and updated_dt < from_dt:
+                continue
+            if to_dt and updated_dt > to_dt:
+                continue
+
+            exact_boost = 4.0 if lower_keyword and re.search(rf'\b{re.escape(lower_keyword)}\b', haystack) else (1.5 if lower_keyword else 0.0)
+            days_old = max(0.0, (now - updated_dt).total_seconds() / 86400.0)
+            recency_boost = max(0.0, 2.5 - math.log(days_old + 1.0, 2))
+            role_weight = 1.5 if msg_type == 'ai' else 1.0
+            if msg_type == 'ai' and ('summary' in haystack or 'report' in haystack):
+                role_weight += 0.5
+
+            score = round((exact_boost + recency_boost) * role_weight, 4)
+            ranked.append({
+                'session_id': row['session_id'],
+                'category': row['category'] or 'Uncategorized',
+                'owner_username': row.get('owner_username'),
+                'message_role': msg_type,
+                'snippet': _extract_snippet(content, keyword),
+                'updated_at': updated_dt.isoformat(),
+                'score': score,
+                'shared_via_group': row['session_id'] in shared_ids if not is_admin else False,
+            })
+
+        ranked.sort(key=lambda r: (-r['score'], r['updated_at']), reverse=False)
+        return ranked[: max(1, min(limit, 200))]
+    except Exception as e:
+        logger.exception('Error searching report matches', exc_info=e)
+        return []
+
+
+def build_session_report_card(session_id: str, username: str, is_admin: bool = False) -> Dict[str, Any]:
+    allowed = get_accessible_session_ids(username=username, is_admin=is_admin)
+    if not is_admin and session_id not in allowed:
+        return {}
+
+    messages = list_chat_messages(session_id, dedupe=True)
+    if not messages:
+        return {}
+
+    ai_messages = [m['content'] for m in messages if m.get('type') == 'ai']
+    human_messages = [m['content'] for m in messages if m.get('type') == 'human']
+    highlights = []
+    for txt in ai_messages[:3]:
+        clean = ' '.join(txt.split())
+        highlights.append(clean[:240] + ('…' if len(clean) > 240 else ''))
+
+    return {
+        'session_id': session_id,
+        'totals': {
+            'messages': len(messages),
+            'human_messages': len(human_messages),
+            'ai_messages': len(ai_messages),
+        },
+        'highlights': highlights,
+        'open_questions': [q for q in human_messages if q.strip().endswith('?')][:5],
+        'latest_ai_summary': highlights[0] if highlights else '',
+    }

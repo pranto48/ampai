@@ -1014,4 +1014,66 @@ document.addEventListener('DOMContentLoaded', () => {
             mediaTbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:#ef4444;">${error.message}</td></tr>`;
         }
     }
+
+    // --- Reports search/export (admin) ---
+    let latestAdminReportMatches = [];
+
+    function toCsv(rows) {
+        if (!rows?.length) return '';
+        const headers = Object.keys(rows[0]);
+        const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+        return [headers.join(','), ...rows.map((r) => headers.map((h) => esc(r[h])).join(','))].join('\n');
+    }
+
+    function downloadBlob(filename, content, type) {
+        const blob = new Blob([content], { type });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    async function runAdminReportSearch() {
+        const status = document.getElementById('admin-report-status');
+        const params = new URLSearchParams();
+        const read = (id) => document.getElementById(id)?.value?.trim();
+        const q = read('admin-report-q');
+        const sid = read('admin-report-session-id');
+        const from = read('admin-report-date-from');
+        const to = read('admin-report-date-to');
+        const category = read('admin-report-category');
+        const sharedOnly = !!document.getElementById('admin-report-shared-only')?.checked;
+        if (q) params.set('q', q);
+        if (sid) params.set('session_id', sid);
+        if (from) params.set('date_from', from);
+        if (to) params.set('date_to', to);
+        if (category) params.set('category', category);
+        if (sharedOnly) params.set('shared_only', 'true');
+
+        status.textContent = 'Searching…';
+        const response = await apiFetch(`/api/reports/find?${params.toString()}`);
+        const data = await response.json();
+        if (!response.ok) {
+            status.textContent = data.detail || 'Search failed';
+            status.style.color = '#ef4444';
+            latestAdminReportMatches = [];
+            return;
+        }
+        latestAdminReportMatches = data.matches || [];
+        status.textContent = `Found ${latestAdminReportMatches.length} matches`;
+        status.style.color = '#10b981';
+    }
+
+    document.getElementById('admin-report-search-btn')?.addEventListener('click', runAdminReportSearch);
+    document.getElementById('admin-report-export-json-btn')?.addEventListener('click', () => {
+        if (!latestAdminReportMatches.length) return;
+        downloadBlob('admin-report-results.json', JSON.stringify(latestAdminReportMatches, null, 2), 'application/json');
+    });
+    document.getElementById('admin-report-export-csv-btn')?.addEventListener('click', () => {
+        if (!latestAdminReportMatches.length) return;
+        downloadBlob('admin-report-results.csv', toCsv(latestAdminReportMatches), 'text/csv');
+    });
+
 });

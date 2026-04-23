@@ -87,6 +87,33 @@
                 </ul>
             </div>
 
+
+            <div class="sessions-container" style="margin-top: 16px;">
+                <h3>Report Search</h3>
+                <input id="report-q" class="modern-input" placeholder="Keyword">
+                <input id="report-session-id" class="modern-input" placeholder="Session ID (optional)" style="margin-top:6px;">
+                <select id="report-category" class="modern-input" style="margin-top:6px;">
+                    <option value="">All categories</option>
+                    <option value="Work">Work</option>
+                    <option value="Personal">Personal</option>
+                    <option value="Ideas">Ideas</option>
+                    <option value="Code">Code</option>
+                    <option value="Uncategorized">Uncategorized</option>
+                </select>
+                <div style="display:flex; gap:6px; margin-top:6px;">
+                    <input id="report-date-from" class="modern-input" type="date">
+                    <input id="report-date-to" class="modern-input" type="date">
+                </div>
+                <label style="font-size:0.75rem; color:var(--text-secondary); display:flex; gap:6px; align-items:center; margin:6px 0;">
+                    <input type="checkbox" id="report-shared-only"> Shared only
+                </label>
+                <div style="display:flex; gap:6px;">
+                    <button id="report-search-btn" class="btn" style="width:auto;">Search</button>
+                    <button id="report-export-json-btn" class="btn" style="width:auto;">JSON</button>
+                    <button id="report-export-csv-btn" class="btn" style="width:auto;">CSV</button>
+                </div>
+                <div id="report-search-status" style="font-size:0.8rem; margin-top:6px; color:var(--text-secondary);"></div>
+            </div>
             <div class="sessions-container" style="margin-top: 16px;">
                 <h3>Tasks</h3>
                 <div id="task-quick-add" style="display: flex; gap: 6px;">
