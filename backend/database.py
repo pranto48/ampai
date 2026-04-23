@@ -1,6 +1,16 @@
 import os
+import logging
 from datetime import datetime, timezone
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, select, inspect, text, Boolean
+
+
+def get_logger(name: str):
+    """Backward-compatible logger helper for older modules/import paths."""
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+    return logging.getLogger(name)
+
+
+logger = get_logger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
 CHAT_HISTORY_TABLE = os.getenv("CHAT_HISTORY_TABLE", "chat_message_store")
@@ -92,7 +102,7 @@ def touch_session(session_id: str):
             conn.execute(upsert_stmt, {"s": session_id, "c": "Uncategorized", "u": _now_iso()})
             conn.commit()
     except Exception as e:
-        print(f"Error touching session: {e}")
+        logger.warning(f"Error touching session: {e}")
 
 
 def get_all_sessions(query: str = "", include_archived: bool = False):
@@ -145,25 +155,7 @@ def get_all_sessions(query: str = "", include_archived: bool = False):
             output.sort(key=lambda x: (not x["pinned"], x.get("updated_at") or "", x["session_id"]), reverse=False)
             return output
     except Exception as e:
-        logger.exception("Error fetching sessions", exc_info=e)
-        return []
-
-
-def set_session_category(session_id: str, category: str):
-    if not engine:
-        return []
-    try:
-        with engine.connect() as conn:
-            _ensure_session_metadata_columns(conn)
-            upsert_stmt = text(
-                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, FALSE, FALSE, :u) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category, updated_at = EXCLUDED.updated_at"
-            )
-            conn.execute(upsert_stmt, {"s": session_id, "c": category, "u": _now_iso()})
-            conn.commit()
-            return True
-    except Exception as e:
-        logger.exception("Error listing chat messages", extra={"session_id": session_id}, exc_info=e)
+        logger.warning(f"Error fetching sessions: {e}")
         return []
 
 
@@ -219,6 +211,24 @@ def set_session_flags(session_id: str, pinned: bool = None, archived: bool = Non
     try:
         with engine.connect() as conn:
             _ensure_session_metadata_columns(conn)
+            upsert_stmt = text(
+                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, FALSE, FALSE, :u) "
+                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category, updated_at = EXCLUDED.updated_at"
+            )
+            conn.execute(upsert_stmt, {"s": session_id, "c": category, "u": _now_iso()})
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.warning(f"Error setting category: {e}")
+        return False
+
+
+def set_session_flags(session_id: str, pinned: bool = None, archived: bool = None):
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            _ensure_session_metadata_columns(conn)
             touch = _now_iso()
             existing = conn.execute(select(session_metadata).where(session_metadata.c.session_id == session_id)).first()
             category = existing.category if existing else "Uncategorized"
@@ -238,7 +248,7 @@ def set_session_flags(session_id: str, pinned: bool = None, archived: bool = Non
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error setting session flags: {e}")
+        logger.warning(f"Error setting session flags: {e}")
         return False
 
 
@@ -251,7 +261,7 @@ def delete_session_metadata(session_id: str):
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error deleting session metadata", exc_info=e)
+        logger.warning(f"Error deleting session metadata: {e}")
         return False
 
 
@@ -263,7 +273,7 @@ def get_config(key: str, default=None):
             result = conn.execute(stmt).first()
             return result[0] if result else default
     except Exception as e:
-        logger.exception("Error getting config", extra={"config_key": key}, exc_info=e)
+        logger.warning(f"Error getting config {key}: {e}")
         return default
 
 
@@ -279,7 +289,7 @@ def set_config(key: str, value: str):
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error setting config", extra={"config_key": key}, exc_info=e)
+        logger.warning(f"Error setting config {key}: {e}")
         return False
 
 
@@ -292,7 +302,7 @@ def get_all_configs():
             stmt = select(app_configs.c.config_key, app_configs.c.config_value)
             return {row[0]: row[1] for row in conn.execute(stmt)}
     except Exception as e:
-        logger.exception("Error getting all configs", exc_info=e)
+        logger.warning(f"Error getting all configs: {e}")
         return {}
 
 
@@ -304,7 +314,7 @@ def add_core_memory(fact: str):
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error adding core memory", exc_info=e)
+        logger.warning(f"Error adding core memory: {e}")
         return False
 
 
@@ -317,7 +327,7 @@ def get_core_memories():
             stmt = select(core_memories.c.id, core_memories.c.fact)
             return [{"id": row[0], "fact": row[1]} for row in conn.execute(stmt)]
     except Exception as e:
-        logger.exception("Error getting core memories", exc_info=e)
+        logger.warning(f"Error getting core memories: {e}")
         return []
 
 
@@ -329,7 +339,7 @@ def delete_core_memory(mem_id: int):
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error deleting core memory", exc_info=e)
+        logger.warning(f"Error deleting core memory: {e}")
         return False
 
 
@@ -342,7 +352,7 @@ def get_network_targets():
             stmt = select(network_targets.c.id, network_targets.c.name, network_targets.c.ip_address)
             return [{"id": row[0], "name": row[1], "ip_address": row[2]} for row in conn.execute(stmt)]
     except Exception as e:
-        logger.exception("Error getting network targets", exc_info=e)
+        logger.warning(f"Error getting network targets: {e}")
         return []
 
 
@@ -354,7 +364,7 @@ def add_network_target(name: str, ip_address: str):
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error adding network target", exc_info=e)
+        logger.warning(f"Error adding network target: {e}")
         return False
 
 
@@ -366,7 +376,7 @@ def delete_network_target(target_id: int):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error deleting task: {e}")
+        logger.warning(f"Error deleting network target: {e}")
         return False
 
 
@@ -385,7 +395,7 @@ def create_task(title: str, description: str = "", priority: str = "medium", due
             conn.commit()
             return task_id
     except Exception as e:
-        print(f"Error creating task: {e}")
+        logger.warning(f"Error creating task: {e}")
         return None
 
 
@@ -400,7 +410,7 @@ def list_tasks(status: str = None):
             rows = conn.execute(query).fetchall()
             return [dict(r._mapping) for r in rows]
     except Exception as e:
-        print(f"Error listing tasks: {e}")
+        logger.warning(f"Error listing tasks: {e}")
         return []
 
 
@@ -420,7 +430,7 @@ def update_task(task_id: int, updates: dict):
             conn.commit()
         return True
     except Exception as e:
-        print(f"Error updating task: {e}")
+        logger.warning(f"Error updating task: {e}")
         return False
 
 
@@ -433,5 +443,5 @@ def delete_task(task_id: int):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error deleting task: {e}")
+        logger.warning(f"Error deleting task: {e}")
         return False
