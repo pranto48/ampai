@@ -370,7 +370,7 @@ document.addEventListener('DOMContentLoaded', () => {
             removeTypingIndicator(typingId);
             
             if (response.ok) {
-                appendMessage('ai', data.response, false, data.web_search_status);
+                appendMessage('ai', data.response, false, data.search_metadata || data.web_search_status);
                 // Refresh sessions list in case this was a new session
                 loadSessions();
             } else {
@@ -435,16 +435,16 @@ document.addEventListener('DOMContentLoaded', () => {
             statusBadge.style.padding = '3px 8px';
             statusBadge.style.borderRadius = '999px';
 
-            if (webSearchStatus.ok) {
+            if (webSearchStatus.status === 'success') {
                 statusBadge.style.background = 'rgba(16, 185, 129, 0.15)';
                 statusBadge.style.border = '1px solid rgba(16, 185, 129, 0.35)';
                 statusBadge.style.color = '#10b981';
-                statusBadge.textContent = `Web: ${webSearchStatus.provider || 'available'}`;
+                statusBadge.textContent = `Search: ${webSearchStatus.provider || 'available'} (${webSearchStatus.status})`;
             } else {
                 statusBadge.style.background = 'rgba(239, 68, 68, 0.12)';
                 statusBadge.style.border = '1px solid rgba(239, 68, 68, 0.35)';
                 statusBadge.style.color = '#ef4444';
-                statusBadge.textContent = 'Web unavailable';
+                statusBadge.textContent = `Search: ${(webSearchStatus.provider || 'none')} (${webSearchStatus.status || 'failed'})`;
                 statusBadge.title = webSearchStatus.error || 'Web search failed';
             }
 

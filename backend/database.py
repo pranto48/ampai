@@ -73,6 +73,31 @@ try:
 except Exception:
     pass
 
+DEFAULT_APP_CONFIG_KEYS = [
+    "web_search_secondary_provider",
+    "web_fallback_provider",
+    "serpapi_api_key",
+    "bing_api_key",
+    "custom_web_search_url",
+    "custom_web_search_api_key",
+]
+
+
+def ensure_default_app_config_keys():
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            for key in DEFAULT_APP_CONFIG_KEYS:
+                upsert_stmt = text(
+                    "INSERT INTO app_configs (config_key, config_value) VALUES (:k, :v) "
+                    "ON CONFLICT (config_key) DO NOTHING"
+                )
+                conn.execute(upsert_stmt, {"k": key, "v": ""})
+            conn.commit()
+    except Exception as e:
+        logger.exception("Error ensuring default config keys", exc_info=e)
+
 
 def migrate_session_metadata_schema():
     if not engine:
@@ -96,6 +121,7 @@ def migrate_session_metadata_schema():
 
 
 migrate_session_metadata_schema()
+ensure_default_app_config_keys()
 
 
 def _load_fernet_keys() -> List[Fernet]:

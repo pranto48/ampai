@@ -24,6 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'anythingllm_api_key': document.getElementById('config-anythingllm-key'),
         'anythingllm_workspace': document.getElementById('config-anythingllm-workspace'),
         'default_model': document.getElementById('config-default-model'),
+        'web_search_secondary_provider': document.getElementById('config-web-search-secondary-provider'),
         'web_fallback_provider': document.getElementById('config-web-fallback-provider'),
         'serpapi_api_key': document.getElementById('config-serpapi-key'),
         'bing_api_key': document.getElementById('config-bing-key'),
