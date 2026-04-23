@@ -1,20 +1,21 @@
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
 import os
 import shutil
 import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
 
-from database import (
-    get_all_sessions, set_session_category, delete_session_metadata, get_sql_chat_history,
-    get_all_configs, set_config, get_core_memories, delete_core_memory,
-    get_network_targets, add_network_target, delete_network_target, migrate_app_config_encryption
-)
-from agent import chat_with_agent, get_redis_history
-from scheduler import start_scheduler, run_network_sweep
+from jose import JWTError, jwt
+from langchain_community.chat_message_histories import SQLChatMessageHistory
 from passlib.context import CryptContext
 from pydantic import BaseModel
+from redis import Redis
+from sqlalchemy import text
+from starlette.staticfiles import StaticFiles
 
-from agent import chat_with_agent, get_redis_history
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
+from fastapi.security import OAuth2PasswordRequestForm
+
+from agent import chat_with_agent, get_redis_history, get_llm
 from database import (
     add_network_target,
     create_task,
@@ -22,6 +23,7 @@ from database import (
     delete_network_target,
     delete_task,
     delete_session_metadata,
+    engine,
     get_all_configs,
     get_all_sessions,
     get_core_memories,
@@ -36,8 +38,11 @@ from database import (
     touch_session_updated_at,
     update_task,
 )
-from scheduler import run_network_sweep, start_scheduler
+from logging_utils import configure_logging, get_logger, reset_request_id, set_request_id
+from scheduler import get_scheduler_diagnostics, run_network_sweep, start_scheduler
 
+configure_logging()
+logger = get_logger(__name__)
 app = FastAPI()
 CLEAR_VALUE_SENTINEL = "__CLEAR__"
 SECRET_CONFIG_KEYS = {
@@ -75,6 +80,33 @@ class Attachment(BaseModel):
 class TargetModel(BaseModel):
     name: str
     ip_address: str
+
+@app.on_event("startup")
+def startup_event():
+    start_scheduler()
+    migrate_app_config_encryption()
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    token = set_request_id(request_id)
+    request.state.request_id = request_id
+    started = datetime.now(timezone.utc)
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("HTTP request failed", extra={"path": request.url.path, "method": request.method})
+        reset_request_id(token)
+        raise
+    elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+    logger.info(
+        "HTTP request completed",
+        extra={"path": request.url.path, "method": request.method, "status_code": response.status_code, "elapsed_ms": elapsed_ms},
+    )
+    reset_request_id(token)
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 class ChatRequest(BaseModel):
     session_id: str
@@ -159,17 +191,55 @@ def _build_user_store() -> Dict[str, Dict[str, str]]:
 USERS = _build_user_store()
 
 
-@app.on_event("startup")
-def startup_event():
-    start_scheduler()
-    migrate_app_config_encryption()
-
-
 def _create_access_token(data: Dict[str, str]) -> str:
     payload = data.copy()
     expiry = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRY_MINUTES)
     payload.update({"exp": expiry})
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _check_db_health() -> dict:
+    try:
+        if not engine:
+            return {"ok": False, "details": "DB engine unavailable"}
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"ok": True}
+    except Exception as exc:
+        logger.exception("DB health check failed", exc_info=exc)
+        return {"ok": False, "details": str(exc)}
+
+
+def _check_redis_health() -> dict:
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+        redis_client = Redis.from_url(redis_url, socket_timeout=2)
+        redis_client.ping()
+        return {"ok": True}
+    except Exception as exc:
+        logger.exception("Redis health check failed", exc_info=exc)
+        return {"ok": False, "details": str(exc)}
+
+
+def _check_model_provider_health() -> dict:
+    provider = (get_all_configs().get("default_model") or "ollama").strip().lower()
+    try:
+        get_llm(provider)
+        return {"ok": True, "provider": provider}
+    except Exception as exc:
+        return {"ok": False, "provider": provider, "details": str(exc)}
+
+
+def _check_search_provider_health() -> dict:
+    configs = get_all_configs()
+    fallback = (configs.get("web_fallback_provider") or "").strip().lower()
+    if fallback == "serpapi":
+        return {"ok": bool(configs.get("serpapi_api_key")), "provider": "serpapi"}
+    if fallback == "bing":
+        return {"ok": bool(configs.get("bing_api_key")), "provider": "bing"}
+    if fallback == "custom":
+        return {"ok": bool(configs.get("custom_web_search_url")), "provider": "custom"}
+    return {"ok": True, "provider": "duckduckgo"}
 
 
 def _get_current_user(access_token: Optional[str] = None) -> UserContext:
@@ -273,7 +343,7 @@ async def upload_file(file: UploadFile = File(...), _: UserContext = Depends(req
                     reader = PyPDF2.PdfReader(pdf_file)
                     extracted_text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
             except Exception as e:
-                print(f"PDF Parsing error: {e}")
+                logger.exception("PDF parsing error", exc_info=e)
         elif file_ext.lower() in [".txt", ".csv", ".json", ".md", ".py", ".js", ".html", ".css"]:
             with open(file_path, "r", encoding="utf-8") as text_file:
                 extracted_text = text_file.read()
@@ -564,6 +634,31 @@ def get_status(_: UserContext = Depends(require_authenticated_user)):
     frontend_path = os.path.join(backend_path, "..", "frontend")
     latest_mtime = get_latest_mtime([backend_path, frontend_path])
     return {"latest_mtime": latest_mtime}
+
+
+@app.get("/api/health")
+def get_health(_: UserContext = Depends(require_admin_user)):
+    db_health = _check_db_health()
+    redis_health = _check_redis_health()
+    model_health = _check_model_provider_health()
+    search_health = _check_search_provider_health()
+    scheduler_health = get_scheduler_diagnostics()
+    overall_ok = all([
+        db_health.get("ok"),
+        redis_health.get("ok"),
+        model_health.get("ok"),
+        search_health.get("ok"),
+    ])
+    return {
+        "ok": overall_ok,
+        "checks": {
+            "db": db_health,
+            "redis": redis_health,
+            "model_provider": model_health,
+            "search_provider": search_health,
+            "scheduler": scheduler_health,
+        },
+    }
 
 
 if os.path.exists(UPLOAD_DIR):
