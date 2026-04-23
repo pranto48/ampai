@@ -12,7 +12,7 @@ import shutil
 from database import (
     get_all_sessions, set_session_category, delete_session_metadata, DATABASE_URL,
     get_all_configs, set_config, get_core_memories, delete_core_memory,
-    get_network_targets, add_network_target, delete_network_target
+    get_network_targets, add_network_target, delete_network_target, migrate_app_config_encryption
 )
 from agent import chat_with_agent, get_redis_history
 from scheduler import start_scheduler, run_network_sweep
@@ -22,6 +22,15 @@ import uuid
 import os
 
 app = FastAPI()
+CLEAR_VALUE_SENTINEL = "__CLEAR__"
+SECRET_CONFIG_KEYS = {
+    "generic_api_key",
+    "openai_api_key",
+    "gemini_api_key",
+    "anthropic_api_key",
+    "openrouter_api_key",
+    "anythingllm_api_key"
+}
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -39,6 +48,7 @@ class TargetModel(BaseModel):
 @app.on_event("startup")
 def startup_event():
     start_scheduler()
+    migrate_app_config_encryption()
 
 class ChatRequest(BaseModel):
     session_id: str
@@ -194,7 +204,12 @@ def get_admin_configs():
     configs = get_all_configs()
     masked = {}
     for k, v in configs.items():
-        if "api_key" in k and v and len(v) > 8:
+        if k in SECRET_CONFIG_KEYS and v:
+            if len(v) > 8:
+                masked[k] = v[:4] + "..." + v[-4:]
+            else:
+                masked[k] = "****"
+        elif "api_key" in k and v and len(v) > 8:
             masked[k] = v[:4] + "..." + v[-4:]
         else:
             masked[k] = v
@@ -203,9 +218,16 @@ def get_admin_configs():
 @app.post("/api/admin/configs")
 def update_admin_configs(request: ConfigUpdateRequest):
     for k, v in request.configs.items():
-        if v and "..." not in v: # Dont save masked passwords
+        if v == CLEAR_VALUE_SENTINEL:
+            set_config(k, "")
+        elif v and "..." not in v: # Dont save masked passwords
             set_config(k, v)
     return {"status": "success"}
+
+@app.post("/api/admin/configs/migrate")
+def migrate_admin_configs():
+    result = migrate_app_config_encryption()
+    return {"status": "success", **result}
 
 @app.get("/api/configs/status")
 def get_configs_status():
