@@ -57,9 +57,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Load existing sessions on startup
-    loadSessions();
-    checkGlobalConfigs();
+    const initializeApp = async () => {
+        const user = await enforceAuth();
+        if (!user) return;
+        loadSessions();
+        checkGlobalConfigs();
+    };
+    initializeApp();
 
     if (mobileMenuBtn && sidebar) {
         mobileMenuBtn.addEventListener('click', () => {
