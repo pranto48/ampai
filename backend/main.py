@@ -11,6 +11,17 @@ import imaplib
 import email
 from email.header import decode_header
 
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.staticfiles import StaticFiles
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from pydantic import BaseModel
+from redis import Redis
+from sqlalchemy import text
+from zoneinfo import ZoneInfo
+
+from auth import UserContext, auth_context_middleware, require_admin_user, require_authenticated_user, router as auth_router
+from agent import chat_with_agent, get_llm, get_redis_history
 from database import (
     get_all_sessions, set_session_category, delete_session_metadata, DATABASE_URL,
     get_all_configs, set_config, get_core_memories, delete_core_memory,
@@ -128,7 +139,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             api_key=request.api_key,
             memory_mode=request.memory_mode,
             use_web_search=request.use_web_search,
-            attachments=[a.dict() for a in request.attachments]
+            attachments=[a.dict() for a in request.attachments],
         )
         touch_session(request.session_id)
         return result
@@ -150,6 +161,7 @@ async def upload_file(file: UploadFile = File(...), user=Depends(require_authent
         if file_ext.lower() == ".pdf":
             try:
                 import PyPDF2
+
                 with open(file_path, "rb") as pdf_file:
                     reader = PyPDF2.PdfReader(pdf_file)
                     extracted_text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
@@ -229,8 +241,13 @@ def import_session(request: ImportRequest, user=Depends(require_authenticated_us
     try:
         history = SQLChatMessageHistory(session_id=request.session_id, connection_string=DATABASE_URL)
         for msg in request.messages:
+            key = (msg.type, msg.content)
+            if key in existing_messages:
+                skipped += 1
+                continue
             if msg.type == "human":
                 history.add_user_message(msg.content)
+                inserted += 1
             elif msg.type == "ai":
                 history.add_ai_message(msg.content)
         set_session_category(request.session_id, request.category)
@@ -245,7 +262,12 @@ def get_admin_configs(user=Depends(require_admin_user)):
     configs = get_all_configs()
     masked = {}
     for k, v in configs.items():
-        if "api_key" in k and v and len(v) > 8:
+        if k in SECRET_CONFIG_KEYS and v:
+            if len(v) > 8:
+                masked[k] = v[:4] + "..." + v[-4:]
+            else:
+                masked[k] = "****"
+        elif "api_key" in k and v and len(v) > 8:
             masked[k] = v[:4] + "..." + v[-4:]
         else:
             masked[k] = v
@@ -270,7 +292,7 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "generic": bool(configs.get("generic_base_url")),
         "openrouter": bool(configs.get("openrouter_api_key")),
         "anythingllm": bool(configs.get("anythingllm_base_url")),
-        "default_model": configs.get("default_model")
+        "default_model": configs.get("default_model"),
     }
 
 
@@ -421,7 +443,7 @@ def get_latest_mtime(directories):
             continue
         for root, _, files in os.walk(directory):
             for file in files:
-                if file.endswith('.pyc') or '__pycache__' in root or file.endswith('.db') or file.endswith('.db-journal'):
+                if file.endswith(".pyc") or "__pycache__" in root or file.endswith(".db") or file.endswith(".db-journal"):
                     continue
                 filepath = os.path.join(root, file)
                 try:

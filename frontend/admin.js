@@ -57,10 +57,48 @@ document.addEventListener('DOMContentLoaded', () => {
         'anythingllm_base_url': document.getElementById('config-anythingllm-url'),
         'anythingllm_api_key': document.getElementById('config-anythingllm-key'),
         'anythingllm_workspace': document.getElementById('config-anythingllm-workspace'),
-        'default_model': document.getElementById('config-default-model')
+        'default_model': document.getElementById('config-default-model'),
+        'web_search_secondary_provider': document.getElementById('config-web-search-secondary-provider'),
+        'web_fallback_provider': document.getElementById('config-web-fallback-provider'),
+        'serpapi_api_key': document.getElementById('config-serpapi-key'),
+        'bing_api_key': document.getElementById('config-bing-key'),
+        'custom_web_search_url': document.getElementById('config-custom-web-search-url'),
+        'custom_web_search_api_key': document.getElementById('config-custom-web-search-api-key'),
+        'integration_email_outlook_credentials': document.getElementById('config-outlook-credentials'),
+        'integration_email_gmail_credentials': document.getElementById('config-gmail-credentials'),
+        'email_digest_provider': document.getElementById('config-email-digest-provider'),
+        'email_digest_hour': document.getElementById('config-email-digest-hour'),
+        'email_digest_minute': document.getElementById('config-email-digest-minute'),
+        'email_digest_timezone': document.getElementById('config-email-digest-timezone')
     };
+    const SECRET_CONFIG_KEYS = new Set([
+        'generic_api_key',
+        'openai_api_key',
+        'gemini_api_key',
+        'anthropic_api_key',
+        'openrouter_api_key',
+        'anythingllm_api_key',
+        'serpapi_api_key',
+        'bing_api_key',
+        'custom_web_search_api_key',
+        'integration_email_outlook_credentials',
+        'integration_email_gmail_credentials'
+    ]);
+    const CLEAR_VALUE_SENTINEL = "__CLEAR__";
+    const initialConfigValues = {};
+    const dirtyConfigKeys = new Set();
 
     const coreMemoriesContainer = document.getElementById('core-memories-container');
+    const refreshHealthBtn = document.getElementById('refresh-health-btn');
+    const healthStatusGrid = document.getElementById('health-status-grid');
+    const schedulerDiagnostics = document.getElementById('scheduler-diagnostics');
+    const healthUpdatedAt = document.getElementById('health-updated-at');
+    const emailProviderSelect = document.getElementById('email-provider-select');
+    const connectEmailProviderBtn = document.getElementById('connect-email-provider-btn');
+    const disconnectEmailProviderBtn = document.getElementById('disconnect-email-provider-btn');
+    const emailProviderStatus = document.getElementById('email-provider-status');
+    const saveEmailScheduleBtn = document.getElementById('save-email-schedule-btn');
+    const emailScheduleStatus = document.getElementById('email-schedule-status');
 
     ensureAuth().then((ok) => { if (!ok) return; loadAdminSessions(); loadConfigs(); loadCoreMemories(); loadHealth(); loadUsers(); });
 
@@ -118,7 +156,11 @@ document.addEventListener('DOMContentLoaded', () => {
             for (const [key, input] of Object.entries(configInputs)) {
                 if (data[key]) {
                     input.value = data[key];
+                } else {
+                    input.value = '';
                 }
+                initialConfigValues[key] = input.value;
+                dirtyConfigKeys.delete(key);
             }
         } catch (e) {
             console.error("Failed to load configs", e);
@@ -130,8 +172,20 @@ document.addEventListener('DOMContentLoaded', () => {
         configStatus.style.color = "var(--text-secondary)";
         
         const payload = {};
-        for (const [key, input] of Object.entries(configInputs)) {
-            payload[key] = input.value.trim();
+        for (const key of dirtyConfigKeys) {
+            const input = configInputs[key];
+            const value = input.value.trim();
+            if (SECRET_CONFIG_KEYS.has(key) && value === '') {
+                payload[key] = CLEAR_VALUE_SENTINEL;
+            } else {
+                payload[key] = value;
+            }
+        }
+
+        if (Object.keys(payload).length === 0) {
+            configStatus.textContent = "No config changes to save.";
+            configStatus.style.color = "var(--text-secondary)";
+            return;
         }
 
         try {
@@ -142,6 +196,8 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             if (res.ok) {
+                await fetch('/api/admin/configs/migrate', { method: 'POST' });
+                await loadConfigs();
                 configStatus.textContent = "Saved successfully!";
                 configStatus.style.color = "#10b981";
                 setTimeout(() => configStatus.textContent = "", 3000);
