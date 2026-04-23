@@ -18,9 +18,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const webSearchToggle = document.getElementById('web-search-toggle');
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
     const sidebar = document.querySelector('.sidebar');
+    const tasksViewBtn = document.getElementById('tasks-view-btn');
+    const taskQuickAddInput = document.getElementById('task-quick-add-input');
+    const taskQuickAddBtn = document.getElementById('task-quick-add-btn');
 
     let currentSessionId = generateSessionId();
     let currentSessionCategory = "Uncategorized";
+    let currentView = 'chat';
     currentSessionIdDisplay.textContent = currentSessionId;
 
     let globalConfigs = {};
@@ -73,6 +77,25 @@ document.addEventListener('DOMContentLoaded', () => {
         document.addEventListener('click', (e) => {
             if (sidebar.classList.contains('open') && !sidebar.contains(e.target) && !mobileMenuBtn.contains(e.target)) {
                 sidebar.classList.remove('open');
+            }
+        });
+    }
+
+    if (tasksViewBtn) {
+        tasksViewBtn.addEventListener('click', async () => {
+            currentView = 'tasks';
+            await renderTasksView();
+        });
+    }
+
+    if (taskQuickAddBtn && taskQuickAddInput) {
+        taskQuickAddBtn.addEventListener('click', async () => {
+            const title = taskQuickAddInput.value.trim();
+            if (!title) return;
+            const created = await createTask({ title, session_id: currentSessionId });
+            if (created) {
+                taskQuickAddInput.value = '';
+                if (currentView === 'tasks') await renderTasksView();
             }
         });
     }
@@ -215,6 +238,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     newChatBtn.addEventListener('click', () => {
+        currentView = 'chat';
         currentSessionId = generateSessionId();
         currentSessionIdDisplay.textContent = currentSessionId;
         chatMessages.innerHTML = `
@@ -232,6 +256,22 @@ document.addEventListener('DOMContentLoaded', () => {
         e.preventDefault();
         const message = messageInput.value.trim();
         if (!message && currentAttachments.length === 0) return;
+        currentView = 'chat';
+
+        if (message.toLowerCase().startsWith('/task ')) {
+            const quickTitle = message.substring(6).trim();
+            if (quickTitle) {
+                const created = await createTask({ title: quickTitle, session_id: currentSessionId });
+                if (created) {
+                    appendMessage('ai', `✅ Task created: #${created.id} ${created.title}`);
+                } else {
+                    appendMessage('ai', 'Failed to create task.');
+                }
+            }
+            messageInput.value = '';
+            sendBtn.setAttribute('disabled', 'true');
+            return;
+        }
 
         const sentAttachments = [...currentAttachments];
         currentAttachments = [];
@@ -293,6 +333,22 @@ document.addEventListener('DOMContentLoaded', () => {
     // Helper Functions
     function generateSessionId() {
         return 'session_' + Math.random().toString(36).substring(2, 9);
+    }
+
+    async function createTask(payload) {
+        try {
+            const response = await fetch('/api/tasks', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!response.ok) return null;
+            const data = await response.json();
+            return data.task;
+        } catch (error) {
+            console.error('Failed to create task', error);
+            return null;
+        }
     }
 
     function appendMessage(role, content, isPreFormatted = false) {
@@ -408,6 +464,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function loadSessionHistory(sessionId) {
+        currentView = 'chat';
         currentSessionId = sessionId;
         currentSessionIdDisplay.textContent = sessionId;
         
@@ -442,6 +499,104 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             chatMessages.innerHTML = `<div style="color:red; text-align:center;">Failed to load memory: ${error.message}</div>`;
         }
+    }
+
+    async function fetchTasks(filters = {}) {
+        const query = new URLSearchParams(filters).toString();
+        const res = await fetch(`/api/tasks${query ? `?${query}` : ''}`);
+        if (!res.ok) return [];
+        const data = await res.json();
+        return data.tasks || [];
+    }
+
+    async function patchTask(taskId, payload) {
+        const res = await fetch(`/api/tasks/${taskId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        return res.ok;
+    }
+
+    async function removeTask(taskId) {
+        const res = await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+        return res.ok;
+    }
+
+    async function renderTasksView() {
+        const tasks = await fetchTasks();
+        const now = new Date();
+        const groups = {
+            overdue: [],
+            active: [],
+            complete: [],
+        };
+
+        tasks.forEach((task) => {
+            const status = (task.status || '').toLowerCase();
+            const dueDate = task.due_at ? new Date(task.due_at) : null;
+            if (status === 'done' || status === 'completed') groups.complete.push(task);
+            else if (dueDate && dueDate < now) groups.overdue.push(task);
+            else groups.active.push(task);
+        });
+
+        const renderGroup = (title, list) => {
+            const items = list.map((task) => {
+                const due = task.due_at ? new Date(task.due_at).toLocaleString() : 'No due date';
+                return `
+                    <div class="message ai-message" style="margin-bottom:8px;">
+                        <div class="avatar">T</div>
+                        <div class="bubble" style="width:100%;">
+                            <div style="display:flex; justify-content:space-between; gap:8px; align-items:center;">
+                                <strong>#${task.id} ${task.title}</strong>
+                                <span class="badge">${task.priority || 'medium'}</span>
+                            </div>
+                            <div style="font-size:0.85rem; color:var(--text-secondary); margin:6px 0;">${task.description || ''}</div>
+                            <div style="font-size:0.8rem; color:var(--text-secondary); margin-bottom:8px;">Due: ${due} | Status: ${task.status}</div>
+                            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                                <button class="btn task-complete-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px;">Complete</button>
+                                <button class="btn task-edit-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px;">Edit</button>
+                                <button class="btn task-delete-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px; color:#ef4444;">Delete</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            return `<h3 style="margin: 12px 0 8px;">${title} (${list.length})</h3>${items || '<div style="color:var(--text-secondary);">None</div>'}`;
+        };
+
+        chatMessages.innerHTML = `
+            <div class="message ai-message welcome-message">
+                <div class="avatar">AI</div>
+                <div class="bubble">
+                    <p><strong>Tasks Dashboard</strong> — grouped by overdue, active, and completed.</p>
+                </div>
+            </div>
+            ${renderGroup('Overdue', groups.overdue)}
+            ${renderGroup('Active', groups.active)}
+            ${renderGroup('Completed', groups.complete)}
+        `;
+
+        document.querySelectorAll('.task-complete-btn').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                await patchTask(btn.dataset.taskId, { status: 'done' });
+                await renderTasksView();
+            });
+        });
+        document.querySelectorAll('.task-delete-btn').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                await removeTask(btn.dataset.taskId);
+                await renderTasksView();
+            });
+        });
+        document.querySelectorAll('.task-edit-btn').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                const newTitle = prompt('New task title:');
+                if (!newTitle) return;
+                await patchTask(btn.dataset.taskId, { title: newTitle });
+                await renderTasksView();
+            });
+        });
     }
 
     // --- Update Checker Logic ---

@@ -1,9 +1,9 @@
 import subprocess
 import re
 from apscheduler.schedulers.background import BackgroundScheduler
-from database import get_network_targets, engine
+from database import get_network_targets, list_tasks, engine
 from sqlalchemy import text
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 scheduler = BackgroundScheduler()
 
@@ -89,9 +89,60 @@ def run_network_sweep():
     except Exception as e:
         print(f"Error saving report to DB: {e}")
 
+
+def run_task_reminders():
+    print("Running scheduled task reminders...")
+    now = datetime.now(timezone.utc)
+    soon = now + timedelta(hours=24)
+    pending_tasks = list_tasks(due_before=soon.isoformat())
+    reminder_lines = []
+
+    for task in pending_tasks:
+        status = (task.get("status") or "").lower()
+        if status in {"done", "completed", "cancelled"}:
+            continue
+        due_at = task.get("due_at")
+        if not due_at:
+            continue
+        due_dt = due_at if isinstance(due_at, datetime) else None
+        if not due_dt:
+            continue
+        if due_dt.tzinfo is None:
+            due_dt = due_dt.replace(tzinfo=timezone.utc)
+
+        if due_dt < now:
+            reminder_lines.append(f"⚠️ Overdue: #{task['id']} {task['title']} (due {due_dt.isoformat()})")
+        else:
+            reminder_lines.append(f"⏰ Due soon: #{task['id']} {task['title']} (due {due_dt.isoformat()})")
+
+    if not reminder_lines:
+        print("No task reminders needed.")
+        return
+
+    session_id = "system_tasks"
+    timestamp = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+    summary = "\n".join(reminder_lines)
+    try:
+        with engine.connect() as conn:
+            upsert_meta = text(
+                "INSERT INTO session_metadata (session_id, category) VALUES (:s, :c) "
+                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category"
+            )
+            conn.execute(upsert_meta, {"s": session_id, "c": "System Tasks"})
+
+            ins_user = text("INSERT INTO message_store (session_id, message) VALUES (:s, :m)")
+            conn.execute(ins_user, {"s": session_id, "m": f"Run task reminder check at {timestamp}"})
+            conn.execute(ins_user, {"s": session_id, "m": f"**Task Reminder Report ({timestamp})**\n{summary}"})
+            conn.commit()
+        print("Task reminders recorded.")
+    except Exception as e:
+        print(f"Error saving task reminders: {e}")
+
 def start_scheduler():
     if not scheduler.running:
         # Run every day at 9:00 AM
         scheduler.add_job(run_network_sweep, 'cron', hour=9, minute=0)
+        # Run task reminder checks every 10 minutes
+        scheduler.add_job(run_task_reminders, 'interval', minutes=10)
         scheduler.start()
         print("Background scheduler started.")

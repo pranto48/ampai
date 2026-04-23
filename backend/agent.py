@@ -10,7 +10,7 @@ from typing import List, Dict
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_models import ChatOllama
-from database import DATABASE_URL, get_config, get_core_memories, add_core_memory
+from database import DATABASE_URL, get_config, get_core_memories, add_core_memory, create_task
 
 from langchain_core.chat_history import BaseChatMessageHistory
 
@@ -137,7 +137,9 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
         "IMPORTANT DIRECTIVE: You must autonomously extract reliable information, important facts, or preferences about the user. "
         "If the user shares an important fact or explicitly asks you to remember something, "
         "you MUST append the following exact tag anywhere in your response: [SAVE_MEMORY: <the fact to save>]. "
-        "Only save high-quality, reliable information.\n\n"
+        "Only save high-quality, reliable information.\n"
+        "If the user clearly asks to create a task, append a tag in this exact format: "
+        "[CREATE_TASK: title=<task title>|description=<details>|priority=<low/medium/high>|due=<ISO datetime optional>].\n\n"
         f"{web_context}"
         f"{file_context}"
     )
@@ -209,6 +211,49 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
             
         # Strip the tag from the final response sent to user
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
+
+    task_tags = re.findall(r'\[CREATE_TASK:\s*(.*?)\]', content, re.IGNORECASE | re.DOTALL)
+    created_tasks = []
+    for raw_task in task_tags:
+        payload = raw_task.strip().rstrip("]")
+        title = payload
+        description = ""
+        priority = "medium"
+        due_at = None
+
+        # simple key-value parser: title=..., description=..., priority=..., due=...
+        kv_pairs = re.findall(r'(\w+)\s*=\s*([^|]+)', payload)
+        if kv_pairs:
+            data = {k.lower().strip(): v.strip() for k, v in kv_pairs}
+            title = data.get("title") or payload
+            description = data.get("description", "")
+            priority = data.get("priority", "medium")
+            due_at = data.get("due")
+        elif "|" in payload:
+            parts = [p.strip() for p in payload.split("|")]
+            if parts:
+                title = parts[0]
+            if len(parts) > 1:
+                description = parts[1]
+            if len(parts) > 2 and parts[2]:
+                priority = parts[2]
+            if len(parts) > 3 and parts[3]:
+                due_at = parts[3]
+
+        task = create_task(
+            title=title,
+            description=description,
+            priority=priority,
+            due_at=due_at,
+            session_id=session_id,
+        )
+        if task:
+            created_tasks.append(task["id"])
+
+    if task_tags:
+        content = re.sub(r'\[CREATE_TASK:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
+        if created_tasks:
+            content += f"\n\n✅ Created {len(created_tasks)} task(s): #{', #'.join(str(tid) for tid in created_tasks)}"
     
     # Save Raw History to PostgreSQL for Admin Logging/Export
     sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
