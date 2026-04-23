@@ -93,14 +93,92 @@ document.addEventListener('DOMContentLoaded', () => {
     const healthStatusGrid = document.getElementById('health-status-grid');
     const schedulerDiagnostics = document.getElementById('scheduler-diagnostics');
     const healthUpdatedAt = document.getElementById('health-updated-at');
-    const emailProviderSelect = document.getElementById('email-provider-select');
-    const connectEmailProviderBtn = document.getElementById('connect-email-provider-btn');
-    const disconnectEmailProviderBtn = document.getElementById('disconnect-email-provider-btn');
-    const emailProviderStatus = document.getElementById('email-provider-status');
-    const saveEmailScheduleBtn = document.getElementById('save-email-schedule-btn');
-    const emailScheduleStatus = document.getElementById('email-schedule-status');
+    const adminCurrentPasswordInput = document.getElementById('admin-current-password');
+    const adminNewPasswordInput = document.getElementById('admin-new-password');
+    const adminChangePasswordBtn = document.getElementById('admin-change-password-btn');
+    const adminPasswordStatus = document.getElementById('admin-password-status');
 
-    ensureAuth().then((ok) => { if (!ok) return; loadAdminSessions(); loadConfigs(); loadCoreMemories(); loadHealth(); loadUsers(); });
+    const initializeAdmin = async () => {
+        const user = await enforceAuth({ requiredRole: 'admin' });
+        if (!user) return;
+        loadAdminSessions();
+        loadConfigs();
+        loadCoreMemories();
+        loadSystemHealth();
+        setupConfigChangeTracking();
+        setupClearKeyButtons();
+        refreshHealthBtn.addEventListener('click', loadSystemHealth);
+    };
+    initializeAdmin();
+
+    function renderHealthTile(name, ok, details) {
+        const tile = document.createElement('div');
+        tile.style.background = ok ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)';
+        tile.style.border = ok ? '1px solid rgba(16, 185, 129, 0.3)' : '1px solid rgba(239, 68, 68, 0.35)';
+        tile.style.borderRadius = '8px';
+        tile.style.padding = '10px';
+        tile.innerHTML = `
+            <div style="font-weight: 600; margin-bottom: 6px;">${name}</div>
+            <div style="font-size: 0.85rem; color: ${ok ? '#10b981' : '#ef4444'};">${ok ? 'Healthy' : 'Unhealthy'}</div>
+            ${details ? `<div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px;">${details}</div>` : ''}
+        `;
+        return tile;
+    }
+
+    async function loadSystemHealth() {
+        healthUpdatedAt.textContent = 'Loading health...';
+        try {
+            const response = await fetch('/api/health');
+            const data = await response.json();
+            const checks = data.checks || {};
+            healthStatusGrid.innerHTML = '';
+            healthStatusGrid.appendChild(renderHealthTile('Database', !!checks.db?.ok, checks.db?.details || ''));
+            healthStatusGrid.appendChild(renderHealthTile('Redis', !!checks.redis?.ok, checks.redis?.details || ''));
+            healthStatusGrid.appendChild(renderHealthTile('Model Provider', !!checks.model_provider?.ok, checks.model_provider?.provider || checks.model_provider?.details || ''));
+            healthStatusGrid.appendChild(renderHealthTile('Search Provider', !!checks.search_provider?.ok, checks.search_provider?.provider || checks.search_provider?.details || ''));
+            const lastRun = checks.scheduler?.last_run || {};
+            schedulerDiagnostics.textContent = `Scheduler running: ${checks.scheduler?.running ? 'yes' : 'no'}\nLast network sweep: ${lastRun.network_sweep || 'N/A'}\nLast task reminders: ${lastRun.task_reminders || 'N/A'}\nJobs: ${(checks.scheduler?.jobs || []).join(', ') || 'none'}`;
+            healthUpdatedAt.textContent = `Updated at ${new Date().toLocaleString()}`;
+        } catch (error) {
+            healthStatusGrid.innerHTML = '';
+            healthStatusGrid.appendChild(renderHealthTile('System Health', false, error.message));
+            schedulerDiagnostics.textContent = 'Unable to load scheduler diagnostics.';
+            healthUpdatedAt.textContent = 'Health check failed';
+        }
+    }
+
+    function setupConfigChangeTracking() {
+        for (const [key, input] of Object.entries(configInputs)) {
+            input.addEventListener('input', () => {
+                if (input.value !== (initialConfigValues[key] ?? '')) {
+                    dirtyConfigKeys.add(key);
+                } else {
+                    dirtyConfigKeys.delete(key);
+                }
+            });
+        }
+    }
+
+    function setupClearKeyButtons() {
+        for (const [key, input] of Object.entries(configInputs)) {
+            if (!SECRET_CONFIG_KEYS.has(key)) continue;
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn';
+            btn.textContent = 'Clear';
+            btn.style.marginTop = '6px';
+            btn.style.padding = '4px 10px';
+            btn.style.fontSize = '0.8rem';
+            btn.onclick = () => {
+                input.value = '';
+                dirtyConfigKeys.add(key);
+                configStatus.textContent = `Marked ${key} for clearing. Click Save Configs to apply.`;
+                configStatus.style.color = "var(--text-secondary)";
+            };
+            input.insertAdjacentElement('afterend', btn);
+        }
+    }
 
     async function loadCoreMemories() {
         try {
@@ -462,4 +540,40 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         reader.readAsText(file);
     });
+
+    if (adminChangePasswordBtn) {
+        adminChangePasswordBtn.addEventListener('click', async () => {
+            const currentPassword = adminCurrentPasswordInput.value;
+            const newPassword = adminNewPasswordInput.value;
+            adminPasswordStatus.textContent = '';
+
+            if (!currentPassword || !newPassword) {
+                adminPasswordStatus.textContent = 'Enter current and new password.';
+                adminPasswordStatus.style.color = '#ef4444';
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/admin/change-password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        current_password: currentPassword,
+                        new_password: newPassword,
+                    }),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Failed to change password');
+                }
+                adminCurrentPasswordInput.value = '';
+                adminNewPasswordInput.value = '';
+                adminPasswordStatus.textContent = 'Password updated.';
+                adminPasswordStatus.style.color = '#10b981';
+            } catch (error) {
+                adminPasswordStatus.textContent = error.message;
+                adminPasswordStatus.style.color = '#ef4444';
+            }
+        });
+    }
 });

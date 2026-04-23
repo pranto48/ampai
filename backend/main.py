@@ -23,10 +23,32 @@ from zoneinfo import ZoneInfo
 from auth import UserContext, auth_context_middleware, require_admin_user, require_authenticated_user, router as auth_router
 from agent import chat_with_agent, get_llm, get_redis_history
 from database import (
-    get_all_sessions, set_session_category, delete_session_metadata, DATABASE_URL,
-    get_all_configs, set_config, get_core_memories, delete_core_memory,
-    get_network_targets, add_network_target, delete_network_target,
-    create_task, list_tasks, update_task, delete_task, set_session_flags, touch_session
+    add_network_target,
+    create_task,
+    delete_core_memory,
+    delete_network_target,
+    delete_session_metadata,
+    delete_task,
+    get_all_configs,
+    get_all_sessions,
+    get_config,
+    get_core_memories,
+    get_network_targets,
+    get_duplicate_message_counts,
+    list_chat_messages,
+    get_sql_chat_history,
+    list_tasks,
+    migrate_app_config_encryption,
+    set_config,
+    set_session_archived,
+    set_session_category,
+    set_session_pinned,
+    touch_session_updated_at,
+    update_task,
+)
+from integrations.gmail_api import (
+    fetch_todays_messages as fetch_gmail_todays_messages,
+    refresh_access_token as refresh_gmail_access_token,
 )
 from agent import chat_with_agent, get_redis_history
 from scheduler import start_scheduler, run_network_sweep
@@ -95,6 +117,10 @@ class ConfigUpdateRequest(BaseModel):
     configs: Dict[str, str]
 
 
+class AdminPasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
 
 class TaskCreateRequest(BaseModel):
     title: str
@@ -116,6 +142,70 @@ class TaskUpdateRequest(BaseModel):
 class EmailSummaryRequest(BaseModel):
     model_type: str = "ollama"
     api_key: Optional[str] = None
+    session_id: str = "system_email_reports"
+
+
+class UserLoginResponse(BaseModel):
+    username: str
+    role: str
+
+
+class UserContext(BaseModel):
+    username: str
+    role: str
+
+
+def _build_user_store() -> Dict[str, Dict[str, str]]:
+    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    admin_password = os.getenv("ADMIN_PASSWORD", "password")
+    persisted_admin_hash = get_config("admin_password_hash")
+
+    user_username = os.getenv("USER_USERNAME", "user")
+    user_password = os.getenv("USER_PASSWORD", "user123")
+
+    return {
+        admin_username: {
+            "role": "admin",
+            "password_hash": persisted_admin_hash or pwd_context.hash(admin_password),
+        },
+        user_username: {
+            "role": "user",
+            "password_hash": pwd_context.hash(user_password),
+        },
+    }
+
+
+USERS = _build_user_store()
+
+
+def _load_integration_credentials(provider: str) -> Dict[str, str]:
+    raw = get_config(f"integration_email_{provider}_credentials", "{}")
+    try:
+        parsed = json.loads(raw or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _save_integration_credentials(provider: str, credentials: Dict[str, str]) -> None:
+    set_config(f"integration_email_{provider}_credentials", json.dumps(credentials))
+
+
+def _ensure_valid_email_access_token(provider: str) -> str:
+    credentials = _load_integration_credentials(provider)
+    if not credentials:
+        raise HTTPException(status_code=400, detail=f"{provider} integration is not configured")
+
+    expires_at = int(credentials.get("expires_at") or 0)
+    if credentials.get("access_token") and expires_at > int(time.time()) + 60:
+        return credentials["access_token"]
+
+    if provider == "gmail":
+        refreshed = refresh_gmail_access_token(credentials)
+    elif provider == "outlook":
+        refreshed = refresh_outlook_access_token(credentials)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
 
 @app.on_event("startup")
@@ -198,8 +288,7 @@ def archive_session(session_id: str, request: SessionFlagsRequest, user=Depends(
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str, user=Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
-        messages = [{"type": msg.type, "content": msg.content} for msg in history.messages]
+        messages = list_chat_messages(session_id, dedupe=True)
         return {"messages": messages}
     except Exception as e:
         return {"messages": [], "error": str(e)}
@@ -227,10 +316,15 @@ def delete_session(session_id: str, user=Depends(require_authenticated_user)):
 @app.get("/api/export/{session_id}")
 def export_session(session_id: str, user=Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
-        messages = [{"type": msg.type, "content": msg.content} for msg in history.messages]
-        sessions = get_all_sessions(include_archived=True)
-        category = next((s["category"] for s in sessions if s["session_id"] == session_id), "Uncategorized")
+        messages = list_chat_messages(session_id, dedupe=True)
+
+        sessions = get_all_sessions()
+        category = "Uncategorized"
+        for s in sessions:
+            if s["session_id"] == session_id:
+                category = s["category"]
+                break
+
         return {"session_id": session_id, "category": category, "messages": messages}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -239,7 +333,11 @@ def export_session(session_id: str, user=Depends(require_authenticated_user)):
 @app.post("/api/import")
 def import_session(request: ImportRequest, user=Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=request.session_id, connection_string=DATABASE_URL)
+        history = get_sql_chat_history(request.session_id)
+        existing_messages = {(msg["type"], msg["content"]) for msg in list_chat_messages(request.session_id, dedupe=False)}
+        inserted = 0
+        skipped = 0
+
         for msg in request.messages:
             key = (msg.type, msg.content)
             if key in existing_messages:
@@ -255,6 +353,16 @@ def import_session(request: ImportRequest, user=Depends(require_authenticated_us
         return {"status": "success", "session_id": request.session_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/history/duplicates")
+def get_history_duplicates(_: UserContext = Depends(require_admin_user)):
+    duplicates = get_duplicate_message_counts()
+    return {
+        "sessions_with_duplicates": len(duplicates),
+        "duplicate_messages": sum(duplicates.values()),
+        "by_session": duplicates,
+    }
 
 
 @app.get("/api/admin/configs")
@@ -281,6 +389,31 @@ def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admi
             set_config(k, v)
     return {"status": "success"}
 
+
+@app.post("/api/admin/change-password")
+def admin_change_password(
+    request: AdminPasswordChangeRequest,
+    current_user: UserContext = Depends(require_admin_user),
+):
+    user = USERS.get(current_user.username)
+    if not user:
+        raise HTTPException(status_code=404, detail="Admin user not found")
+
+    if not pwd_context.verify(request.current_password, user["password_hash"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    if len(request.new_password or "") < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+
+    new_hash = pwd_context.hash(request.new_password)
+    user["password_hash"] = new_hash
+    set_config("admin_password_hash", new_hash)
+    return {"status": "success"}
+
+@app.post("/api/admin/configs/migrate")
+def migrate_admin_configs():
+    result = migrate_app_config_encryption()
+    return {"status": "success", **result}
 
 @app.get("/api/configs/status")
 def get_configs_status(user=Depends(require_authenticated_user)):

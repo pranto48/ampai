@@ -2,9 +2,27 @@ import subprocess
 import re
 import logging
 from apscheduler.schedulers.background import BackgroundScheduler
-from database import get_network_targets, engine, list_tasks
-from sqlalchemy import text
-from datetime import datetime, timezone
+from database import (
+    get_network_targets,
+    list_tasks,
+    get_config,
+    set_config,
+    get_sql_chat_history,
+    set_session_category,
+)
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+from agent import chat_with_agent
+from integrations.gmail_api import (
+    fetch_todays_messages as fetch_gmail_todays_messages,
+    refresh_access_token as refresh_gmail_access_token,
+)
+from integrations.outlook_graph import (
+    fetch_todays_messages as fetch_outlook_todays_messages,
+    refresh_access_token as refresh_outlook_access_token,
+)
+
+from logging_utils import get_logger
 
 scheduler = BackgroundScheduler()
 logger = logging.getLogger("ampai.scheduler")
@@ -87,14 +105,11 @@ def run_task_digest():
     session_id = "system_tasks"
     report = "Overdue tasks:\n" + "\n".join([f"- [{t['priority']}] {t['title']} (due {t['due_at']})" for t in overdue[:30]])
     try:
-        with engine.connect() as conn:
-            now_iso = datetime.now(timezone.utc).isoformat()
-            conn.execute(text(
-                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, FALSE, FALSE, :u) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category, updated_at = EXCLUDED.updated_at"
-            ), {"s": session_id, "c": "System Tasks", "u": now_iso})
-            conn.execute(text("INSERT INTO message_store (session_id, message) VALUES (:s, :m)"), {"s": session_id, "m": report})
-            conn.commit()
+        set_session_category(session_id, "System Tasks")
+        history = get_sql_chat_history(session_id)
+        history.add_user_message(f"Run task reminder check at {timestamp}")
+        history.add_ai_message(f"**Task Reminder Report ({timestamp})**\n{summary}")
+        logger.info("Task reminders recorded", extra={"reminder_count": len(reminder_lines)})
     except Exception as e:
         logger.exception("Error writing task digest: %s", e)
 

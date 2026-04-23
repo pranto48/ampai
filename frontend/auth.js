@@ -44,5 +44,20 @@ async function enforceAuth({ requiredRole = null, redirectTo = '/login.html' } =
         });
     });
 
+    const menuBtn = document.querySelector('[data-user-menu-btn]');
+    const menuPanel = document.querySelector('[data-user-menu-panel]');
+    if (menuBtn && menuPanel) {
+        menuBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            menuPanel.classList.toggle('open');
+        });
+
+        document.addEventListener('click', (event) => {
+            if (!menuPanel.contains(event.target) && !menuBtn.contains(event.target)) {
+                menuPanel.classList.remove('open');
+            }
+        });
+    }
+
     return user;
 }

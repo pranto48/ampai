@@ -2,17 +2,11 @@ import os
 import logging
 import hashlib
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, select, inspect, text, Boolean
+from typing import List, Optional, Dict, Tuple
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
+from cryptography.fernet import Fernet, InvalidToken
 from langchain_community.chat_message_histories import SQLChatMessageHistory
-
-
-def get_logger(name: str):
-    """Backward-compatible logger helper for older modules/import paths."""
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
-    return logging.getLogger(name)
-
-
-logger = get_logger(__name__)
+from logging_utils import get_logger
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
 CHAT_HISTORY_TABLE = os.getenv("CHAT_HISTORY_TABLE", "chat_message_store")
@@ -131,11 +125,24 @@ def get_all_sessions(query: str = "", include_archived: bool = False):
             if not inspector.has_table(CHAT_HISTORY_TABLE):
                 return []
 
-            _ensure_session_metadata_columns(conn)
+            # Derive sessions from the same canonical SQL history table used by /api/history.
+            session_rows = conn.execute(
+                text(
+                    f"SELECT id, session_id, message FROM {CHAT_HISTORY_TABLE} "
+                    "WHERE session_id IS NOT NULL ORDER BY id ASC"
+                )
+            ).fetchall()
 
-            # Canonical source: message_store table used by SQLChatMessageHistory.
-            stmt_sessions = select(message_store.c.session_id).distinct()
-            session_ids = [row[0] for row in conn.execute(stmt_sessions) if row[0]]
+            # Safeguard: filter malformed/partial records and dedupe duplicated message rows.
+            by_session = {}
+            for _, session_id, raw_message in session_rows:
+                if not session_id or not raw_message:
+                    continue
+                parsed = _parse_chat_payload(raw_message)
+                if not parsed:
+                    continue
+
+                msg_type, content = parsed
 
             stmt_meta = select(
                 session_metadata.c.session_id,
@@ -175,6 +182,83 @@ def get_all_sessions(query: str = "", include_archived: bool = False):
         logger.warning(f"Error fetching sessions: {e}")
         return []
 
+
+def get_sql_chat_history(session_id: str) -> SQLChatMessageHistory:
+    return SQLChatMessageHistory(
+        session_id=session_id,
+        connection_string=DATABASE_URL,
+        table_name=CHAT_HISTORY_TABLE,
+    )
+
+
+def _parse_chat_payload(raw_message: str) -> Optional[Tuple[str, str]]:
+    try:
+        payload = json.loads(raw_message)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+    msg_type = payload.get("type")
+    content = ((payload.get("data") or {}).get("content")) if isinstance(payload, dict) else None
+    if msg_type not in {"human", "ai"} or not isinstance(content, str):
+        return None
+    return msg_type, content
+
+
+def list_chat_messages(session_id: str, dedupe: bool = True) -> List[Dict[str, str]]:
+    """
+    Read canonical SQL chat history with optional duplicate filtering.
+    Duplicate key is (msg_type, content) within a session.
+    """
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    f"SELECT message FROM {CHAT_HISTORY_TABLE} "
+                    "WHERE session_id = :session_id ORDER BY id ASC"
+                ),
+                {"session_id": session_id},
+            ).fetchall()
+
+        messages: List[Dict[str, str]] = []
+        seen = set()
+        for (raw_message,) in rows:
+            parsed = _parse_chat_payload(raw_message)
+            if not parsed:
+                continue
+            msg_type, content = parsed
+            fingerprint = (msg_type, content)
+            if dedupe and fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            messages.append({"type": msg_type, "content": content})
+        return messages
+    except Exception as e:
+        logger.exception("Error listing chat messages", extra={"session_id": session_id}, exc_info=e)
+        return []
+
+
+def get_duplicate_message_counts() -> Dict[str, int]:
+    if not engine:
+        return {}
+    duplicate_counts: Dict[str, int] = {}
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    f"SELECT session_id, message, COUNT(*) AS cnt "
+                    f"FROM {CHAT_HISTORY_TABLE} "
+                    "WHERE session_id IS NOT NULL "
+                    "GROUP BY session_id, message HAVING COUNT(*) > 1"
+                )
+            ).fetchall()
+        for session_id, _message, count in rows:
+            duplicate_counts[session_id] = duplicate_counts.get(session_id, 0) + (int(count) - 1)
+        return duplicate_counts
+    except Exception as e:
+        logger.exception("Error checking duplicate chat messages", exc_info=e)
+        return {}
 
 def set_session_category(session_id: str, category: str):
     return _upsert_session_metadata(session_id=session_id, category=category)
@@ -250,6 +334,17 @@ def set_session_flags(session_id: str, pinned: bool = None, archived: bool = Non
         logger.warning(f"Error setting session flags: {e}")
         return False
 
+
+def set_session_pinned(session_id: str, pinned: bool):
+    return _upsert_session_metadata(session_id, pinned=pinned, touch_updated_at=True)
+
+
+def set_session_archived(session_id: str, archived: bool):
+    return _upsert_session_metadata(session_id, archived=archived, touch_updated_at=True)
+
+
+def touch_session_updated_at(session_id: str):
+    return _upsert_session_metadata(session_id, touch_updated_at=True)
 
 def delete_session_metadata(session_id: str):
     if not engine: return False
