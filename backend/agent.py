@@ -22,6 +22,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 logger = get_logger(__name__)
 
 
+
 def get_redis_history(session_id: str):
     return RedisChatMessageHistory(session_id, url=REDIS_URL)
 

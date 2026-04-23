@@ -167,27 +167,6 @@ def set_session_category(session_id: str, category: str):
         return []
 
 
-def get_duplicate_message_counts() -> Dict[str, int]:
-    if not engine:
-        return {}
-    duplicate_counts: Dict[str, int] = {}
-    try:
-        with engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    f"SELECT session_id, message, COUNT(*) AS cnt "
-                    f"FROM {CHAT_HISTORY_TABLE} "
-                    "WHERE session_id IS NOT NULL "
-                    "GROUP BY session_id, message HAVING COUNT(*) > 1"
-                )
-            ).fetchall()
-        for session_id, _message, count in rows:
-            duplicate_counts[session_id] = duplicate_counts.get(session_id, 0) + (int(count) - 1)
-        return duplicate_counts
-    except Exception as e:
-        logger.exception("Error checking duplicate chat messages", exc_info=e)
-        return {}
-
 def set_session_category(session_id: str, category: str):
     return _upsert_session_metadata(session_id=session_id, category=category)
 
@@ -214,6 +193,24 @@ def set_session_archived(session_id: str, archived: bool):
 
 def touch_session_updated_at(session_id: str):
     return _upsert_session_metadata(session_id, touch_updated_at=True)
+
+
+def set_session_flags(session_id: str, pinned: bool = None, archived: bool = None):
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            _ensure_session_metadata_columns(conn)
+            upsert_stmt = text(
+                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, FALSE, FALSE, :u) "
+                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category, updated_at = EXCLUDED.updated_at"
+            )
+            conn.execute(upsert_stmt, {"s": session_id, "c": category, "u": _now_iso()})
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error setting session flags: {e}")
+        return False
 
 
 def set_session_flags(session_id: str, pinned: bool = None, archived: bool = None):
@@ -369,153 +366,7 @@ def delete_network_target(target_id: int):
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error deleting network target", exc_info=e)
-        return False
-
-
-def _parse_iso_datetime(value: Optional[str]):
-    if not value:
-        return None
-    try:
-        normalized = value.replace("Z", "+00:00")
-        return datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-
-
-def create_task(title: str, description: str = "", status: str = "todo", priority: str = "medium", due_at: Optional[str] = None, session_id: Optional[str] = None):
-    if not engine:
-        return None
-    try:
-        now = datetime.now(timezone.utc)
-        due_dt = _parse_iso_datetime(due_at)
-        with engine.connect() as conn:
-            stmt = text(
-                "INSERT INTO tasks (title, description, status, priority, due_at, session_id, created_at, updated_at) "
-                "VALUES (:title, :description, :status, :priority, :due_at, :session_id, :created_at, :updated_at) "
-                "RETURNING id"
-            )
-            result = conn.execute(stmt, {
-                "title": title,
-                "description": description,
-                "status": status,
-                "priority": priority,
-                "due_at": due_dt,
-                "session_id": session_id,
-                "created_at": now,
-                "updated_at": now,
-            })
-            task_id = result.scalar()
-            conn.commit()
-            return get_task_by_id(task_id)
-    except Exception as e:
-        logger.exception("Error creating task", exc_info=e)
-        return None
-
-
-def get_task_by_id(task_id: int):
-    if not engine:
-        return None
-    try:
-        with engine.connect() as conn:
-            stmt = text("SELECT id, title, description, status, priority, due_at, session_id, created_at, updated_at FROM tasks WHERE id = :id")
-            row = conn.execute(stmt, {"id": task_id}).mappings().first()
-            if not row:
-                return None
-            return dict(row)
-    except Exception as e:
-        logger.exception("Error fetching task by id", exc_info=e)
-        return None
-
-
-def list_tasks(status: Optional[str] = None, priority: Optional[str] = None, session_id: Optional[str] = None, due_before: Optional[str] = None, due_after: Optional[str] = None):
-    if not engine:
-        return []
-    try:
-        where_parts = []
-        params = {}
-        if status:
-            where_parts.append("status = :status")
-            params["status"] = status
-        if priority:
-            where_parts.append("priority = :priority")
-            params["priority"] = priority
-        if session_id:
-            where_parts.append("session_id = :session_id")
-            params["session_id"] = session_id
-        if due_before:
-            parsed = _parse_iso_datetime(due_before)
-            if parsed:
-                where_parts.append("due_at <= :due_before")
-                params["due_before"] = parsed
-        if due_after:
-            parsed = _parse_iso_datetime(due_after)
-            if parsed:
-                where_parts.append("due_at >= :due_after")
-                params["due_after"] = parsed
-
-        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
-        query = (
-            "SELECT id, title, description, status, priority, due_at, session_id, created_at, updated_at "
-            f"FROM tasks {where_sql} ORDER BY COALESCE(due_at, created_at) ASC, id DESC"
-        )
-        with engine.connect() as conn:
-            rows = conn.execute(text(query), params).mappings().all()
-            return [dict(row) for row in rows]
-    except Exception as e:
-        logger.exception("Error listing tasks", exc_info=e)
-        return []
-
-
-def update_task(task_id: int, title: Optional[str] = None, description: Optional[str] = None, status: Optional[str] = None, priority: Optional[str] = None, due_at: Optional[str] = None, session_id: Optional[str] = None):
-    if not engine:
-        return None
-    try:
-        set_parts = ["updated_at = :updated_at"]
-        params = {"id": task_id, "updated_at": datetime.now(timezone.utc)}
-
-        if title is not None:
-            set_parts.append("title = :title")
-            params["title"] = title
-        if description is not None:
-            set_parts.append("description = :description")
-            params["description"] = description
-        if status is not None:
-            set_parts.append("status = :status")
-            params["status"] = status
-        if priority is not None:
-            set_parts.append("priority = :priority")
-            params["priority"] = priority
-        if due_at is not None:
-            params["due_at"] = _parse_iso_datetime(due_at) if due_at else None
-            set_parts.append("due_at = :due_at")
-        if session_id is not None:
-            set_parts.append("session_id = :session_id")
-            params["session_id"] = session_id
-
-        with engine.connect() as conn:
-            stmt = text(f"UPDATE tasks SET {', '.join(set_parts)} WHERE id = :id")
-            result = conn.execute(stmt, params)
-            conn.commit()
-            if result.rowcount == 0:
-                return None
-            return get_task_by_id(task_id)
-    except Exception as e:
-        logger.exception("Error updating task", exc_info=e)
-        return None
-
-
-def delete_task(task_id: int):
-    if not engine:
-        return False
-    try:
-        with engine.connect() as conn:
-            stmt = text("DELETE FROM tasks WHERE id = :id")
-            result = conn.execute(stmt, {"id": task_id})
-            conn.commit()
-            return result.rowcount > 0
-    except Exception as e:
-        logger.exception("Error deleting task", exc_info=e)
+        print(f"Error deleting task: {e}")
         return False
 
 
