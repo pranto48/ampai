@@ -75,6 +75,16 @@ document.addEventListener('DOMContentLoaded', () => {
         'backup_ftp_user': document.getElementById('config-backup-ftp-user'),
         'backup_ftp_password': document.getElementById('config-backup-ftp-password'),
         'backup_ftp_path': document.getElementById('config-backup-ftp-path'),
+        'backup_smb_host': document.getElementById('config-backup-smb-host'),
+        'backup_smb_share': document.getElementById('config-backup-smb-share'),
+        'backup_smb_path': document.getElementById('config-backup-smb-path'),
+        'backup_smb_user': document.getElementById('config-backup-smb-user'),
+        'backup_smb_password': document.getElementById('config-backup-smb-password'),
+        'backup_smb_domain': document.getElementById('config-backup-smb-domain'),
+        'backup_schedule_enabled': document.getElementById('config-backup-schedule-enabled'),
+        'backup_schedule_hour': document.getElementById('config-backup-schedule-hour'),
+        'backup_schedule_minute': document.getElementById('config-backup-schedule-minute'),
+        'backup_schedule_cron': document.getElementById('config-backup-schedule-cron'),
         'resend_api_key': document.getElementById('config-resend-api-key'),
         'resend_from_email': document.getElementById('config-resend-from-email'),
         'notification_email_to': document.getElementById('config-notification-email-to'),
@@ -93,6 +103,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'integration_email_outlook_credentials',
         'integration_email_gmail_credentials',
         'backup_ftp_password',
+        'backup_smb_password',
         'resend_api_key'
     ]);
     const CLEAR_VALUE_SENTINEL = "__CLEAR__";
@@ -117,6 +128,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const mediaTbody = document.getElementById('media-tbody');
     const runBackupBtn = document.getElementById('run-backup-btn');
     const backupStatus = document.getElementById('backup-status');
+    const backupHistoryTbody = document.getElementById('backup-history-tbody');
+    const testFtpConnectionBtn = document.getElementById('test-ftp-connection-btn');
+    const testSmbConnectionBtn = document.getElementById('test-smb-connection-btn');
+    const backupRestoreBtn = document.getElementById('backup-restore-btn');
+    const backupRestoreJson = document.getElementById('backup-restore-json');
+    const backupRestoreDryRun = document.getElementById('backup-restore-dry-run');
     const groupNameInput = document.getElementById('group-name');
     const groupMembersInput = document.getElementById('group-members');
     const groupSelector = document.getElementById('group-selector');
@@ -145,6 +162,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (runBackupBtn) {
             runBackupBtn.addEventListener('click', runBackupNow);
         }
+        if (testFtpConnectionBtn) {
+            testFtpConnectionBtn.addEventListener('click', () => testBackupConnection('ftp'));
+        }
+        if (testSmbConnectionBtn) {
+            testSmbConnectionBtn.addEventListener('click', () => testBackupConnection('smb'));
+        }
+        if (backupRestoreBtn) {
+            backupRestoreBtn.addEventListener('click', restoreBackup);
+        }
+        loadBackupHistory();
         if (createGroupBtn) {
             createGroupBtn.addEventListener('click', createGroup);
         }
@@ -767,6 +794,93 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!response.ok) throw new Error(data.detail || 'Backup failed');
             backupStatus.textContent = data.path || data.file || 'Backup completed';
             backupStatus.style.color = '#10b981';
+            loadBackupHistory();
+        } catch (error) {
+            backupStatus.textContent = error.message;
+            backupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function loadBackupHistory() {
+        if (!backupHistoryTbody) return;
+        try {
+            const response = await apiFetch('/api/admin/backup/status-history');
+            const data = await response.json();
+            const history = data.history || [];
+            backupHistoryTbody.innerHTML = history.map((row) => `
+                <tr>
+                    <td>${row.timestamp || ''}</td>
+                    <td>${row.trigger || ''}</td>
+                    <td>${row.status || ''}</td>
+                    <td>${row.mode || ''}</td>
+                    <td>${row.error || row.target || ''}</td>
+                </tr>
+            `).join('') || '<tr><td colspan="5" style="text-align:center;">No backup runs yet</td></tr>';
+        } catch (error) {
+            backupHistoryTbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:#ef4444;">${error.message}</td></tr>`;
+        }
+    }
+
+    async function testBackupConnection(mode) {
+        backupStatus.textContent = `Testing ${mode.toUpperCase()} connection...`;
+        backupStatus.style.color = 'var(--text-secondary)';
+        const payload = mode === 'ftp'
+            ? {
+                mode: 'ftp',
+                host: configInputs.backup_ftp_host.value.trim(),
+                user: configInputs.backup_ftp_user.value.trim(),
+                password: configInputs.backup_ftp_password.value,
+                path: configInputs.backup_ftp_path.value.trim() || '/',
+            }
+            : {
+                mode: 'smb',
+                host: configInputs.backup_smb_host.value.trim(),
+                share: configInputs.backup_smb_share.value.trim(),
+                path: configInputs.backup_smb_path.value.trim() || '/',
+                user: configInputs.backup_smb_user.value.trim(),
+                password: configInputs.backup_smb_password.value,
+                domain: configInputs.backup_smb_domain.value.trim(),
+            };
+        try {
+            const response = await apiFetch('/api/admin/backup/test-connection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Connection test failed');
+            backupStatus.textContent = data.detail || 'Connection successful';
+            backupStatus.style.color = '#10b981';
+        } catch (error) {
+            backupStatus.textContent = error.message;
+            backupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function restoreBackup() {
+        const backupJson = backupRestoreJson?.value || '';
+        if (!backupJson.trim()) {
+            backupStatus.textContent = 'Paste backup JSON first.';
+            backupStatus.style.color = '#ef4444';
+            return;
+        }
+        backupStatus.textContent = 'Validating restore payload...';
+        backupStatus.style.color = 'var(--text-secondary)';
+        try {
+            const response = await apiFetch('/api/admin/backup/restore', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    backup_json: backupJson,
+                    dry_run: !!backupRestoreDryRun?.checked,
+                }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Restore failed');
+            const s = data.summary || {};
+            backupStatus.textContent = `Restore ${data.dry_run ? 'dry-run' : 'completed'}: sessions=${s.session_count || 0}, messages=${s.message_count || 0}, invalid=${s.invalid_sessions || 0}`;
+            backupStatus.style.color = '#10b981';
+            loadBackupHistory();
         } catch (error) {
             backupStatus.textContent = error.message;
             backupStatus.style.color = '#ef4444';

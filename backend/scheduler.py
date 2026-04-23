@@ -3,6 +3,7 @@ import re
 import json
 import time
 import urllib.request
+import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from database import (
     get_network_targets,
@@ -176,9 +177,34 @@ def run_task_digest():
         logger.exception("Error writing task digest: %s", e)
 
 
+def run_scheduled_backup():
+    enabled = (get_config("backup_schedule_enabled", "false") or "false").strip().lower() == "true"
+    if not enabled:
+        return
+    logger.info("Running scheduled backup job")
+    try:
+        import main  # lazy import to avoid circular import at module load
+
+        result = main._execute_backup(actor="scheduler", trigger="scheduled")
+        logger.info("Scheduled backup completed: %s", result.get("mode"))
+    except Exception as exc:
+        logger.exception("Scheduled backup failed: %s", exc)
+
+
 def start_scheduler():
     if not scheduler.running:
         scheduler.add_job(run_network_sweep, 'cron', hour=9, minute=0)
         scheduler.add_job(run_task_digest, 'interval', minutes=30)
+        backup_cron = (get_config("backup_schedule_cron", "") or "").strip()
+        if backup_cron:
+            try:
+                from apscheduler.triggers.cron import CronTrigger
+
+                scheduler.add_job(run_scheduled_backup, CronTrigger.from_crontab(backup_cron), id="backup_scheduled")
+            except Exception:
+                logger.warning("Invalid backup_schedule_cron, falling back to daily schedule")
+                scheduler.add_job(run_scheduled_backup, 'cron', hour=int(get_config("backup_schedule_hour", "2") or "2"), minute=int(get_config("backup_schedule_minute", "0") or "0"), id="backup_scheduled")
+        else:
+            scheduler.add_job(run_scheduled_backup, 'cron', hour=int(get_config("backup_schedule_hour", "2") or "2"), minute=int(get_config("backup_schedule_minute", "0") or "0"), id="backup_scheduled")
         scheduler.start()
         logger.info("Background scheduler started")

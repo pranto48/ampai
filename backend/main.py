@@ -4,11 +4,11 @@ from pydantic import BaseModel
 import logging
 import json
 import os
+import json
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta, timezone
 import shutil
 import uuid
-import ftplib
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
@@ -85,6 +85,14 @@ from integrations.gmail_api import (
 )
 from agent import chat_with_agent, get_redis_history
 from scheduler import start_scheduler, run_network_sweep
+from backup_helpers import (
+    build_backup_payload,
+    test_ftp_connection,
+    test_smb_connection,
+    write_backup_ftp,
+    write_backup_local,
+    write_backup_smb,
+)
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from auth import (
     router as auth_router,
@@ -204,6 +212,21 @@ class EmailSummaryRequest(BaseModel):
     session_id: str = "system_email_reports"
 
 
+class BackupRestoreRequest(BaseModel):
+    backup_json: str
+    dry_run: bool = True
+
+
+class BackupConnectionTestRequest(BaseModel):
+    mode: str
+    host: Optional[str] = ""
+    user: Optional[str] = ""
+    password: Optional[str] = ""
+    path: Optional[str] = "/"
+    share: Optional[str] = ""
+    domain: Optional[str] = ""
+
+
 class UserLoginResponse(BaseModel):
     username: str
     role: str
@@ -273,6 +296,74 @@ def _send_resend_email(subject: str, body_text: str) -> bool:
             return True
     except Exception:
         return False
+
+
+def _record_backup_status(entry: Dict) -> None:
+    raw = get_config("backup_status_history", "[]") or "[]"
+    try:
+        history = json.loads(raw)
+        if not isinstance(history, list):
+            history = []
+    except Exception:
+        history = []
+    history.insert(0, entry)
+    set_config("backup_status_history", json.dumps(history[:100]))
+
+
+def _execute_backup(actor: str, trigger: str = "manual") -> Dict:
+    backup_mode = (get_config("backup_mode", "local") or "local").strip().lower()
+    sessions = export_all_sessions_for_backup()
+    serialized, manifest = build_backup_payload(sessions=sessions, actor=actor)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"ampai_backup_{timestamp}.json"
+
+    try:
+        if backup_mode == "ftp":
+            host = get_config("backup_ftp_host")
+            user = get_config("backup_ftp_user")
+            password = get_config("backup_ftp_password")
+            remote_path = get_config("backup_ftp_path", "/")
+            if not host or not user or not password:
+                raise ValueError("FTP backup is not fully configured")
+            outcome = write_backup_ftp(host, user, password, remote_path, filename, serialized, manifest)
+        elif backup_mode == "smb":
+            host = get_config("backup_smb_host")
+            share = get_config("backup_smb_share")
+            remote_path = get_config("backup_smb_path", "/")
+            user = get_config("backup_smb_user")
+            password = get_config("backup_smb_password")
+            domain = get_config("backup_smb_domain", "")
+            if not host or not share or not user or not password:
+                raise ValueError("SMB backup is not fully configured")
+            outcome = write_backup_smb(host, share, remote_path, user, password, domain, filename, serialized, manifest)
+        else:
+            local_dir = get_config("backup_local_path", "/tmp/ampai_backups")
+            outcome = write_backup_local(local_dir, filename, serialized, manifest)
+
+        _record_backup_status(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "trigger": trigger,
+                "status": "success",
+                "mode": outcome.get("mode", backup_mode),
+                "target": outcome.get("path") or outcome.get("file") or "",
+                "manifest_checksum": manifest["checksum_sha256"],
+                "session_count": manifest["session_count"],
+                "message_count": manifest["message_count"],
+            }
+        )
+        return {"status": "success", **outcome, "manifest": manifest}
+    except Exception as exc:
+        _record_backup_status(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "trigger": trigger,
+                "status": "failed",
+                "mode": backup_mode,
+                "error": str(exc),
+            }
+        )
+        raise
 
 
 def _ensure_valid_email_access_token(provider: str) -> str:
@@ -762,6 +853,10 @@ def get_admin_configs(user=Depends(require_admin_user)):
 @app.post("/api/admin/configs")
 def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admin_user)):
     for k, v in request.configs.items():
+        if k == "backup_mode":
+            mode = (v or "").strip().lower()
+            if mode not in {"local", "ftp", "smb"}:
+                raise HTTPException(status_code=400, detail="backup_mode must be local, ftp, or smb")
         if v and "..." not in v:
             set_config(k, v)
     return {"status": "success"}
@@ -936,39 +1031,97 @@ def admin_unshare_group_session(group_id: int, session_id: str, _: UserContext =
 
 @app.post("/api/admin/backup/run")
 def run_backup(current_user: UserContext = Depends(require_admin_user)):
-    backup_mode = (get_config("backup_mode", "local") or "local").strip().lower()
-    snapshot = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "by": current_user.username,
-        "sessions": export_all_sessions_for_backup(),
-    }
-    serialized = json.dumps(snapshot, indent=2)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    filename = f"ampai_backup_{timestamp}.json"
+    try:
+        return _execute_backup(actor=current_user.username, trigger="manual")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Backup failed: {exc}") from exc
 
-    if backup_mode == "ftp":
-        host = get_config("backup_ftp_host")
-        user = get_config("backup_ftp_user")
-        password = get_config("backup_ftp_password")
-        remote_path = get_config("backup_ftp_path", "/")
-        if not host or not user or not password:
-            raise HTTPException(status_code=400, detail="FTP backup is not fully configured")
-        try:
-            with ftplib.FTP(host) as ftp:
-                ftp.login(user=user, passwd=password)
-                ftp.cwd(remote_path)
-                from io import BytesIO
-                ftp.storbinary(f"STOR {filename}", BytesIO(serialized.encode("utf-8")))
-            return {"status": "success", "mode": "ftp", "file": filename}
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"FTP backup failed: {exc}") from exc
 
-    local_dir = get_config("backup_local_path", "/tmp/ampai_backups")
-    os.makedirs(local_dir, exist_ok=True)
-    path = os.path.join(local_dir, filename)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(serialized)
-    return {"status": "success", "mode": "local", "path": path}
+@app.get("/api/admin/backup/status-history")
+def get_backup_status_history(_: UserContext = Depends(require_admin_user)):
+    raw = get_config("backup_status_history", "[]") or "[]"
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = []
+    if not isinstance(parsed, list):
+        parsed = []
+    return {"history": parsed}
+
+
+@app.post("/api/admin/backup/test-connection")
+def test_backup_connection(request: BackupConnectionTestRequest, _: UserContext = Depends(require_admin_user)):
+    mode = (request.mode or "").strip().lower()
+    if mode == "ftp":
+        ok, detail = test_ftp_connection(
+            host=(request.host or "").strip(),
+            user=(request.user or "").strip(),
+            password=request.password or "",
+            remote_path=(request.path or "/").strip(),
+        )
+    elif mode == "smb":
+        ok, detail = test_smb_connection(
+            host=(request.host or "").strip(),
+            share=(request.share or "").strip(),
+            username=(request.user or "").strip(),
+            password=request.password or "",
+            domain=(request.domain or "").strip(),
+        )
+    else:
+        raise HTTPException(status_code=400, detail="mode must be ftp or smb")
+    if not ok:
+        raise HTTPException(status_code=400, detail=detail)
+    return {"status": "success", "detail": detail}
+
+
+@app.post("/api/admin/backup/restore")
+def restore_backup(request: BackupRestoreRequest, user: UserContext = Depends(require_admin_user)):
+    try:
+        payload = json.loads(request.backup_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid backup JSON: {exc}") from exc
+    sessions = payload.get("sessions")
+    if not isinstance(sessions, list):
+        raise HTTPException(status_code=400, detail="Backup payload must contain a sessions array")
+
+    summary = {"session_count": 0, "message_count": 0, "invalid_sessions": 0}
+    for session in sessions:
+        session_id = (session or {}).get("session_id")
+        messages = (session or {}).get("messages")
+        if not session_id or not isinstance(messages, list):
+            summary["invalid_sessions"] += 1
+            continue
+        summary["session_count"] += 1
+        summary["message_count"] += len(messages)
+        if request.dry_run:
+            continue
+        history = get_sql_chat_history(session_id)
+        for raw in messages:
+            if not isinstance(raw, str):
+                continue
+            try:
+                msg = json.loads(raw)
+                kind = msg.get("type")
+                content = ((msg.get("data") or {}).get("content")) if isinstance(msg, dict) else None
+                if kind == "human" and isinstance(content, str):
+                    history.add_user_message(content)
+                elif kind == "ai" and isinstance(content, str):
+                    history.add_ai_message(content)
+            except Exception:
+                continue
+        set_session_category(session_id, "Restored Backup")
+
+    _record_backup_status(
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "trigger": "restore-dry-run" if request.dry_run else "restore",
+            "status": "success",
+            "mode": "restore",
+            "target": f"uploaded by {user.username}",
+            **summary,
+        }
+    )
+    return {"status": "success", "dry_run": request.dry_run, "summary": summary}
 
 @app.post("/api/admin/configs/migrate")
 def migrate_admin_configs():
