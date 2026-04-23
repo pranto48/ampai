@@ -47,6 +47,14 @@ from database import (
     create_memory_group,
     add_user_to_memory_group,
     share_session_to_group,
+    get_memory_group_members,
+    get_memory_group_sessions,
+    remove_user_from_memory_group,
+    unshare_session_from_group,
+    memory_group_membership_exists,
+    memory_group_session_share_exists,
+    session_exists,
+    memory_group_exists,
     list_memory_groups_for_user,
     list_shared_sessions_for_user,
     export_all_sessions_for_backup,
@@ -764,15 +772,69 @@ def get_memory_groups(current_user: UserContext = Depends(require_authenticated_
 
 @app.post("/api/admin/memory-groups/{group_id}/members/{username}")
 def admin_add_group_member(group_id: int, username: str, _: UserContext = Depends(require_admin_user)):
-    if not add_user_to_memory_group(group_id, username.strip()):
+    clean_username = username.strip()
+    if not clean_username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    if memory_group_membership_exists(group_id, clean_username):
+        raise HTTPException(status_code=409, detail="User is already a member of this group")
+    if not add_user_to_memory_group(group_id, clean_username):
         raise HTTPException(status_code=500, detail="Failed to add member")
     return {"status": "success"}
 
 
 @app.post("/api/admin/memory-groups/{group_id}/share")
 def admin_share_session(group_id: int, request: MemoryGroupShareRequest, _: UserContext = Depends(require_admin_user)):
-    if not share_session_to_group(group_id, request.session_id):
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    session_id = (request.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
+    if not session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    if memory_group_session_share_exists(group_id, session_id):
+        raise HTTPException(status_code=409, detail="Session is already shared to this group")
+    if not share_session_to_group(group_id, session_id):
         raise HTTPException(status_code=500, detail="Failed to share session")
+    return {"status": "success"}
+
+
+@app.get("/api/admin/memory-groups/{group_id}/members")
+def admin_get_group_members(group_id: int, _: UserContext = Depends(require_admin_user)):
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    return {"members": get_memory_group_members(group_id)}
+
+
+@app.get("/api/admin/memory-groups/{group_id}/sessions")
+def admin_get_group_sessions(group_id: int, _: UserContext = Depends(require_admin_user)):
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    return {"sessions": get_memory_group_sessions(group_id)}
+
+
+@app.delete("/api/admin/memory-groups/{group_id}/members/{username}")
+def admin_remove_group_member(group_id: int, username: str, _: UserContext = Depends(require_admin_user)):
+    clean_username = username.strip()
+    if not clean_username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    if not remove_user_from_memory_group(group_id, clean_username):
+        raise HTTPException(status_code=404, detail="Member not found in group")
+    return {"status": "success"}
+
+
+@app.delete("/api/admin/memory-groups/{group_id}/sessions/{session_id}")
+def admin_unshare_group_session(group_id: int, session_id: str, _: UserContext = Depends(require_admin_user)):
+    clean_session_id = (session_id or "").strip()
+    if not clean_session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    if not unshare_session_from_group(group_id, clean_session_id):
+        raise HTTPException(status_code=404, detail="Session share not found in group")
     return {"status": "success"}
 
 

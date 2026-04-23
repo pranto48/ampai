@@ -1098,6 +1098,143 @@ def list_shared_sessions_for_user(username: str):
         return []
 
 
+def memory_group_exists(group_id: int) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            exists = conn.execute(text("SELECT 1 FROM memory_groups WHERE id = :group_id"), {"group_id": group_id}).first()
+            return bool(exists)
+    except Exception as e:
+        logger.exception("Error checking memory group", exc_info=e)
+        return False
+
+
+def session_exists(session_id: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text(f"SELECT 1 FROM {CHAT_HISTORY_TABLE} WHERE session_id = :session_id LIMIT 1"),
+                {"session_id": session_id},
+            ).first()
+            return bool(exists)
+    except Exception as e:
+        logger.exception("Error checking session existence", exc_info=e)
+        return False
+
+
+def memory_group_membership_exists(group_id: int, username: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text(
+                    "SELECT 1 FROM memory_group_members "
+                    "WHERE group_id = :group_id AND username = :username"
+                ),
+                {"group_id": group_id, "username": username},
+            ).first()
+            return bool(exists)
+    except Exception as e:
+        logger.exception("Error checking memory group membership", exc_info=e)
+        return False
+
+
+def memory_group_session_share_exists(group_id: int, session_id: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text(
+                    "SELECT 1 FROM memory_group_sessions "
+                    "WHERE group_id = :group_id AND session_id = :session_id"
+                ),
+                {"group_id": group_id, "session_id": session_id},
+            ).first()
+            return bool(exists)
+    except Exception as e:
+        logger.exception("Error checking memory group session share", exc_info=e)
+        return False
+
+
+def get_memory_group_members(group_id: int):
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT username FROM memory_group_members "
+                    "WHERE group_id = :group_id ORDER BY username"
+                ),
+                {"group_id": group_id},
+            ).fetchall()
+            return [row[0] for row in rows]
+    except Exception as e:
+        logger.exception("Error listing memory group members", exc_info=e)
+        return []
+
+
+def get_memory_group_sessions(group_id: int):
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT session_id FROM memory_group_sessions "
+                    "WHERE group_id = :group_id ORDER BY session_id"
+                ),
+                {"group_id": group_id},
+            ).fetchall()
+            return [row[0] for row in rows]
+    except Exception as e:
+        logger.exception("Error listing memory group sessions", exc_info=e)
+        return []
+
+
+def remove_user_from_memory_group(group_id: int, username: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    "DELETE FROM memory_group_members "
+                    "WHERE group_id = :group_id AND username = :username"
+                ),
+                {"group_id": group_id, "username": username},
+            )
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.exception("Error removing memory group member", exc_info=e)
+        return False
+
+
+def unshare_session_from_group(group_id: int, session_id: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    "DELETE FROM memory_group_sessions "
+                    "WHERE group_id = :group_id AND session_id = :session_id"
+                ),
+                {"group_id": group_id, "session_id": session_id},
+            )
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.exception("Error unsharing memory group session", exc_info=e)
+        return False
+
+
 def add_media_asset(username: str, session_id: Optional[str], filename: str, url: str, mime_type: Optional[str]) -> bool:
     if not engine:
         return False

@@ -448,16 +448,32 @@
 
         <div class="card">
             <h2>Memory Share Groups</h2>
-            <p style="color: var(--text-secondary); font-size: 0.9rem;">Create groups and share session IDs internally.</p>
-            <div style="display:grid; grid-template-columns:2fr 2fr 1fr auto; gap:8px; margin-top:10px;">
+            <p style="color: var(--text-secondary); font-size: 0.9rem;">Create groups, manage members, and share existing sessions internally.</p>
+            <div style="display:grid; grid-template-columns:2fr 2fr auto; gap:8px; margin-top:10px;">
                 <input id="group-name" class="modern-input" placeholder="Group name">
                 <input id="group-members" class="modern-input" placeholder="Members (comma usernames)">
-                <input id="group-session-id" class="modern-input" placeholder="Session to share">
                 <button id="create-group-btn" class="btn primary-btn" style="width:auto;">Create Group</button>
             </div>
-            <button id="share-group-session-btn" class="btn" style="width:auto; margin-top:8px;">Share Session to Latest Group</button>
+            <div style="display:grid; grid-template-columns:1.2fr 1fr auto; gap:8px; margin-top:8px;">
+                <select id="group-selector" class="modern-input"></select>
+                <select id="group-session-selector" class="modern-input"></select>
+                <button id="share-group-session-btn" class="btn" style="width:auto;">Share Session</button>
+            </div>
             <div id="group-status" style="margin-top:8px; font-size:0.9rem;"></div>
             <ul id="groups-list" style="margin-top:10px; padding-left:18px;"></ul>
+            <div style="margin-top:12px; border-top:1px solid var(--border-color); padding-top:12px;">
+                <h3 style="margin-bottom:8px;">Group Details</h3>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                    <div>
+                        <h4 style="margin-bottom:6px;">Members</h4>
+                        <ul id="group-members-list" style="padding-left:18px;"></ul>
+                    </div>
+                    <div>
+                        <h4 style="margin-bottom:6px;">Shared Sessions</h4>
+                        <ul id="group-shared-sessions-list" style="padding-left:18px;"></ul>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 

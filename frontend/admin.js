@@ -32,9 +32,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const importFile = document.getElementById('import-file');
     const importBtn = document.getElementById('import-btn');
     const importStatus = document.getElementById('import-status');
-    const usersTbody = document.getElementById('users-tbody');
-    const createUserBtn = document.getElementById('create-user-btn');
-
     const logModal = document.getElementById('log-modal');
     const closeModalBtn = document.getElementById('close-modal');
     const modalSessionId = document.getElementById('modal-session-id');
@@ -122,12 +119,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const backupStatus = document.getElementById('backup-status');
     const groupNameInput = document.getElementById('group-name');
     const groupMembersInput = document.getElementById('group-members');
-    const groupSessionIdInput = document.getElementById('group-session-id');
+    const groupSelector = document.getElementById('group-selector');
+    const groupSessionSelector = document.getElementById('group-session-selector');
     const createGroupBtn = document.getElementById('create-group-btn');
     const shareGroupSessionBtn = document.getElementById('share-group-session-btn');
     const groupsList = document.getElementById('groups-list');
     const groupStatus = document.getElementById('group-status');
-    let latestGroupId = null;
+    const groupMembersList = document.getElementById('group-members-list');
+    const groupSharedSessionsList = document.getElementById('group-shared-sessions-list');
+    let selectedGroupId = null;
 
     const initializeAdmin = async () => {
         const user = await enforceAuth({ requiredRole: 'admin' });
@@ -151,6 +151,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (shareGroupSessionBtn) {
             shareGroupSessionBtn.addEventListener('click', shareSessionToGroup);
         }
+        if (groupSelector) {
+            groupSelector.addEventListener('change', async () => {
+                selectedGroupId = Number(groupSelector.value) || null;
+                await loadGroupDetails();
+            });
+        }
+        loadSessionOptions();
     };
     initializeAdmin();
 
@@ -772,12 +779,35 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             const groups = data.groups || [];
             groupsList.innerHTML = '';
-            latestGroupId = groups.length ? groups[0].id : null;
+            if (groupSelector) {
+                groupSelector.innerHTML = '';
+            }
+            if (groups.length && !selectedGroupId) {
+                selectedGroupId = groups[0].id;
+            }
             groups.forEach((g) => {
                 const li = document.createElement('li');
                 li.textContent = `#${g.id} ${g.name} (${g.created_by})`;
                 groupsList.appendChild(li);
+                if (groupSelector) {
+                    const option = document.createElement('option');
+                    option.value = String(g.id);
+                    option.textContent = `#${g.id} ${g.name}`;
+                    groupSelector.appendChild(option);
+                }
             });
+            if (groupSelector && groups.length) {
+                groupSelector.value = String(selectedGroupId || groups[0].id);
+                selectedGroupId = Number(groupSelector.value);
+            }
+            if (groupSelector && !groups.length) {
+                const option = document.createElement('option');
+                option.value = '';
+                option.textContent = 'No groups available';
+                groupSelector.appendChild(option);
+                selectedGroupId = null;
+            }
+            await loadGroupDetails();
         } catch (error) {
             groupStatus.textContent = error.message;
             groupStatus.style.color = '#ef4444';
@@ -800,8 +830,8 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const data = await response.json();
             if (!response.ok) throw new Error(data.detail || 'Failed to create group');
-            latestGroupId = data.group_id;
-            groupStatus.textContent = `Created group #${latestGroupId}`;
+            selectedGroupId = data.group_id;
+            groupStatus.textContent = `Created group #${selectedGroupId}`;
             groupStatus.style.color = '#10b981';
             loadGroups();
         } catch (error) {
@@ -811,22 +841,149 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function shareSessionToGroup() {
-        const sessionId = groupSessionIdInput.value.trim();
-        if (!latestGroupId || !sessionId) {
-            groupStatus.textContent = 'Create/select a group and provide session id';
+        const sessionId = groupSessionSelector?.value?.trim();
+        if (!selectedGroupId || !sessionId) {
+            groupStatus.textContent = 'Select a group and a session';
             groupStatus.style.color = '#ef4444';
             return;
         }
         try {
-            const response = await fetch(`/api/admin/memory-groups/${latestGroupId}/share`, {
+            const response = await fetch(`/api/admin/memory-groups/${selectedGroupId}/share`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ session_id: sessionId }),
             });
             const data = await response.json();
             if (!response.ok) throw new Error(data.detail || 'Failed to share session');
-            groupStatus.textContent = `Shared ${sessionId} to group #${latestGroupId}`;
+            groupStatus.textContent = `Shared ${sessionId} to group #${selectedGroupId}`;
             groupStatus.style.color = '#10b981';
+            await loadGroupDetails();
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function loadSessionOptions() {
+        if (!groupSessionSelector) return;
+        try {
+            const response = await fetch('/api/sessions');
+            const data = await response.json();
+            const sessions = data.sessions || [];
+            groupSessionSelector.innerHTML = '';
+            if (!sessions.length) {
+                const option = document.createElement('option');
+                option.value = '';
+                option.textContent = 'No sessions available';
+                groupSessionSelector.appendChild(option);
+                return;
+            }
+            sessions.forEach((s) => {
+                const option = document.createElement('option');
+                option.value = s.session_id;
+                option.textContent = s.session_id;
+                groupSessionSelector.appendChild(option);
+            });
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function loadGroupDetails() {
+        if (!selectedGroupId) {
+            if (groupMembersList) groupMembersList.innerHTML = '<li>No group selected</li>';
+            if (groupSharedSessionsList) groupSharedSessionsList.innerHTML = '<li>No group selected</li>';
+            return;
+        }
+        try {
+            const [membersRes, sessionsRes] = await Promise.all([
+                fetch(`/api/admin/memory-groups/${selectedGroupId}/members`),
+                fetch(`/api/admin/memory-groups/${selectedGroupId}/sessions`),
+            ]);
+            const membersData = await membersRes.json();
+            const sessionsData = await sessionsRes.json();
+            if (!membersRes.ok) throw new Error(membersData.detail || 'Failed to load group members');
+            if (!sessionsRes.ok) throw new Error(sessionsData.detail || 'Failed to load group sessions');
+
+            renderGroupMembers(membersData.members || []);
+            renderGroupSessions(sessionsData.sessions || []);
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    function renderGroupMembers(members) {
+        if (!groupMembersList) return;
+        groupMembersList.innerHTML = '';
+        if (!members.length) {
+            groupMembersList.innerHTML = '<li>No members</li>';
+            return;
+        }
+        members.forEach((username) => {
+            const li = document.createElement('li');
+            const button = document.createElement('button');
+            button.className = 'btn';
+            button.style.width = 'auto';
+            button.style.marginLeft = '8px';
+            button.textContent = 'Remove';
+            button.onclick = () => removeMember(username);
+            li.textContent = username;
+            li.appendChild(button);
+            groupMembersList.appendChild(li);
+        });
+    }
+
+    function renderGroupSessions(sessions) {
+        if (!groupSharedSessionsList) return;
+        groupSharedSessionsList.innerHTML = '';
+        if (!sessions.length) {
+            groupSharedSessionsList.innerHTML = '<li>No shared sessions</li>';
+            return;
+        }
+        sessions.forEach((sessionId) => {
+            const li = document.createElement('li');
+            const button = document.createElement('button');
+            button.className = 'btn';
+            button.style.width = 'auto';
+            button.style.marginLeft = '8px';
+            button.textContent = 'Unshare';
+            button.onclick = () => unshareSession(sessionId);
+            li.textContent = sessionId;
+            li.appendChild(button);
+            groupSharedSessionsList.appendChild(li);
+        });
+    }
+
+    async function removeMember(username) {
+        if (!selectedGroupId) return;
+        try {
+            const response = await fetch(`/api/admin/memory-groups/${selectedGroupId}/members/${encodeURIComponent(username)}`, {
+                method: 'DELETE',
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to remove member');
+            groupStatus.textContent = `Removed ${username}`;
+            groupStatus.style.color = '#10b981';
+            await loadGroupDetails();
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function unshareSession(sessionId) {
+        if (!selectedGroupId) return;
+        try {
+            const response = await fetch(`/api/admin/memory-groups/${selectedGroupId}/sessions/${encodeURIComponent(sessionId)}`, {
+                method: 'DELETE',
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to unshare session');
+            groupStatus.textContent = `Unshared ${sessionId}`;
+            groupStatus.style.color = '#10b981';
+            await loadGroupDetails();
         } catch (error) {
             groupStatus.textContent = error.message;
             groupStatus.style.color = '#ef4444';
