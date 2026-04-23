@@ -65,6 +65,10 @@
 
             <div class="sessions-container">
                 <h3>Memories</h3>
+                <input id="session-search" class="modern-input" placeholder="Search sessions" style="margin:6px 0 8px 0; font-size:0.8rem;">
+                <label style="font-size:0.75rem; color:var(--text-secondary); display:flex; gap:6px; align-items:center; margin-bottom:6px;">
+                    <input type="checkbox" id="show-archived"> Show archived
+                </label>
                 <ul id="sessions-list">
                     <!-- Sessions will be loaded here -->
                 </ul>
@@ -100,6 +104,9 @@
                                 <option value="Code">Code</option>
                             </select>
                         </div>
+                        <button id="summarize-email-btn" class="btn" style="width:auto; padding:6px 10px; font-size:0.8rem;">📧 Today Mail</button>
+                        <button id="pin-session-btn" class="btn" style="width:auto; padding:6px 10px; font-size:0.8rem;">📌 Pin</button>
+                        <button id="archive-session-btn" class="btn" style="width:auto; padding:6px 10px; font-size:0.8rem;">🗄️ Archive</button>
                         <button id="delete-session-btn" class="btn icon-btn" title="Delete Session" style="background-color: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); padding: 6px;">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                         </button>
