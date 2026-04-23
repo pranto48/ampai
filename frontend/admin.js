@@ -32,9 +32,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const importFile = document.getElementById('import-file');
     const importBtn = document.getElementById('import-btn');
     const importStatus = document.getElementById('import-status');
-    const usersTbody = document.getElementById('users-tbody');
-    const createUserBtn = document.getElementById('create-user-btn');
-
     const logModal = document.getElementById('log-modal');
     const closeModalBtn = document.getElementById('close-modal');
     const modalSessionId = document.getElementById('modal-session-id');
@@ -78,6 +75,16 @@ document.addEventListener('DOMContentLoaded', () => {
         'backup_ftp_user': document.getElementById('config-backup-ftp-user'),
         'backup_ftp_password': document.getElementById('config-backup-ftp-password'),
         'backup_ftp_path': document.getElementById('config-backup-ftp-path'),
+        'backup_smb_host': document.getElementById('config-backup-smb-host'),
+        'backup_smb_share': document.getElementById('config-backup-smb-share'),
+        'backup_smb_path': document.getElementById('config-backup-smb-path'),
+        'backup_smb_user': document.getElementById('config-backup-smb-user'),
+        'backup_smb_password': document.getElementById('config-backup-smb-password'),
+        'backup_smb_domain': document.getElementById('config-backup-smb-domain'),
+        'backup_schedule_enabled': document.getElementById('config-backup-schedule-enabled'),
+        'backup_schedule_hour': document.getElementById('config-backup-schedule-hour'),
+        'backup_schedule_minute': document.getElementById('config-backup-schedule-minute'),
+        'backup_schedule_cron': document.getElementById('config-backup-schedule-cron'),
         'resend_api_key': document.getElementById('config-resend-api-key'),
         'resend_from_email': document.getElementById('config-resend-from-email'),
         'notification_email_to': document.getElementById('config-notification-email-to'),
@@ -101,6 +108,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'integration_email_outlook_credentials',
         'integration_email_gmail_credentials',
         'backup_ftp_password',
+        'backup_smb_password',
         'resend_api_key'
     ]);
     const CLEAR_VALUE_SENTINEL = "__CLEAR__";
@@ -125,14 +133,23 @@ document.addEventListener('DOMContentLoaded', () => {
     const mediaTbody = document.getElementById('media-tbody');
     const runBackupBtn = document.getElementById('run-backup-btn');
     const backupStatus = document.getElementById('backup-status');
+    const backupHistoryTbody = document.getElementById('backup-history-tbody');
+    const testFtpConnectionBtn = document.getElementById('test-ftp-connection-btn');
+    const testSmbConnectionBtn = document.getElementById('test-smb-connection-btn');
+    const backupRestoreBtn = document.getElementById('backup-restore-btn');
+    const backupRestoreJson = document.getElementById('backup-restore-json');
+    const backupRestoreDryRun = document.getElementById('backup-restore-dry-run');
     const groupNameInput = document.getElementById('group-name');
     const groupMembersInput = document.getElementById('group-members');
-    const groupSessionIdInput = document.getElementById('group-session-id');
+    const groupSelector = document.getElementById('group-selector');
+    const groupSessionSelector = document.getElementById('group-session-selector');
     const createGroupBtn = document.getElementById('create-group-btn');
     const shareGroupSessionBtn = document.getElementById('share-group-session-btn');
     const groupsList = document.getElementById('groups-list');
     const groupStatus = document.getElementById('group-status');
-    let latestGroupId = null;
+    const groupMembersList = document.getElementById('group-members-list');
+    const groupSharedSessionsList = document.getElementById('group-shared-sessions-list');
+    let selectedGroupId = null;
 
     const initializeAdmin = async () => {
         const user = await enforceAuth({ requiredRole: 'admin' });
@@ -150,12 +167,29 @@ document.addEventListener('DOMContentLoaded', () => {
         if (runBackupBtn) {
             runBackupBtn.addEventListener('click', runBackupNow);
         }
+        if (testFtpConnectionBtn) {
+            testFtpConnectionBtn.addEventListener('click', () => testBackupConnection('ftp'));
+        }
+        if (testSmbConnectionBtn) {
+            testSmbConnectionBtn.addEventListener('click', () => testBackupConnection('smb'));
+        }
+        if (backupRestoreBtn) {
+            backupRestoreBtn.addEventListener('click', restoreBackup);
+        }
+        loadBackupHistory();
         if (createGroupBtn) {
             createGroupBtn.addEventListener('click', createGroup);
         }
         if (shareGroupSessionBtn) {
             shareGroupSessionBtn.addEventListener('click', shareSessionToGroup);
         }
+        if (groupSelector) {
+            groupSelector.addEventListener('change', async () => {
+                selectedGroupId = Number(groupSelector.value) || null;
+                await loadGroupDetails();
+            });
+        }
+        loadSessionOptions();
     };
     initializeAdmin();
 
@@ -765,6 +799,93 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!response.ok) throw new Error(data.detail || 'Backup failed');
             backupStatus.textContent = data.path || data.file || 'Backup completed';
             backupStatus.style.color = '#10b981';
+            loadBackupHistory();
+        } catch (error) {
+            backupStatus.textContent = error.message;
+            backupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function loadBackupHistory() {
+        if (!backupHistoryTbody) return;
+        try {
+            const response = await apiFetch('/api/admin/backup/status-history');
+            const data = await response.json();
+            const history = data.history || [];
+            backupHistoryTbody.innerHTML = history.map((row) => `
+                <tr>
+                    <td>${row.timestamp || ''}</td>
+                    <td>${row.trigger || ''}</td>
+                    <td>${row.status || ''}</td>
+                    <td>${row.mode || ''}</td>
+                    <td>${row.error || row.target || ''}</td>
+                </tr>
+            `).join('') || '<tr><td colspan="5" style="text-align:center;">No backup runs yet</td></tr>';
+        } catch (error) {
+            backupHistoryTbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:#ef4444;">${error.message}</td></tr>`;
+        }
+    }
+
+    async function testBackupConnection(mode) {
+        backupStatus.textContent = `Testing ${mode.toUpperCase()} connection...`;
+        backupStatus.style.color = 'var(--text-secondary)';
+        const payload = mode === 'ftp'
+            ? {
+                mode: 'ftp',
+                host: configInputs.backup_ftp_host.value.trim(),
+                user: configInputs.backup_ftp_user.value.trim(),
+                password: configInputs.backup_ftp_password.value,
+                path: configInputs.backup_ftp_path.value.trim() || '/',
+            }
+            : {
+                mode: 'smb',
+                host: configInputs.backup_smb_host.value.trim(),
+                share: configInputs.backup_smb_share.value.trim(),
+                path: configInputs.backup_smb_path.value.trim() || '/',
+                user: configInputs.backup_smb_user.value.trim(),
+                password: configInputs.backup_smb_password.value,
+                domain: configInputs.backup_smb_domain.value.trim(),
+            };
+        try {
+            const response = await apiFetch('/api/admin/backup/test-connection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Connection test failed');
+            backupStatus.textContent = data.detail || 'Connection successful';
+            backupStatus.style.color = '#10b981';
+        } catch (error) {
+            backupStatus.textContent = error.message;
+            backupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function restoreBackup() {
+        const backupJson = backupRestoreJson?.value || '';
+        if (!backupJson.trim()) {
+            backupStatus.textContent = 'Paste backup JSON first.';
+            backupStatus.style.color = '#ef4444';
+            return;
+        }
+        backupStatus.textContent = 'Validating restore payload...';
+        backupStatus.style.color = 'var(--text-secondary)';
+        try {
+            const response = await apiFetch('/api/admin/backup/restore', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    backup_json: backupJson,
+                    dry_run: !!backupRestoreDryRun?.checked,
+                }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Restore failed');
+            const s = data.summary || {};
+            backupStatus.textContent = `Restore ${data.dry_run ? 'dry-run' : 'completed'}: sessions=${s.session_count || 0}, messages=${s.message_count || 0}, invalid=${s.invalid_sessions || 0}`;
+            backupStatus.style.color = '#10b981';
+            loadBackupHistory();
         } catch (error) {
             backupStatus.textContent = error.message;
             backupStatus.style.color = '#ef4444';
@@ -777,12 +898,35 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             const groups = data.groups || [];
             groupsList.innerHTML = '';
-            latestGroupId = groups.length ? groups[0].id : null;
+            if (groupSelector) {
+                groupSelector.innerHTML = '';
+            }
+            if (groups.length && !selectedGroupId) {
+                selectedGroupId = groups[0].id;
+            }
             groups.forEach((g) => {
                 const li = document.createElement('li');
                 li.textContent = `#${g.id} ${g.name} (${g.created_by})`;
                 groupsList.appendChild(li);
+                if (groupSelector) {
+                    const option = document.createElement('option');
+                    option.value = String(g.id);
+                    option.textContent = `#${g.id} ${g.name}`;
+                    groupSelector.appendChild(option);
+                }
             });
+            if (groupSelector && groups.length) {
+                groupSelector.value = String(selectedGroupId || groups[0].id);
+                selectedGroupId = Number(groupSelector.value);
+            }
+            if (groupSelector && !groups.length) {
+                const option = document.createElement('option');
+                option.value = '';
+                option.textContent = 'No groups available';
+                groupSelector.appendChild(option);
+                selectedGroupId = null;
+            }
+            await loadGroupDetails();
         } catch (error) {
             groupStatus.textContent = error.message;
             groupStatus.style.color = '#ef4444';
@@ -805,8 +949,8 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const data = await response.json();
             if (!response.ok) throw new Error(data.detail || 'Failed to create group');
-            latestGroupId = data.group_id;
-            groupStatus.textContent = `Created group #${latestGroupId}`;
+            selectedGroupId = data.group_id;
+            groupStatus.textContent = `Created group #${selectedGroupId}`;
             groupStatus.style.color = '#10b981';
             loadGroups();
         } catch (error) {
@@ -816,22 +960,149 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function shareSessionToGroup() {
-        const sessionId = groupSessionIdInput.value.trim();
-        if (!latestGroupId || !sessionId) {
-            groupStatus.textContent = 'Create/select a group and provide session id';
+        const sessionId = groupSessionSelector?.value?.trim();
+        if (!selectedGroupId || !sessionId) {
+            groupStatus.textContent = 'Select a group and a session';
             groupStatus.style.color = '#ef4444';
             return;
         }
         try {
-            const response = await fetch(`/api/admin/memory-groups/${latestGroupId}/share`, {
+            const response = await fetch(`/api/admin/memory-groups/${selectedGroupId}/share`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ session_id: sessionId }),
             });
             const data = await response.json();
             if (!response.ok) throw new Error(data.detail || 'Failed to share session');
-            groupStatus.textContent = `Shared ${sessionId} to group #${latestGroupId}`;
+            groupStatus.textContent = `Shared ${sessionId} to group #${selectedGroupId}`;
             groupStatus.style.color = '#10b981';
+            await loadGroupDetails();
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function loadSessionOptions() {
+        if (!groupSessionSelector) return;
+        try {
+            const response = await fetch('/api/sessions');
+            const data = await response.json();
+            const sessions = data.sessions || [];
+            groupSessionSelector.innerHTML = '';
+            if (!sessions.length) {
+                const option = document.createElement('option');
+                option.value = '';
+                option.textContent = 'No sessions available';
+                groupSessionSelector.appendChild(option);
+                return;
+            }
+            sessions.forEach((s) => {
+                const option = document.createElement('option');
+                option.value = s.session_id;
+                option.textContent = s.session_id;
+                groupSessionSelector.appendChild(option);
+            });
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function loadGroupDetails() {
+        if (!selectedGroupId) {
+            if (groupMembersList) groupMembersList.innerHTML = '<li>No group selected</li>';
+            if (groupSharedSessionsList) groupSharedSessionsList.innerHTML = '<li>No group selected</li>';
+            return;
+        }
+        try {
+            const [membersRes, sessionsRes] = await Promise.all([
+                fetch(`/api/admin/memory-groups/${selectedGroupId}/members`),
+                fetch(`/api/admin/memory-groups/${selectedGroupId}/sessions`),
+            ]);
+            const membersData = await membersRes.json();
+            const sessionsData = await sessionsRes.json();
+            if (!membersRes.ok) throw new Error(membersData.detail || 'Failed to load group members');
+            if (!sessionsRes.ok) throw new Error(sessionsData.detail || 'Failed to load group sessions');
+
+            renderGroupMembers(membersData.members || []);
+            renderGroupSessions(sessionsData.sessions || []);
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    function renderGroupMembers(members) {
+        if (!groupMembersList) return;
+        groupMembersList.innerHTML = '';
+        if (!members.length) {
+            groupMembersList.innerHTML = '<li>No members</li>';
+            return;
+        }
+        members.forEach((username) => {
+            const li = document.createElement('li');
+            const button = document.createElement('button');
+            button.className = 'btn';
+            button.style.width = 'auto';
+            button.style.marginLeft = '8px';
+            button.textContent = 'Remove';
+            button.onclick = () => removeMember(username);
+            li.textContent = username;
+            li.appendChild(button);
+            groupMembersList.appendChild(li);
+        });
+    }
+
+    function renderGroupSessions(sessions) {
+        if (!groupSharedSessionsList) return;
+        groupSharedSessionsList.innerHTML = '';
+        if (!sessions.length) {
+            groupSharedSessionsList.innerHTML = '<li>No shared sessions</li>';
+            return;
+        }
+        sessions.forEach((sessionId) => {
+            const li = document.createElement('li');
+            const button = document.createElement('button');
+            button.className = 'btn';
+            button.style.width = 'auto';
+            button.style.marginLeft = '8px';
+            button.textContent = 'Unshare';
+            button.onclick = () => unshareSession(sessionId);
+            li.textContent = sessionId;
+            li.appendChild(button);
+            groupSharedSessionsList.appendChild(li);
+        });
+    }
+
+    async function removeMember(username) {
+        if (!selectedGroupId) return;
+        try {
+            const response = await fetch(`/api/admin/memory-groups/${selectedGroupId}/members/${encodeURIComponent(username)}`, {
+                method: 'DELETE',
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to remove member');
+            groupStatus.textContent = `Removed ${username}`;
+            groupStatus.style.color = '#10b981';
+            await loadGroupDetails();
+        } catch (error) {
+            groupStatus.textContent = error.message;
+            groupStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function unshareSession(sessionId) {
+        if (!selectedGroupId) return;
+        try {
+            const response = await fetch(`/api/admin/memory-groups/${selectedGroupId}/sessions/${encodeURIComponent(sessionId)}`, {
+                method: 'DELETE',
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to unshare session');
+            groupStatus.textContent = `Unshared ${sessionId}`;
+            groupStatus.style.color = '#10b981';
+            await loadGroupDetails();
         } catch (error) {
             groupStatus.textContent = error.message;
             groupStatus.style.color = '#ef4444';
@@ -862,4 +1133,66 @@ document.addEventListener('DOMContentLoaded', () => {
             mediaTbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:#ef4444;">${error.message}</td></tr>`;
         }
     }
+
+    // --- Reports search/export (admin) ---
+    let latestAdminReportMatches = [];
+
+    function toCsv(rows) {
+        if (!rows?.length) return '';
+        const headers = Object.keys(rows[0]);
+        const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+        return [headers.join(','), ...rows.map((r) => headers.map((h) => esc(r[h])).join(','))].join('\n');
+    }
+
+    function downloadBlob(filename, content, type) {
+        const blob = new Blob([content], { type });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    async function runAdminReportSearch() {
+        const status = document.getElementById('admin-report-status');
+        const params = new URLSearchParams();
+        const read = (id) => document.getElementById(id)?.value?.trim();
+        const q = read('admin-report-q');
+        const sid = read('admin-report-session-id');
+        const from = read('admin-report-date-from');
+        const to = read('admin-report-date-to');
+        const category = read('admin-report-category');
+        const sharedOnly = !!document.getElementById('admin-report-shared-only')?.checked;
+        if (q) params.set('q', q);
+        if (sid) params.set('session_id', sid);
+        if (from) params.set('date_from', from);
+        if (to) params.set('date_to', to);
+        if (category) params.set('category', category);
+        if (sharedOnly) params.set('shared_only', 'true');
+
+        status.textContent = 'Searching…';
+        const response = await apiFetch(`/api/reports/find?${params.toString()}`);
+        const data = await response.json();
+        if (!response.ok) {
+            status.textContent = data.detail || 'Search failed';
+            status.style.color = '#ef4444';
+            latestAdminReportMatches = [];
+            return;
+        }
+        latestAdminReportMatches = data.matches || [];
+        status.textContent = `Found ${latestAdminReportMatches.length} matches`;
+        status.style.color = '#10b981';
+    }
+
+    document.getElementById('admin-report-search-btn')?.addEventListener('click', runAdminReportSearch);
+    document.getElementById('admin-report-export-json-btn')?.addEventListener('click', () => {
+        if (!latestAdminReportMatches.length) return;
+        downloadBlob('admin-report-results.json', JSON.stringify(latestAdminReportMatches, null, 2), 'application/json');
+    });
+    document.getElementById('admin-report-export-csv-btn')?.addEventListener('click', () => {
+        if (!latestAdminReportMatches.length) return;
+        downloadBlob('admin-report-results.csv', toCsv(latestAdminReportMatches), 'text/csv');
+    });
+
 });

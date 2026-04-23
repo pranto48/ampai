@@ -2,13 +2,13 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import logging
+import json
 import os
 import json
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta, timezone
 import shutil
 import uuid
-import ftplib
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
@@ -48,9 +48,25 @@ from database import (
     create_memory_group,
     add_user_to_memory_group,
     share_session_to_group,
+    get_memory_group_members,
+    get_memory_group_sessions,
+    remove_user_from_memory_group,
+    unshare_session_from_group,
+    memory_group_membership_exists,
+    memory_group_session_share_exists,
+    session_exists,
+    memory_group_exists,
     list_memory_groups_for_user,
     list_shared_sessions_for_user,
+    get_session_owner,
+    session_exists,
+    set_session_owner,
+    user_can_access_session,
     export_all_sessions_for_backup,
+    ensure_session_owner,
+    find_report_matches,
+    build_session_report_card,
+    get_accessible_session_ids,
     list_chat_messages,
     get_sql_chat_history,
     list_tasks,
@@ -59,6 +75,7 @@ from database import (
     set_session_archived,
     set_session_category,
     set_session_pinned,
+    touch_session,
     touch_session_updated_at,
     update_task,
     get_effective_notification_preferences,
@@ -71,6 +88,14 @@ from integrations.gmail_api import (
 )
 from agent import chat_with_agent, get_redis_history
 from scheduler import start_scheduler, run_network_sweep
+from backup_helpers import (
+    build_backup_payload,
+    test_ftp_connection,
+    test_smb_connection,
+    write_backup_ftp,
+    write_backup_local,
+    write_backup_smb,
+)
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from auth import (
     router as auth_router,
@@ -198,6 +223,21 @@ class EmailSummaryRequest(BaseModel):
     session_id: str = "system_email_reports"
 
 
+class BackupRestoreRequest(BaseModel):
+    backup_json: str
+    dry_run: bool = True
+
+
+class BackupConnectionTestRequest(BaseModel):
+    mode: str
+    host: Optional[str] = ""
+    user: Optional[str] = ""
+    password: Optional[str] = ""
+    path: Optional[str] = "/"
+    share: Optional[str] = ""
+    domain: Optional[str] = ""
+
+
 class UserLoginResponse(BaseModel):
     username: str
     role: str
@@ -267,6 +307,74 @@ def _send_resend_email(subject: str, body_text: str) -> bool:
             return True
     except Exception:
         return False
+
+
+def _record_backup_status(entry: Dict) -> None:
+    raw = get_config("backup_status_history", "[]") or "[]"
+    try:
+        history = json.loads(raw)
+        if not isinstance(history, list):
+            history = []
+    except Exception:
+        history = []
+    history.insert(0, entry)
+    set_config("backup_status_history", json.dumps(history[:100]))
+
+
+def _execute_backup(actor: str, trigger: str = "manual") -> Dict:
+    backup_mode = (get_config("backup_mode", "local") or "local").strip().lower()
+    sessions = export_all_sessions_for_backup()
+    serialized, manifest = build_backup_payload(sessions=sessions, actor=actor)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"ampai_backup_{timestamp}.json"
+
+    try:
+        if backup_mode == "ftp":
+            host = get_config("backup_ftp_host")
+            user = get_config("backup_ftp_user")
+            password = get_config("backup_ftp_password")
+            remote_path = get_config("backup_ftp_path", "/")
+            if not host or not user or not password:
+                raise ValueError("FTP backup is not fully configured")
+            outcome = write_backup_ftp(host, user, password, remote_path, filename, serialized, manifest)
+        elif backup_mode == "smb":
+            host = get_config("backup_smb_host")
+            share = get_config("backup_smb_share")
+            remote_path = get_config("backup_smb_path", "/")
+            user = get_config("backup_smb_user")
+            password = get_config("backup_smb_password")
+            domain = get_config("backup_smb_domain", "")
+            if not host or not share or not user or not password:
+                raise ValueError("SMB backup is not fully configured")
+            outcome = write_backup_smb(host, share, remote_path, user, password, domain, filename, serialized, manifest)
+        else:
+            local_dir = get_config("backup_local_path", "/tmp/ampai_backups")
+            outcome = write_backup_local(local_dir, filename, serialized, manifest)
+
+        _record_backup_status(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "trigger": trigger,
+                "status": "success",
+                "mode": outcome.get("mode", backup_mode),
+                "target": outcome.get("path") or outcome.get("file") or "",
+                "manifest_checksum": manifest["checksum_sha256"],
+                "session_count": manifest["session_count"],
+                "message_count": manifest["message_count"],
+            }
+        )
+        return {"status": "success", **outcome, "manifest": manifest}
+    except Exception as exc:
+        _record_backup_status(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "trigger": trigger,
+                "status": "failed",
+                "mode": backup_mode,
+                "error": str(exc),
+            }
+        )
+        raise
 
 
 def _ensure_valid_email_access_token(provider: str) -> str:
@@ -420,10 +528,26 @@ app.include_router(auth_router)
 app.include_router(admin_users_router)
 
 
+def _enforce_session_access_or_403(session_id: str, current_user: UserContext) -> None:
+    if user_can_access_session(session_id, current_user.username, current_user.role):
+        return
+    if session_exists(session_id):
+        raise HTTPException(status_code=403, detail="Forbidden: you do not have permission to access this session")
+    raise HTTPException(status_code=404, detail="Session not found")
+
+
+def _ensure_session_owner_for_user(session_id: str, current_user: UserContext) -> None:
+    if current_user.role == "admin":
+        return
+    if get_session_owner(session_id):
+        return
+    set_session_owner(session_id=session_id, owner_username=current_user.username, visibility="private")
+
 
 @app.post("/api/chat")
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
+        _ensure_session_owner_for_user(request.session_id, user)
         result = chat_with_agent(
             session_id=request.session_id,
             message=request.message,
@@ -433,6 +557,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
         )
+        ensure_session_owner(request.session_id, user.username)
         touch_session(request.session_id)
         return result
     except Exception as e:
@@ -556,6 +681,10 @@ async def upload_file(
     current_user: UserContext = Depends(require_authenticated_user),
 ):
     try:
+        owner_username = current_user.username
+        if session_id:
+            _enforce_session_access_or_403(session_id, current_user)
+            owner_username = get_session_owner(session_id) or current_user.username
         file_ext = os.path.splitext(file.filename)[1]
         unique_filename = f"{uuid.uuid4()}{file_ext}"
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
@@ -583,7 +712,7 @@ async def upload_file(
             "extracted_text": extracted_text,
         }
         add_media_asset(
-            username=current_user.username,
+            username=owner_username,
             session_id=session_id,
             filename=file.filename,
             url=payload["url"],
@@ -604,6 +733,57 @@ def get_media_assets(
     return {"media": list_media_assets(username=username)}
 
 
+def _can_access_session(session_id: str, current_user: UserContext) -> bool:
+    if current_user.role == "admin":
+        return True
+    return session_id in get_accessible_session_ids(username=current_user.username, is_admin=False)
+
+
+@app.get("/api/reports/find")
+def find_reports(
+    q: Optional[str] = Query(default=None),
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    session_id: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    shared_only: bool = Query(default=False),
+    limit: int = Query(default=60, ge=1, le=200),
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    if session_id and not _can_access_session(session_id, current_user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
+
+    matches = find_report_matches(
+        username=current_user.username,
+        is_admin=current_user.role == "admin",
+        keyword=q,
+        date_from=date_from,
+        date_to=date_to,
+        session_id=session_id,
+        category=category,
+        shared_only=shared_only,
+        limit=limit,
+    )
+    return {"count": len(matches), "matches": matches}
+
+
+@app.get("/api/reports/session-summary/{session_id}")
+def get_session_summary_report(session_id: str, current_user: UserContext = Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, current_user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
+
+    report = build_session_report_card(
+        session_id=session_id,
+        username=current_user.username,
+        is_admin=current_user.role == "admin",
+    )
+    if not report:
+        raise HTTPException(status_code=404, detail="No session data available")
+    return report
+
+
+
+
 @app.get("/api/sessions")
 def get_sessions(
     query: Optional[str] = Query(default=None),
@@ -613,7 +793,9 @@ def get_sessions(
 ):
     sessions = get_all_sessions(query=query, category=category, archived=archived)
     if current_user.role != "admin":
+        accessible_ids = get_accessible_session_ids(username=current_user.username, is_admin=False)
         shared_ids = set(list_shared_sessions_for_user(current_user.username))
+        sessions = [s for s in sessions if s.get("session_id") in accessible_ids]
         for session in sessions:
             if session["session_id"] in shared_ids:
                 session["shared_via_group"] = True
@@ -622,7 +804,10 @@ def get_sessions(
 
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str, user=Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
     try:
+        _enforce_session_access_or_403(session_id, user)
         messages = list_chat_messages(session_id, dedupe=True)
         return {"messages": messages}
     except Exception as e:
@@ -631,6 +816,8 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
 
 @app.post("/api/sessions/{session_id}/category")
 def update_category(session_id: str, request: CategoryRequest, user=Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
     success = set_session_category(session_id, request.category)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to update category")
@@ -639,7 +826,10 @@ def update_category(session_id: str, request: CategoryRequest, user=Depends(requ
 
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str, user=Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
     try:
+        _enforce_session_access_or_403(session_id, user)
         delete_session_metadata(session_id)
         SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL).clear()
         get_redis_history(session_id).clear()
@@ -650,7 +840,10 @@ def delete_session(session_id: str, user=Depends(require_authenticated_user)):
 
 @app.get("/api/export/{session_id}")
 def export_session(session_id: str, user=Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
     try:
+        _enforce_session_access_or_403(session_id, user)
         messages = list_chat_messages(session_id, dedupe=True)
 
         sessions = get_all_sessions()
@@ -668,6 +861,7 @@ def export_session(session_id: str, user=Depends(require_authenticated_user)):
 @app.post("/api/import")
 def import_session(request: ImportRequest, user=Depends(require_authenticated_user)):
     try:
+        ensure_session_owner(request.session_id, user.username)
         history = get_sql_chat_history(request.session_id)
         existing_messages = {(msg["type"], msg["content"]) for msg in list_chat_messages(request.session_id, dedupe=False)}
         inserted = 0
@@ -720,6 +914,10 @@ def get_admin_configs(user=Depends(require_admin_user)):
 @app.post("/api/admin/configs")
 def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admin_user)):
     for k, v in request.configs.items():
+        if k == "backup_mode":
+            mode = (v or "").strip().lower()
+            if mode not in {"local", "ftp", "smb"}:
+                raise HTTPException(status_code=400, detail="backup_mode must be local, ftp, or smb")
         if v and "..." not in v:
             set_config(k, v)
     return {"status": "success"}
@@ -826,53 +1024,165 @@ def get_memory_groups(current_user: UserContext = Depends(require_authenticated_
 
 @app.post("/api/admin/memory-groups/{group_id}/members/{username}")
 def admin_add_group_member(group_id: int, username: str, _: UserContext = Depends(require_admin_user)):
-    if not add_user_to_memory_group(group_id, username.strip()):
+    clean_username = username.strip()
+    if not clean_username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    if memory_group_membership_exists(group_id, clean_username):
+        raise HTTPException(status_code=409, detail="User is already a member of this group")
+    if not add_user_to_memory_group(group_id, clean_username):
         raise HTTPException(status_code=500, detail="Failed to add member")
     return {"status": "success"}
 
 
 @app.post("/api/admin/memory-groups/{group_id}/share")
 def admin_share_session(group_id: int, request: MemoryGroupShareRequest, _: UserContext = Depends(require_admin_user)):
-    if not share_session_to_group(group_id, request.session_id):
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    session_id = (request.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
+    if not session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    if memory_group_session_share_exists(group_id, session_id):
+        raise HTTPException(status_code=409, detail="Session is already shared to this group")
+    if not share_session_to_group(group_id, session_id):
         raise HTTPException(status_code=500, detail="Failed to share session")
+    return {"status": "success"}
+
+
+@app.get("/api/admin/memory-groups/{group_id}/members")
+def admin_get_group_members(group_id: int, _: UserContext = Depends(require_admin_user)):
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    return {"members": get_memory_group_members(group_id)}
+
+
+@app.get("/api/admin/memory-groups/{group_id}/sessions")
+def admin_get_group_sessions(group_id: int, _: UserContext = Depends(require_admin_user)):
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    return {"sessions": get_memory_group_sessions(group_id)}
+
+
+@app.delete("/api/admin/memory-groups/{group_id}/members/{username}")
+def admin_remove_group_member(group_id: int, username: str, _: UserContext = Depends(require_admin_user)):
+    clean_username = username.strip()
+    if not clean_username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    if not remove_user_from_memory_group(group_id, clean_username):
+        raise HTTPException(status_code=404, detail="Member not found in group")
+    return {"status": "success"}
+
+
+@app.delete("/api/admin/memory-groups/{group_id}/sessions/{session_id}")
+def admin_unshare_group_session(group_id: int, session_id: str, _: UserContext = Depends(require_admin_user)):
+    clean_session_id = (session_id or "").strip()
+    if not clean_session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    if not unshare_session_from_group(group_id, clean_session_id):
+        raise HTTPException(status_code=404, detail="Session share not found in group")
     return {"status": "success"}
 
 
 @app.post("/api/admin/backup/run")
 def run_backup(current_user: UserContext = Depends(require_admin_user)):
-    backup_mode = (get_config("backup_mode", "local") or "local").strip().lower()
-    snapshot = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "by": current_user.username,
-        "sessions": export_all_sessions_for_backup(),
-    }
-    serialized = json.dumps(snapshot, indent=2)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    filename = f"ampai_backup_{timestamp}.json"
+    try:
+        return _execute_backup(actor=current_user.username, trigger="manual")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Backup failed: {exc}") from exc
 
-    if backup_mode == "ftp":
-        host = get_config("backup_ftp_host")
-        user = get_config("backup_ftp_user")
-        password = get_config("backup_ftp_password")
-        remote_path = get_config("backup_ftp_path", "/")
-        if not host or not user or not password:
-            raise HTTPException(status_code=400, detail="FTP backup is not fully configured")
-        try:
-            with ftplib.FTP(host) as ftp:
-                ftp.login(user=user, passwd=password)
-                ftp.cwd(remote_path)
-                from io import BytesIO
-                ftp.storbinary(f"STOR {filename}", BytesIO(serialized.encode("utf-8")))
-            return {"status": "success", "mode": "ftp", "file": filename}
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"FTP backup failed: {exc}") from exc
 
-    local_dir = get_config("backup_local_path", "/tmp/ampai_backups")
-    os.makedirs(local_dir, exist_ok=True)
-    path = os.path.join(local_dir, filename)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(serialized)
-    return {"status": "success", "mode": "local", "path": path}
+@app.get("/api/admin/backup/status-history")
+def get_backup_status_history(_: UserContext = Depends(require_admin_user)):
+    raw = get_config("backup_status_history", "[]") or "[]"
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = []
+    if not isinstance(parsed, list):
+        parsed = []
+    return {"history": parsed}
+
+
+@app.post("/api/admin/backup/test-connection")
+def test_backup_connection(request: BackupConnectionTestRequest, _: UserContext = Depends(require_admin_user)):
+    mode = (request.mode or "").strip().lower()
+    if mode == "ftp":
+        ok, detail = test_ftp_connection(
+            host=(request.host or "").strip(),
+            user=(request.user or "").strip(),
+            password=request.password or "",
+            remote_path=(request.path or "/").strip(),
+        )
+    elif mode == "smb":
+        ok, detail = test_smb_connection(
+            host=(request.host or "").strip(),
+            share=(request.share or "").strip(),
+            username=(request.user or "").strip(),
+            password=request.password or "",
+            domain=(request.domain or "").strip(),
+        )
+    else:
+        raise HTTPException(status_code=400, detail="mode must be ftp or smb")
+    if not ok:
+        raise HTTPException(status_code=400, detail=detail)
+    return {"status": "success", "detail": detail}
+
+
+@app.post("/api/admin/backup/restore")
+def restore_backup(request: BackupRestoreRequest, user: UserContext = Depends(require_admin_user)):
+    try:
+        payload = json.loads(request.backup_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid backup JSON: {exc}") from exc
+    sessions = payload.get("sessions")
+    if not isinstance(sessions, list):
+        raise HTTPException(status_code=400, detail="Backup payload must contain a sessions array")
+
+    summary = {"session_count": 0, "message_count": 0, "invalid_sessions": 0}
+    for session in sessions:
+        session_id = (session or {}).get("session_id")
+        messages = (session or {}).get("messages")
+        if not session_id or not isinstance(messages, list):
+            summary["invalid_sessions"] += 1
+            continue
+        summary["session_count"] += 1
+        summary["message_count"] += len(messages)
+        if request.dry_run:
+            continue
+        history = get_sql_chat_history(session_id)
+        for raw in messages:
+            if not isinstance(raw, str):
+                continue
+            try:
+                msg = json.loads(raw)
+                kind = msg.get("type")
+                content = ((msg.get("data") or {}).get("content")) if isinstance(msg, dict) else None
+                if kind == "human" and isinstance(content, str):
+                    history.add_user_message(content)
+                elif kind == "ai" and isinstance(content, str):
+                    history.add_ai_message(content)
+            except Exception:
+                continue
+        set_session_category(session_id, "Restored Backup")
+
+    _record_backup_status(
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "trigger": "restore-dry-run" if request.dry_run else "restore",
+            "status": "success",
+            "mode": "restore",
+            "target": f"uploaded by {user.username}",
+            **summary,
+        }
+    )
+    return {"status": "success", "dry_run": request.dry_run, "summary": summary}
 
 @app.post("/api/admin/configs/migrate")
 def migrate_admin_configs():

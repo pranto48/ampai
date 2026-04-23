@@ -1127,4 +1127,63 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+
+    // --- Reports search/export (user) ---
+    let latestReportMatches = [];
+
+    function toCsv(rows) {
+        if (!rows?.length) return '';
+        const headers = Object.keys(rows[0]);
+        const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+        return [headers.join(','), ...rows.map((r) => headers.map((h) => esc(r[h])).join(','))].join('\n');
+    }
+
+    function downloadBlob(filename, content, type) {
+        const blob = new Blob([content], { type });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    async function runReportSearch() {
+        const status = document.getElementById('report-search-status');
+        const params = new URLSearchParams();
+        const q = document.getElementById('report-q')?.value?.trim();
+        const sid = document.getElementById('report-session-id')?.value?.trim();
+        const cat = document.getElementById('report-category')?.value?.trim();
+        const from = document.getElementById('report-date-from')?.value;
+        const to = document.getElementById('report-date-to')?.value;
+        const sharedOnly = !!document.getElementById('report-shared-only')?.checked;
+        if (q) params.set('q', q);
+        if (sid) params.set('session_id', sid);
+        if (cat) params.set('category', cat);
+        if (from) params.set('date_from', from);
+        if (to) params.set('date_to', to);
+        if (sharedOnly) params.set('shared_only', 'true');
+
+        if (status) status.textContent = 'Searching…';
+        const response = await apiFetch(`/api/reports/find?${params.toString()}`);
+        const data = await response.json();
+        if (!response.ok) {
+            if (status) status.textContent = data.detail || 'Search failed';
+            latestReportMatches = [];
+            return;
+        }
+        latestReportMatches = data.matches || [];
+        if (status) status.textContent = `Found ${latestReportMatches.length} report matches`;
+    }
+
+    document.getElementById('report-search-btn')?.addEventListener('click', runReportSearch);
+    document.getElementById('report-export-json-btn')?.addEventListener('click', () => {
+        if (!latestReportMatches.length) return;
+        downloadBlob('report-results.json', JSON.stringify(latestReportMatches, null, 2), 'application/json');
+    });
+    document.getElementById('report-export-csv-btn')?.addEventListener('click', () => {
+        if (!latestReportMatches.length) return;
+        downloadBlob('report-results.csv', toCsv(latestReportMatches), 'text/csv');
+    });
+
 });
