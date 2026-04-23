@@ -31,6 +31,13 @@ from database import (
 from agent import chat_with_agent, get_redis_history
 from scheduler import start_scheduler, run_network_sweep
 from langchain_community.chat_message_histories import SQLChatMessageHistory
+from auth import (
+    router as auth_router,
+    admin_router as admin_users_router,
+    require_authenticated_user,
+    require_admin_user,
+    bootstrap_default_admin,
+)
 
 app = FastAPI()
 logger = logging.getLogger("ampai")
@@ -88,9 +95,6 @@ class ConfigUpdateRequest(BaseModel):
     configs: Dict[str, str]
 
 
-class AuthRequest(BaseModel):
-    token: str
-
 
 class TaskCreateRequest(BaseModel):
     title: str
@@ -116,48 +120,17 @@ class EmailSummaryRequest(BaseModel):
 
 @app.on_event("startup")
 def startup_event():
+    bootstrap_default_admin()
     start_scheduler()
 
 
-def _token_from_auth_header(authorization: Optional[str]) -> Optional[str]:
-    if not authorization:
-        return None
-    parts = authorization.split(" ", 1)
-    if len(parts) == 2 and parts[0].lower() == "bearer":
-        return parts[1].strip()
-    return authorization.strip()
+app.include_router(auth_router)
+app.include_router(admin_users_router)
 
-
-def require_user(authorization: Optional[str] = Header(None)):
-    token = _token_from_auth_header(authorization)
-    if token in (USER_TOKEN, ADMIN_TOKEN):
-        return {"role": "admin" if token == ADMIN_TOKEN else "user"}
-    raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-def require_admin(authorization: Optional[str] = Header(None)):
-    token = _token_from_auth_header(authorization)
-    if token == ADMIN_TOKEN:
-        return {"role": "admin"}
-    raise HTTPException(status_code=403, detail="Admin access required")
-
-
-@app.post("/api/auth/login")
-def login(request: AuthRequest):
-    if request.token == ADMIN_TOKEN:
-        return {"token": ADMIN_TOKEN, "role": "admin"}
-    if request.token == USER_TOKEN:
-        return {"token": USER_TOKEN, "role": "user"}
-    raise HTTPException(status_code=401, detail="Invalid token")
-
-
-@app.get("/api/auth/whoami")
-def whoami(user=Depends(require_user)):
-    return user
 
 
 @app.post("/api/chat")
-def chat(request: ChatRequest, user=Depends(require_user)):
+def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
         result = chat_with_agent(
             session_id=request.session_id,
@@ -176,7 +149,7 @@ def chat(request: ChatRequest, user=Depends(require_user)):
 
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), user=Depends(require_user)):
+async def upload_file(file: UploadFile = File(...), user=Depends(require_authenticated_user)):
     try:
         file_ext = os.path.splitext(file.filename)[1]
         unique_filename = f"{uuid.uuid4()}{file_ext}"
@@ -204,26 +177,26 @@ async def upload_file(file: UploadFile = File(...), user=Depends(require_user)):
 
 
 @app.get("/api/sessions")
-def get_sessions(query: str = "", archived: bool = False, user=Depends(require_user)):
+def get_sessions(query: str = "", archived: bool = False, user=Depends(require_authenticated_user)):
     return {"sessions": get_all_sessions(query=query, include_archived=archived)}
 
 
 @app.post("/api/sessions/{session_id}/pin")
-def pin_session(session_id: str, request: SessionFlagsRequest, user=Depends(require_user)):
+def pin_session(session_id: str, request: SessionFlagsRequest, user=Depends(require_authenticated_user)):
     if not set_session_flags(session_id, pinned=request.value):
         raise HTTPException(status_code=500, detail="Failed to update pin")
     return {"status": "success"}
 
 
 @app.post("/api/sessions/{session_id}/archive")
-def archive_session(session_id: str, request: SessionFlagsRequest, user=Depends(require_user)):
+def archive_session(session_id: str, request: SessionFlagsRequest, user=Depends(require_authenticated_user)):
     if not set_session_flags(session_id, archived=request.value):
         raise HTTPException(status_code=500, detail="Failed to update archive")
     return {"status": "success"}
 
 
 @app.get("/api/history/{session_id}")
-def get_history(session_id: str, user=Depends(require_user)):
+def get_history(session_id: str, user=Depends(require_authenticated_user)):
     try:
         history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
         messages = [{"type": msg.type, "content": msg.content} for msg in history.messages]
@@ -233,7 +206,7 @@ def get_history(session_id: str, user=Depends(require_user)):
 
 
 @app.post("/api/sessions/{session_id}/category")
-def update_category(session_id: str, request: CategoryRequest, user=Depends(require_user)):
+def update_category(session_id: str, request: CategoryRequest, user=Depends(require_authenticated_user)):
     success = set_session_category(session_id, request.category)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to update category")
@@ -241,7 +214,7 @@ def update_category(session_id: str, request: CategoryRequest, user=Depends(requ
 
 
 @app.delete("/api/sessions/{session_id}")
-def delete_session(session_id: str, user=Depends(require_user)):
+def delete_session(session_id: str, user=Depends(require_authenticated_user)):
     try:
         delete_session_metadata(session_id)
         SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL).clear()
@@ -252,7 +225,7 @@ def delete_session(session_id: str, user=Depends(require_user)):
 
 
 @app.get("/api/export/{session_id}")
-def export_session(session_id: str, user=Depends(require_user)):
+def export_session(session_id: str, user=Depends(require_authenticated_user)):
     try:
         history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
         messages = [{"type": msg.type, "content": msg.content} for msg in history.messages]
@@ -264,7 +237,7 @@ def export_session(session_id: str, user=Depends(require_user)):
 
 
 @app.post("/api/import")
-def import_session(request: ImportRequest, user=Depends(require_user)):
+def import_session(request: ImportRequest, user=Depends(require_authenticated_user)):
     try:
         history = SQLChatMessageHistory(session_id=request.session_id, connection_string=DATABASE_URL)
         for msg in request.messages:
@@ -285,7 +258,7 @@ def import_session(request: ImportRequest, user=Depends(require_user)):
 
 
 @app.get("/api/admin/configs")
-def get_admin_configs(user=Depends(require_admin)):
+def get_admin_configs(user=Depends(require_admin_user)):
     configs = get_all_configs()
     masked = {}
     for k, v in configs.items():
@@ -302,7 +275,7 @@ def get_admin_configs(user=Depends(require_admin)):
 
 
 @app.post("/api/admin/configs")
-def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admin)):
+def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admin_user)):
     for k, v in request.configs.items():
         if v and "..." not in v:
             set_config(k, v)
@@ -310,7 +283,7 @@ def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admi
 
 
 @app.get("/api/configs/status")
-def get_configs_status(user=Depends(require_user)):
+def get_configs_status(user=Depends(require_authenticated_user)):
     configs = get_all_configs()
     return {
         "openai": bool(configs.get("openai_api_key")),
@@ -324,12 +297,12 @@ def get_configs_status(user=Depends(require_user)):
 
 
 @app.get("/api/admin/core-memories")
-def api_get_core_memories(user=Depends(require_admin)):
+def api_get_core_memories(user=Depends(require_admin_user)):
     return {"core_memories": get_core_memories()}
 
 
 @app.delete("/api/admin/core-memories/{mem_id}")
-def api_delete_core_memory(mem_id: int, user=Depends(require_admin)):
+def api_delete_core_memory(mem_id: int, user=Depends(require_admin_user)):
     success = delete_core_memory(mem_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to delete core memory")
@@ -337,12 +310,12 @@ def api_delete_core_memory(mem_id: int, user=Depends(require_admin)):
 
 
 @app.get("/api/targets")
-def get_targets(user=Depends(require_admin)):
+def get_targets(user=Depends(require_admin_user)):
     return get_network_targets()
 
 
 @app.post("/api/targets")
-def create_target(target: TargetModel, user=Depends(require_admin)):
+def create_target(target: TargetModel, user=Depends(require_admin_user)):
     success = add_network_target(target.name, target.ip_address)
     if success:
         return {"status": "success"}
@@ -350,7 +323,7 @@ def create_target(target: TargetModel, user=Depends(require_admin)):
 
 
 @app.delete("/api/targets/{target_id}")
-def remove_target(target_id: int, user=Depends(require_admin)):
+def remove_target(target_id: int, user=Depends(require_admin_user)):
     success = delete_network_target(target_id)
     if success:
         return {"status": "success"}
@@ -358,13 +331,13 @@ def remove_target(target_id: int, user=Depends(require_admin)):
 
 
 @app.post("/api/targets/run")
-def run_sweep_now(user=Depends(require_admin)):
+def run_sweep_now(user=Depends(require_admin_user)):
     run_network_sweep()
     return {"status": "success"}
 
 
 @app.post("/api/tasks")
-def api_create_task(request: TaskCreateRequest, user=Depends(require_user)):
+def api_create_task(request: TaskCreateRequest, user=Depends(require_authenticated_user)):
     task_id = create_task(request.title, request.description, request.priority, request.due_at, request.session_id)
     if not task_id:
         raise HTTPException(status_code=500, detail="Failed to create task")
@@ -372,19 +345,19 @@ def api_create_task(request: TaskCreateRequest, user=Depends(require_user)):
 
 
 @app.get("/api/tasks")
-def api_list_tasks(status: Optional[str] = None, user=Depends(require_user)):
+def api_list_tasks(status: Optional[str] = None, user=Depends(require_authenticated_user)):
     return {"tasks": list_tasks(status=status)}
 
 
 @app.patch("/api/tasks/{task_id}")
-def api_update_task(task_id: int, request: TaskUpdateRequest, user=Depends(require_user)):
+def api_update_task(task_id: int, request: TaskUpdateRequest, user=Depends(require_authenticated_user)):
     if not update_task(task_id, request.dict()):
         raise HTTPException(status_code=500, detail="Failed to update task")
     return {"status": "success"}
 
 
 @app.delete("/api/tasks/{task_id}")
-def api_delete_task(task_id: int, user=Depends(require_user)):
+def api_delete_task(task_id: int, user=Depends(require_authenticated_user)):
     if not delete_task(task_id):
         raise HTTPException(status_code=500, detail="Failed to delete task")
     return {"status": "success"}
@@ -404,7 +377,7 @@ def _decode_subject(raw_subject) -> str:
 
 
 @app.post("/api/email/summary/today")
-def summarize_today_email(request: EmailSummaryRequest, user=Depends(require_user)):
+def summarize_today_email(request: EmailSummaryRequest, user=Depends(require_authenticated_user)):
     configs = get_all_configs()
     host = configs.get("imap_host")
     username = configs.get("imap_username")
@@ -451,7 +424,7 @@ def summarize_today_email(request: EmailSummaryRequest, user=Depends(require_use
 
 
 @app.get("/api/health")
-def health(user=Depends(require_admin)):
+def health(user=Depends(require_admin_user)):
     configs = get_all_configs()
     return {
         "status": "ok",
@@ -483,7 +456,7 @@ def get_latest_mtime(directories):
 
 
 @app.get("/api/status")
-def get_status(user=Depends(require_user)):
+def get_status(user=Depends(require_authenticated_user)):
     backend_path = os.path.dirname(__file__)
     frontend_path = os.path.join(backend_path, "..", "frontend")
     latest_mtime = get_latest_mtime([backend_path, frontend_path])

@@ -1,5 +1,6 @@
 import os
 import logging
+import hashlib
 from datetime import datetime, timezone
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, select, inspect, text, Boolean
 from langchain_community.chat_message_histories import SQLChatMessageHistory
@@ -68,6 +69,16 @@ tasks = Table(
     Column('session_id', String),
     Column('created_at', String, default=lambda: datetime.now(timezone.utc).isoformat()),
     Column('updated_at', String, default=lambda: datetime.now(timezone.utc).isoformat())
+)
+
+
+users = Table(
+    'users', metadata,
+    Column('id', Integer, primary_key=True, autoincrement=True),
+    Column('username', String, unique=True),
+    Column('password_hash', String),
+    Column('role', String, default='user'),
+    Column('created_at', String, default=lambda: datetime.now(timezone.utc).isoformat())
 )
 
 
@@ -432,4 +443,95 @@ def delete_task(task_id: int):
             return True
     except Exception as e:
         logger.warning(f"Error deleting task: {e}")
+        return False
+
+
+
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
+
+def create_user(username: str, password: str, role: str = 'user'):
+    if not engine:
+        return False, 'db_unavailable'
+    username = (username or '').strip()
+    if not username or not password:
+        return False, 'username_password_required'
+    if len(password) < 4:
+        return False, 'password_too_short'
+    try:
+        with engine.connect() as conn:
+            existing = conn.execute(select(users.c.id).where(users.c.username == username)).first()
+            if existing:
+                return False, 'username_exists'
+            conn.execute(
+                text("INSERT INTO users (username, password_hash, role, created_at) VALUES (:u, :p, :r, :c)"),
+                {'u': username, 'p': _hash_password(password), 'r': role, 'c': _now_iso()}
+            )
+            conn.commit()
+            return True, 'created'
+    except Exception as e:
+        logger.warning(f"Error creating user: {e}")
+        return False, 'create_failed'
+
+
+def ensure_default_admin(username: str, password: str):
+    return create_user(username=username, password=password, role='admin')
+
+
+def verify_user_credentials(username: str, password: str):
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(users.c.id, users.c.username, users.c.password_hash, users.c.role).where(users.c.username == username)
+            ).first()
+            if not row:
+                return None
+            if row.password_hash != _hash_password(password):
+                return None
+            return {'id': row.id, 'username': row.username, 'role': row.role}
+    except Exception as e:
+        logger.warning(f"Error verifying user credentials: {e}")
+        return None
+
+
+def list_users():
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(select(users.c.id, users.c.username, users.c.role, users.c.created_at)).fetchall()
+            return [dict(r._mapping) for r in rows]
+    except Exception as e:
+        logger.warning(f"Error listing users: {e}")
+        return []
+
+
+def set_user_role(user_id: int, role: str):
+    if not engine:
+        return False
+    if role not in {'admin', 'user'}:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(text('UPDATE users SET role = :r WHERE id = :id'), {'r': role, 'id': user_id})
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.warning(f"Error setting user role: {e}")
+        return False
+
+
+def delete_user(user_id: int):
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(text('DELETE FROM users WHERE id = :id'), {'id': user_id})
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.warning(f"Error deleting user: {e}")
         return False

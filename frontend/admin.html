@@ -300,6 +300,25 @@
             </div>
         </div>
 
+
+        <div class="card">
+            <h2>User Management</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Admin can create users, set roles, and remove accounts.</p>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:12px;">
+                <input id="new-username" class="modern-input" placeholder="Username" style="flex:1; min-width:160px;">
+                <input id="new-password" type="password" class="modern-input" placeholder="Password" style="flex:1; min-width:160px;">
+                <select id="new-role" class="modern-input" style="width:140px;">
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                </select>
+                <button id="create-user-btn" class="btn primary-btn" style="width:auto;">Create User</button>
+            </div>
+            <table class="data-table" style="margin-top:12px;">
+                <thead><tr><th>ID</th><th>Username</th><th>Role</th><th>Actions</th></tr></thead>
+                <tbody id="users-tbody"></tbody>
+            </table>
+        </div>
+
         <div class="card">
             <h2>Memory Pool</h2>
             <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">All saved conversations categorized dynamically.</p>

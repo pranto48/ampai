@@ -32,6 +32,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const importFile = document.getElementById('import-file');
     const importBtn = document.getElementById('import-btn');
     const importStatus = document.getElementById('import-status');
+    const usersTbody = document.getElementById('users-tbody');
+    const createUserBtn = document.getElementById('create-user-btn');
 
     const logModal = document.getElementById('log-modal');
     const closeModalBtn = document.getElementById('close-modal');
@@ -98,7 +100,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const saveEmailScheduleBtn = document.getElementById('save-email-schedule-btn');
     const emailScheduleStatus = document.getElementById('email-schedule-status');
 
-    ensureAuth().then((ok) => { if (!ok) return; loadAdminSessions(); loadConfigs(); loadCoreMemories(); loadHealth(); });
+    ensureAuth().then((ok) => { if (!ok) return; loadAdminSessions(); loadConfigs(); loadCoreMemories(); loadHealth(); loadUsers(); });
 
     async function loadCoreMemories() {
         try {
@@ -337,6 +339,69 @@ document.addEventListener('DOMContentLoaded', () => {
             document.querySelector('.admin-container')?.appendChild(el);
         } catch (e) { console.error(e); }
     }
+
+
+    async function loadUsers() {
+        if (!usersTbody) return;
+        try {
+            const res = await apiFetch('/api/admin/users');
+            const data = await res.json();
+            const users = data.users || [];
+            usersTbody.innerHTML = users.map(u => `
+                <tr>
+                    <td>${u.id}</td>
+                    <td>${u.username}</td>
+                    <td>
+                        <select data-role-user-id="${u.id}" class="modern-input" style="padding:4px 8px; font-size:0.8rem; width:100px;">
+                            <option value="user" ${u.role === 'user' ? 'selected' : ''}>user</option>
+                            <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>admin</option>
+                        </select>
+                    </td>
+                    <td><button data-del-user-id="${u.id}" class="btn" style="width:auto; padding:6px 10px;">Delete</button></td>
+                </tr>
+            `).join('') || '<tr><td colspan="4" style="text-align:center;">No users</td></tr>';
+        } catch (e) {
+            console.error('Failed to load users', e);
+        }
+    }
+
+    if (createUserBtn) {
+        createUserBtn.addEventListener('click', async () => {
+            const username = document.getElementById('new-username')?.value?.trim();
+            const password = document.getElementById('new-password')?.value || '';
+            const role = document.getElementById('new-role')?.value || 'user';
+            if (!username || !password) return alert('Username and password required');
+            const res = await apiFetch('/api/admin/users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, role })
+            });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || 'Create failed');
+            document.getElementById('new-username').value = '';
+            document.getElementById('new-password').value = '';
+            loadUsers();
+        });
+    }
+
+    document.addEventListener('change', async (e) => {
+        const userId = e.target?.getAttribute?.('data-role-user-id');
+        if (!userId) return;
+        await apiFetch(`/api/admin/users/${userId}/role`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ role: e.target.value })
+        });
+        loadUsers();
+    });
+
+    document.addEventListener('click', async (e) => {
+        const userId = e.target?.getAttribute?.('data-del-user-id');
+        if (!userId) return;
+        if (!confirm('Delete this user?')) return;
+        await apiFetch(`/api/admin/users/${userId}`, { method: 'DELETE' });
+        loadUsers();
+    });
 
     closeModalBtn.addEventListener('click', () => {
         logModal.classList.remove('show');
