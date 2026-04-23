@@ -48,8 +48,20 @@ from database import (
     create_memory_group,
     add_user_to_memory_group,
     share_session_to_group,
+    get_memory_group_members,
+    get_memory_group_sessions,
+    remove_user_from_memory_group,
+    unshare_session_from_group,
+    memory_group_membership_exists,
+    memory_group_session_share_exists,
+    session_exists,
+    memory_group_exists,
     list_memory_groups_for_user,
     list_shared_sessions_for_user,
+    get_session_owner,
+    session_exists,
+    set_session_owner,
+    user_can_access_session,
     export_all_sessions_for_backup,
     ensure_session_owner,
     find_report_matches,
@@ -63,6 +75,7 @@ from database import (
     set_session_archived,
     set_session_category,
     set_session_pinned,
+    touch_session,
     touch_session_updated_at,
     update_task,
 )
@@ -400,10 +413,26 @@ app.include_router(auth_router)
 app.include_router(admin_users_router)
 
 
+def _enforce_session_access_or_403(session_id: str, current_user: UserContext) -> None:
+    if user_can_access_session(session_id, current_user.username, current_user.role):
+        return
+    if session_exists(session_id):
+        raise HTTPException(status_code=403, detail="Forbidden: you do not have permission to access this session")
+    raise HTTPException(status_code=404, detail="Session not found")
+
+
+def _ensure_session_owner_for_user(session_id: str, current_user: UserContext) -> None:
+    if current_user.role == "admin":
+        return
+    if get_session_owner(session_id):
+        return
+    set_session_owner(session_id=session_id, owner_username=current_user.username, visibility="private")
+
 
 @app.post("/api/chat")
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
+        _ensure_session_owner_for_user(request.session_id, user)
         result = chat_with_agent(
             session_id=request.session_id,
             message=request.message,
@@ -500,6 +529,10 @@ async def upload_file(
     current_user: UserContext = Depends(require_authenticated_user),
 ):
     try:
+        owner_username = current_user.username
+        if session_id:
+            _enforce_session_access_or_403(session_id, current_user)
+            owner_username = get_session_owner(session_id) or current_user.username
         file_ext = os.path.splitext(file.filename)[1]
         unique_filename = f"{uuid.uuid4()}{file_ext}"
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
@@ -527,7 +560,7 @@ async def upload_file(
             "extracted_text": extracted_text,
         }
         add_media_asset(
-            username=current_user.username,
+            username=owner_username,
             session_id=session_id,
             filename=file.filename,
             url=payload["url"],
@@ -622,6 +655,7 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
     if not _can_access_session(session_id, user):
         raise HTTPException(status_code=403, detail="Forbidden session")
     try:
+        _enforce_session_access_or_403(session_id, user)
         messages = list_chat_messages(session_id, dedupe=True)
         return {"messages": messages}
     except Exception as e:
@@ -643,6 +677,7 @@ def delete_session(session_id: str, user=Depends(require_authenticated_user)):
     if not _can_access_session(session_id, user):
         raise HTTPException(status_code=403, detail="Forbidden session")
     try:
+        _enforce_session_access_or_403(session_id, user)
         delete_session_metadata(session_id)
         SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL).clear()
         get_redis_history(session_id).clear()
@@ -656,6 +691,7 @@ def export_session(session_id: str, user=Depends(require_authenticated_user)):
     if not _can_access_session(session_id, user):
         raise HTTPException(status_code=403, detail="Forbidden session")
     try:
+        _enforce_session_access_or_403(session_id, user)
         messages = list_chat_messages(session_id, dedupe=True)
 
         sessions = get_all_sessions()
@@ -832,15 +868,69 @@ def get_memory_groups(current_user: UserContext = Depends(require_authenticated_
 
 @app.post("/api/admin/memory-groups/{group_id}/members/{username}")
 def admin_add_group_member(group_id: int, username: str, _: UserContext = Depends(require_admin_user)):
-    if not add_user_to_memory_group(group_id, username.strip()):
+    clean_username = username.strip()
+    if not clean_username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    if memory_group_membership_exists(group_id, clean_username):
+        raise HTTPException(status_code=409, detail="User is already a member of this group")
+    if not add_user_to_memory_group(group_id, clean_username):
         raise HTTPException(status_code=500, detail="Failed to add member")
     return {"status": "success"}
 
 
 @app.post("/api/admin/memory-groups/{group_id}/share")
 def admin_share_session(group_id: int, request: MemoryGroupShareRequest, _: UserContext = Depends(require_admin_user)):
-    if not share_session_to_group(group_id, request.session_id):
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    session_id = (request.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
+    if not session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    if memory_group_session_share_exists(group_id, session_id):
+        raise HTTPException(status_code=409, detail="Session is already shared to this group")
+    if not share_session_to_group(group_id, session_id):
         raise HTTPException(status_code=500, detail="Failed to share session")
+    return {"status": "success"}
+
+
+@app.get("/api/admin/memory-groups/{group_id}/members")
+def admin_get_group_members(group_id: int, _: UserContext = Depends(require_admin_user)):
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    return {"members": get_memory_group_members(group_id)}
+
+
+@app.get("/api/admin/memory-groups/{group_id}/sessions")
+def admin_get_group_sessions(group_id: int, _: UserContext = Depends(require_admin_user)):
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    return {"sessions": get_memory_group_sessions(group_id)}
+
+
+@app.delete("/api/admin/memory-groups/{group_id}/members/{username}")
+def admin_remove_group_member(group_id: int, username: str, _: UserContext = Depends(require_admin_user)):
+    clean_username = username.strip()
+    if not clean_username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    if not remove_user_from_memory_group(group_id, clean_username):
+        raise HTTPException(status_code=404, detail="Member not found in group")
+    return {"status": "success"}
+
+
+@app.delete("/api/admin/memory-groups/{group_id}/sessions/{session_id}")
+def admin_unshare_group_session(group_id: int, session_id: str, _: UserContext = Depends(require_admin_user)):
+    clean_session_id = (session_id or "").strip()
+    if not clean_session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
+    if not memory_group_exists(group_id):
+        raise HTTPException(status_code=404, detail="Memory group not found")
+    if not unshare_session_from_group(group_id, clean_session_id):
+        raise HTTPException(status_code=404, detail="Session share not found in group")
     return {"status": "success"}
 
 
