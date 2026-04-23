@@ -57,116 +57,101 @@ def _format_search_results(results: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def search_web(query: str, max_results: int = 5) -> Dict[str, Any]:
-    """
-    Try web search providers in order:
-    1) DuckDuckGo
-    2) Optional configured fallback provider (SerpAPI/Bing/custom)
-    """
-    last_error = "Web search unavailable."
+def _search_with_provider(provider_key: str, query: str, max_results: int = 5) -> Dict[str, Any]:
+    provider = (provider_key or "").strip().lower()
+    if provider in {"duckduckgo", "ddg"}:
+        try:
+            from ddgs import DDGS
+            with DDGS() as ddgs:
+                ddg_results = list(ddgs.text(query, max_results=max_results))
+            normalized = [
+                {"title": row.get("title", ""), "url": row.get("href", ""), "snippet": row.get("body", "")}
+                for row in ddg_results
+            ]
+            return {"provider": "DuckDuckGo", "status": "success", "results": normalized, "error": None}
+        except Exception as exc:
+            return {"provider": "DuckDuckGo", "status": "failed", "results": [], "error": str(exc)}
 
-    # 1) DuckDuckGo
-    try:
-        from ddgs import DDGS
-        with DDGS() as ddgs:
-            ddg_results = list(ddgs.text(query, max_results=max_results))
-        normalized = [
-            {
-                "title": row.get("title", ""),
-                "url": row.get("href", ""),
-                "snippet": row.get("body", ""),
-            }
-            for row in ddg_results
-        ]
-        return {
-            "ok": True,
-            "provider": "DuckDuckGo",
-            "results": normalized,
-            "error": None,
-        }
-    except Exception as exc:
-        last_error = f"DuckDuckGo failed: {exc}"
-
-    # 2) Optional fallback provider
-    fallback_provider = (get_config("web_fallback_provider") or "").strip().lower()
-    if fallback_provider == "serpapi":
+    if provider == "serpapi":
         serpapi_key = (get_config("serpapi_api_key") or "").strip()
-        if serpapi_key:
-            try:
-                params = urllib.parse.urlencode({
-                    "engine": "google",
-                    "q": query,
-                    "api_key": serpapi_key,
-                    "num": max_results
-                })
-                url = f"https://serpapi.com/search.json?{params}"
-                with urllib.request.urlopen(url, timeout=12) as resp:
-                    payload = json.loads(resp.read().decode("utf-8"))
-                items = payload.get("organic_results", [])[:max_results]
-                normalized = [
-                    {
-                        "title": row.get("title", ""),
-                        "url": row.get("link", ""),
-                        "snippet": row.get("snippet", ""),
-                    }
-                    for row in items
-                ]
-                return {"ok": True, "provider": "SerpAPI", "results": normalized, "error": None}
-            except Exception as exc:
-                last_error = f"SerpAPI failed: {exc}"
-        else:
-            last_error = "SerpAPI fallback selected but serpapi_api_key is missing."
-    elif fallback_provider == "bing":
+        if not serpapi_key:
+            return {"provider": "SerpAPI", "status": "failed", "results": [], "error": "Missing serpapi_api_key."}
+        try:
+            params = urllib.parse.urlencode({"engine": "google", "q": query, "api_key": serpapi_key, "num": max_results})
+            url = f"https://serpapi.com/search.json?{params}"
+            with urllib.request.urlopen(url, timeout=12) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            items = payload.get("organic_results", [])[:max_results]
+            normalized = [{"title": row.get("title", ""), "url": row.get("link", ""), "snippet": row.get("snippet", "")} for row in items]
+            return {"provider": "SerpAPI", "status": "success", "results": normalized, "error": None}
+        except Exception as exc:
+            return {"provider": "SerpAPI", "status": "failed", "results": [], "error": str(exc)}
+
+    if provider == "bing":
         bing_key = (get_config("bing_api_key") or "").strip()
-        if bing_key:
-            try:
-                params = urllib.parse.urlencode({"q": query, "count": max_results})
-                url = f"https://api.bing.microsoft.com/v7.0/search?{params}"
-                req = urllib.request.Request(url, headers={"Ocp-Apim-Subscription-Key": bing_key})
-                with urllib.request.urlopen(req, timeout=12) as resp:
-                    payload = json.loads(resp.read().decode("utf-8"))
-                items = payload.get("webPages", {}).get("value", [])[:max_results]
-                normalized = [
-                    {
-                        "title": row.get("name", ""),
-                        "url": row.get("url", ""),
-                        "snippet": row.get("snippet", ""),
-                    }
-                    for row in items
-                ]
-                return {"ok": True, "provider": "Bing", "results": normalized, "error": None}
-            except Exception as exc:
-                last_error = f"Bing failed: {exc}"
-        else:
-            last_error = "Bing fallback selected but bing_api_key is missing."
-    elif fallback_provider == "custom":
+        if not bing_key:
+            return {"provider": "Bing", "status": "failed", "results": [], "error": "Missing bing_api_key."}
+        try:
+            params = urllib.parse.urlencode({"q": query, "count": max_results})
+            url = f"https://api.bing.microsoft.com/v7.0/search?{params}"
+            req = urllib.request.Request(url, headers={"Ocp-Apim-Subscription-Key": bing_key})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            items = payload.get("webPages", {}).get("value", [])[:max_results]
+            normalized = [{"title": row.get("name", ""), "url": row.get("url", ""), "snippet": row.get("snippet", "")} for row in items]
+            return {"provider": "Bing", "status": "success", "results": normalized, "error": None}
+        except Exception as exc:
+            return {"provider": "Bing", "status": "failed", "results": [], "error": str(exc)}
+
+    if provider == "custom":
         custom_url = (get_config("custom_web_search_url") or "").strip()
         custom_key = (get_config("custom_web_search_api_key") or "").strip()
-        if custom_url:
-            try:
-                sep = "&" if "?" in custom_url else "?"
-                url = f"{custom_url}{sep}{urllib.parse.urlencode({'q': query, 'limit': max_results})}"
-                headers = {"Accept": "application/json"}
-                if custom_key:
-                    headers["Authorization"] = f"Bearer {custom_key}"
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=12) as resp:
-                    payload = json.loads(resp.read().decode("utf-8"))
-                rows = payload.get("results") or payload.get("items") or payload.get("data") or []
-                normalized = []
-                for row in rows[:max_results]:
-                    normalized.append({
-                        "title": row.get("title", ""),
-                        "url": row.get("url") or row.get("link", ""),
-                        "snippet": row.get("snippet") or row.get("description", ""),
-                    })
-                return {"ok": True, "provider": "Custom", "results": normalized, "error": None}
-            except Exception as exc:
-                last_error = f"Custom provider failed: {exc}"
-        else:
-            last_error = "Custom fallback selected but custom_web_search_url is missing."
+        if not custom_url:
+            return {"provider": "Custom", "status": "failed", "results": [], "error": "Missing custom_web_search_url."}
+        try:
+            sep = "&" if "?" in custom_url else "?"
+            url = f"{custom_url}{sep}{urllib.parse.urlencode({'q': query, 'limit': max_results})}"
+            headers = {"Accept": "application/json"}
+            if custom_key:
+                headers["Authorization"] = f"Bearer {custom_key}"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            rows = payload.get("results") or payload.get("items") or payload.get("data") or []
+            normalized = [
+                {"title": row.get("title", ""), "url": row.get("url") or row.get("link", ""), "snippet": row.get("snippet") or row.get("description", "")}
+                for row in rows[:max_results]
+            ]
+            return {"provider": "Custom", "status": "success", "results": normalized, "error": None}
+        except Exception as exc:
+            return {"provider": "Custom", "status": "failed", "results": [], "error": str(exc)}
 
-    return {"ok": False, "provider": None, "results": [], "error": last_error}
+    return {"provider": provider_key or "Unknown", "status": "failed", "results": [], "error": f"Unsupported provider: {provider_key}"}
+
+
+def search_web(query: str, max_results: int = 5) -> Dict[str, Any]:
+    ddg_attempt = _search_with_provider("duckduckgo", query, max_results=max_results)
+    if ddg_attempt["status"] == "success":
+        return ddg_attempt
+
+    configured_fallback = (get_config("web_search_secondary_provider") or get_config("web_fallback_provider") or "").strip().lower()
+    if configured_fallback and configured_fallback not in {"duckduckgo", "ddg"}:
+        fallback_attempt = _search_with_provider(configured_fallback, query, max_results=max_results)
+        if fallback_attempt["status"] == "success":
+            return fallback_attempt
+        return {
+            "provider": fallback_attempt.get("provider"),
+            "status": "failed",
+            "results": [],
+            "error": f"DuckDuckGo failed: {ddg_attempt.get('error')}; fallback failed: {fallback_attempt.get('error')}",
+        }
+
+    return {
+        "provider": "DuckDuckGo",
+        "status": "failed",
+        "results": [],
+        "error": f"DuckDuckGo failed: {ddg_attempt.get('error')}",
+    }
 
 def get_llm(model_type: str, api_key: str = None):
     if model_type == "ollama":
@@ -226,13 +211,13 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
     core_facts_str = "\n".join([f"- {m['fact']}" for m in core_mems]) if core_mems else "None yet."
     
     web_context = ""
-    web_search_status = {"ok": False, "provider": None, "results": [], "error": "Web search not requested."}
+    web_search_status = {"provider": None, "status": "not_requested", "results": [], "error": "Web search not requested."}
     if use_web_search:
         web_search_status = search_web(message)
-        if web_search_status["ok"]:
+        if web_search_status["status"] == "success":
             formatted_results = _format_search_results(web_search_status["results"])
             web_context = (
-                f"\n\n--- LIVE WEB SEARCH RESULTS ({web_search_status['provider']}) FOR '{message}' ---\n"
+                f"\n\n--- LIVE WEB SEARCH RESULTS ({web_search_status['provider']}, status={web_search_status['status']}) FOR '{message}' ---\n"
                 f"{formatted_results}\nUse this real-time information to answer accurately.\n"
             )
         else:
@@ -240,8 +225,9 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
             logger.warning("Web search failed", extra={"error": error_msg})
             web_context = (
                 "\n\n--- LIVE WEB SEARCH STATUS ---\n"
+                "LIVE CLAIMS DISABLED: true\n"
                 f"Web search failed with error: {error_msg}\n"
-                "If results are unavailable, say that clearly instead of inventing web facts.\n"
+                "Do not make live/up-to-date claims. Say search is unavailable and avoid inventing web facts.\n"
             )
 
     file_context = ""

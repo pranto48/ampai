@@ -12,7 +12,7 @@
         <div style="position: fixed; top: 12px; right: 12px; z-index: 10000; display: flex; gap: 8px; align-items: center;">
             <span id="auth-user" class="badge"></span>
             <span id="auth-role" class="badge"></span>
-            <a href="admin.html" class="btn" style="width: auto; text-decoration: none;">Admin</a>
+            <a href="admin.html" class="btn" data-admin-link style="width: auto; text-decoration: none;">Admin</a>
             <button class="btn" data-logout-btn style="width: auto;">Logout</button>
         </div>
         <!-- Update Banner -->
@@ -46,6 +46,13 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                 New Session
             </button>
+            <div class="settings-section" style="margin-top: 10px;">
+                <label>Workspace</label>
+                <div style="display:flex; gap:8px;">
+                    <button id="sidebar-chat-btn" class="btn" style="width:auto; padding:6px 10px;">Chat</button>
+                    <button id="tasks-view-btn" class="btn" style="width:auto; padding:6px 10px;">Tasks</button>
+                </div>
+            </div>
             
             <div class="settings-section">
                 <label for="model-select">Model Provider</label>
@@ -77,7 +84,6 @@
 
             <div class="sessions-container" style="margin-top: 16px;">
                 <h3>Tasks</h3>
-                <button id="tasks-view-btn" class="btn" style="margin-bottom: 8px;">Open Tasks</button>
                 <div id="task-quick-add" style="display: flex; gap: 6px;">
                     <input id="task-quick-add-input" class="modern-input" placeholder="Quick add task from chat..." style="font-size: 0.8rem; padding: 8px;" />
                     <button id="task-quick-add-btn" class="btn icon-btn" title="Add Task">+</button>

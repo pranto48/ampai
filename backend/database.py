@@ -72,6 +72,31 @@ try:
 except Exception:
     pass
 
+DEFAULT_APP_CONFIG_KEYS = [
+    "web_search_secondary_provider",
+    "web_fallback_provider",
+    "serpapi_api_key",
+    "bing_api_key",
+    "custom_web_search_url",
+    "custom_web_search_api_key",
+]
+
+
+def ensure_default_app_config_keys():
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            for key in DEFAULT_APP_CONFIG_KEYS:
+                upsert_stmt = text(
+                    "INSERT INTO app_configs (config_key, config_value) VALUES (:k, :v) "
+                    "ON CONFLICT (config_key) DO NOTHING"
+                )
+                conn.execute(upsert_stmt, {"k": key, "v": ""})
+            conn.commit()
+    except Exception as e:
+        logger.exception("Error ensuring default config keys", exc_info=e)
+
 
 def migrate_session_metadata_schema():
     if not engine:
@@ -91,10 +116,11 @@ def migrate_session_metadata_schema():
                 conn.execute(text("UPDATE session_metadata SET updated_at = NOW() WHERE updated_at IS NULL"))
             conn.commit()
     except Exception as e:
-        print(f"Error migrating session metadata schema: {e}")
+        logger.exception("Error migrating session metadata schema", exc_info=e)
 
 
 migrate_session_metadata_schema()
+ensure_default_app_config_keys()
 
 
 def _load_fernet_keys() -> List[Fernet]:
@@ -213,7 +239,7 @@ def _upsert_session_metadata(session_id: str, category: Optional[str] = None, pi
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error upserting session metadata: {e}")
+        logger.exception("Error upserting session metadata", exc_info=e)
         return False
 
 
@@ -286,7 +312,10 @@ def get_all_sessions(query: Optional[str] = None, category: Optional[str] = None
                 })
             if query:
                 query_l = query.lower()
-                output = [s for s in output if query_l in s["session_id"].lower()]
+                output = [
+                    s for s in output
+                    if query_l in s["session_id"].lower() or query_l in (s["category"] or "").lower()
+                ]
             if category:
                 output = [s for s in output if s["category"] == category]
             if archived is not None:
@@ -376,21 +405,19 @@ def get_duplicate_message_counts() -> Dict[str, int]:
         return {}
 
 def set_session_category(session_id: str, category: str):
-    if not engine:
-        return False
-    try:
-        with engine.connect() as conn:
-            # Upsert logic for sqlite: INSERT OR REPLACE
-            upsert_stmt = text(
-                "INSERT INTO session_metadata (session_id, category) VALUES (:s, :c) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category"
-            )
-            conn.execute(upsert_stmt, {"s": session_id, "c": category})
-            conn.commit()
-            return True
-    except Exception as e:
-        logger.exception("Error setting category", exc_info=e)
-        return False
+    return _upsert_session_metadata(session_id=session_id, category=category)
+
+
+def set_session_pinned(session_id: str, value: bool):
+    return _upsert_session_metadata(session_id=session_id, pinned=value)
+
+
+def set_session_archived(session_id: str, value: bool):
+    return _upsert_session_metadata(session_id=session_id, archived=value)
+
+
+def touch_session_updated_at(session_id: str):
+    return _upsert_session_metadata(session_id=session_id, touch_updated_at=True)
 
 
 def set_session_pinned(session_id: str, pinned: bool):
