@@ -68,7 +68,33 @@
     <div class="admin-container">
         <div class="admin-header">
             <h1>Admin Dashboard</h1>
-            <a href="index.html" class="btn" style="background: rgba(255,255,255,0.1); color: white; text-decoration: none;">&larr; Back to Chat</a>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span id="auth-user" class="badge"></span>
+                <span id="auth-role" class="badge"></span>
+                <a href="index.html" class="btn" style="background: rgba(255,255,255,0.1); color: white; text-decoration: none;">&larr; Back to Chat</a>
+                <button class="btn" data-logout-btn style="width: auto;">Logout</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>System Diagnostics</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Recent health checks and scheduler activity.</p>
+            <div style="display: flex; align-items: center; gap: 10px; margin-top: 12px;">
+                <button id="refresh-health-btn" class="btn" style="width: auto;">Refresh Health</button>
+                <span id="health-updated-at" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
+            </div>
+            <div id="health-status-grid" style="display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 12px; margin-top: 16px;"></div>
+            <pre id="scheduler-diagnostics" style="margin-top: 14px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; font-size: 0.82rem; color: var(--text-secondary); white-space: pre-wrap;"></pre>
+        </div>
+
+        <div class="card">
+            <h2>Admin Diagnostics</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Recent scheduler runs, last job errors, and config sanity checks.</p>
+            <div style="display: flex; align-items: center; gap: 10px; margin-top: 12px;">
+                <button id="refresh-admin-diagnostics-btn" class="btn" style="width: auto;">Refresh Diagnostics</button>
+                <span id="admin-diagnostics-updated-at" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
+            </div>
+            <pre id="admin-diagnostics-content" style="margin-top: 14px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; font-size: 0.82rem; color: var(--text-secondary); white-space: pre-wrap;"></pre>
         </div>
 
         <div class="card">
@@ -154,6 +180,84 @@
                     <option value="anythingllm">AnythingLLM Workspace</option>
                 </select>
             </div>
+
+            <div style="margin-bottom: 20px;">
+                <h3>Web Search Fallback Provider</h3>
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Secondary Provider (used after DuckDuckGo)</label>
+                <select id="config-web-search-secondary-provider" class="modern-input" style="width: 320px; margin-bottom: 12px;">
+                    <option value="">None</option>
+                    <option value="serpapi">SerpAPI</option>
+                    <option value="bing">Bing</option>
+                    <option value="custom">Custom Provider</option>
+                </select>
+
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Fallback Provider (used if DuckDuckGo fails)</label>
+                <select id="config-web-fallback-provider" class="modern-input" style="width: 320px; margin-bottom: 12px;">
+                    <option value="">None</option>
+                    <option value="serpapi">SerpAPI</option>
+                    <option value="bing">Bing</option>
+                    <option value="custom">Custom Provider</option>
+                </select>
+
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">SerpAPI Key</label>
+                <input type="password" id="config-serpapi-key" class="modern-input" placeholder="Your SerpAPI key" style="margin-bottom: 12px; max-width: 420px;">
+
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Bing API Key</label>
+                <input type="password" id="config-bing-key" class="modern-input" placeholder="Your Bing API key" style="margin-bottom: 12px; max-width: 420px;">
+
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Custom Search URL</label>
+                <input type="text" id="config-custom-web-search-url" class="modern-input" placeholder="https://your-provider.example/search" style="margin-bottom: 12px; max-width: 620px;">
+
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Custom Search API Key (optional)</label>
+                <input type="password" id="config-custom-web-search-api-key" class="modern-input" placeholder="Bearer token or API key" style="margin-bottom: 12px; max-width: 420px;">
+            </div>
+
+            <div style="margin-bottom: 20px;">
+                <h3>Email Integrations & Digest</h3>
+                <p style="color: var(--text-secondary); font-size: 0.85rem;">Paste provider OAuth credential JSON for secure storage. Format for each provider: {"client_id":"...","client_secret":"...","refresh_token":"...","access_token":"...","expires_at":0} plus Outlook optional "tenant_id".</p>
+                <div style="display:flex; align-items:center; gap: 10px; flex-wrap: wrap; margin: 8px 0 14px;">
+                    <label style="display:block; font-size:0.85rem; color:var(--text-secondary);">Provider</label>
+                    <select id="email-provider-select" class="modern-input" style="max-width: 180px;">
+                        <option value="outlook">Outlook</option>
+                        <option value="gmail">Gmail</option>
+                    </select>
+                    <button id="connect-email-provider-btn" class="btn primary-btn" style="width:auto;">Connect Provider</button>
+                    <button id="disconnect-email-provider-btn" class="btn" style="width:auto; background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.4); color:#ef4444;">Disconnect Provider</button>
+                    <span id="email-provider-status" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
+                </div>
+
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Outlook Graph Credentials (JSON)</label>
+                <textarea id="config-outlook-credentials" class="modern-input" rows="4" style="margin-bottom: 14px; width: 100%;"></textarea>
+
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Gmail API Credentials (JSON)</label>
+                <textarea id="config-gmail-credentials" class="modern-input" rows="4" style="margin-bottom: 14px; width: 100%;"></textarea>
+
+                <div style="display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 12px;">
+                    <div>
+                        <label style="display:block; font-size:0.85rem; color:var(--text-secondary); margin-bottom:6px;">Digest Provider</label>
+                        <select id="config-email-digest-provider" class="modern-input">
+                            <option value="outlook">Outlook</option>
+                            <option value="gmail">Gmail</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:0.85rem; color:var(--text-secondary); margin-bottom:6px;">Digest Hour (0-23)</label>
+                        <input id="config-email-digest-hour" type="number" min="0" max="23" class="modern-input" value="7">
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:0.85rem; color:var(--text-secondary); margin-bottom:6px;">Digest Minute (0-59)</label>
+                        <input id="config-email-digest-minute" type="number" min="0" max="59" class="modern-input" value="30">
+                    </div>
+                    <div>
+                        <label style="display:block; font-size:0.85rem; color:var(--text-secondary); margin-bottom:6px;">Timezone</label>
+                        <input id="config-email-digest-timezone" type="text" class="modern-input" placeholder="UTC">
+                    </div>
+                </div>
+                <div style="margin-top: 12px; display:flex; align-items:center; gap: 10px;">
+                    <button id="save-email-schedule-btn" class="btn" style="width:auto;">Save Email Schedule</button>
+                    <span id="email-schedule-status" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
+                </div>
+            </div>
             
             <button id="save-configs-btn" class="btn primary-btn" style="width: auto; margin-top: 10px;">Save Configurations</button>
             <span id="config-status" style="margin-left: 12px; font-size: 0.9rem;"></span>
@@ -231,6 +335,7 @@
         </div>
     </div>
 
+    <script src="auth.js"></script>
     <script src="admin.js"></script>
 </body>
 </html>

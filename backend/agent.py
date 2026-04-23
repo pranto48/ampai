@@ -1,19 +1,29 @@
 import os
 import re
-from langchain_community.chat_message_histories import SQLChatMessageHistory, RedisChatMessageHistory
+import json
+import urllib.parse
+import urllib.request
+from langchain_community.chat_message_histories import RedisChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from memory_indexer import MemoryIndexer
-from typing import List, Dict
+from typing import List, Dict, Any
+
+from logging_utils import get_logger
 
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_models import ChatOllama
-from database import DATABASE_URL, get_config, get_core_memories, add_core_memory
+from database import get_config, get_core_memories, add_core_memory, create_task, get_sql_chat_history
 
 from langchain_core.chat_history import BaseChatMessageHistory
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+logger = get_logger(__name__)
+
+
+
+
 
 
 def get_redis_history(session_id: str):
@@ -140,7 +150,7 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
                         "image_url": {"url": f"data:{attachment['type']};base64,{encoded_string}"}
                     })
             except Exception as e:
-                print(f"Image read error: {e}")
+                logger.exception("Image read error", exc_info=e)
 
     agent_directives = (
         "You are an intelligent AI assistant with a global memory system.\n"
@@ -149,7 +159,9 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
         "IMPORTANT DIRECTIVE: You must autonomously extract reliable information, important facts, or preferences about the user. "
         "If the user shares an important fact or explicitly asks you to remember something, "
         "you MUST append the following exact tag anywhere in your response: [SAVE_MEMORY: <the fact to save>]. "
-        "Only save high-quality, reliable information.\n\n"
+        "Only save high-quality, reliable information.\n"
+        "If the user clearly asks to create a task, append a tag in this exact format: "
+        "[CREATE_TASK: title=<task title>|description=<details>|priority=<low/medium/high>|due=<ISO datetime optional>].\n\n"
         f"{web_context}"
         f"{file_context}"
     )
