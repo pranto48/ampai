@@ -207,6 +207,16 @@
             <div style="margin-bottom: 20px;">
                 <h3>Email Integrations & Digest</h3>
                 <p style="color: var(--text-secondary); font-size: 0.85rem;">Paste provider OAuth credential JSON for secure storage. Format for each provider: {"client_id":"...","client_secret":"...","refresh_token":"...","access_token":"...","expires_at":0} plus Outlook optional "tenant_id".</p>
+                <div style="display:flex; align-items:center; gap: 10px; flex-wrap: wrap; margin: 8px 0 14px;">
+                    <label style="display:block; font-size:0.85rem; color:var(--text-secondary);">Provider</label>
+                    <select id="email-provider-select" class="modern-input" style="max-width: 180px;">
+                        <option value="outlook">Outlook</option>
+                        <option value="gmail">Gmail</option>
+                    </select>
+                    <button id="connect-email-provider-btn" class="btn primary-btn" style="width:auto;">Connect Provider</button>
+                    <button id="disconnect-email-provider-btn" class="btn" style="width:auto; background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.4); color:#ef4444;">Disconnect Provider</button>
+                    <span id="email-provider-status" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
+                </div>
 
                 <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Outlook Graph Credentials (JSON)</label>
                 <textarea id="config-outlook-credentials" class="modern-input" rows="4" style="margin-bottom: 14px; width: 100%;"></textarea>
@@ -234,6 +244,10 @@
                         <label style="display:block; font-size:0.85rem; color:var(--text-secondary); margin-bottom:6px;">Timezone</label>
                         <input id="config-email-digest-timezone" type="text" class="modern-input" placeholder="UTC">
                     </div>
+                </div>
+                <div style="margin-top: 12px; display:flex; align-items:center; gap: 10px;">
+                    <button id="save-email-schedule-btn" class="btn" style="width:auto;">Save Email Schedule</button>
+                    <span id="email-schedule-status" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
                 </div>
             </div>
             

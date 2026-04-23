@@ -59,25 +59,121 @@ document.addEventListener('DOMContentLoaded', () => {
     const healthStatusGrid = document.getElementById('health-status-grid');
     const schedulerDiagnostics = document.getElementById('scheduler-diagnostics');
     const healthUpdatedAt = document.getElementById('health-updated-at');
-    const refreshAdminDiagnosticsBtn = document.getElementById('refresh-admin-diagnostics-btn');
-    const adminDiagnosticsUpdatedAt = document.getElementById('admin-diagnostics-updated-at');
-    const adminDiagnosticsContent = document.getElementById('admin-diagnostics-content');
+    const emailProviderSelect = document.getElementById('email-provider-select');
+    const connectEmailProviderBtn = document.getElementById('connect-email-provider-btn');
+    const disconnectEmailProviderBtn = document.getElementById('disconnect-email-provider-btn');
+    const emailProviderStatus = document.getElementById('email-provider-status');
+    const saveEmailScheduleBtn = document.getElementById('save-email-schedule-btn');
+    const emailScheduleStatus = document.getElementById('email-schedule-status');
 
-    const initializeAdmin = async () => {
-        const user = await enforceAuth({ requiredRole: 'admin' });
-        if (!user) return;
-        loadAdminSessions();
-        loadConfigs();
-        loadCoreMemories();
-        loadSystemHealth();
-        setupConfigChangeTracking();
-        setupClearKeyButtons();
-    };
-    initializeAdmin();
+    loadAdminSessions();
+    loadConfigs();
+    loadCoreMemories();
+    loadSystemHealth();
+    loadEmailIntegrationStatus();
+    setupConfigChangeTracking();
+    setupClearKeyButtons();
     refreshHealthBtn.addEventListener('click', loadSystemHealth);
-    refreshAdminDiagnosticsBtn.addEventListener('click', loadAdminDiagnostics);
-    setInterval(loadSystemHealth, 30000);
-    setInterval(loadAdminDiagnostics, 30000);
+    connectEmailProviderBtn?.addEventListener('click', connectEmailProvider);
+    disconnectEmailProviderBtn?.addEventListener('click', disconnectEmailProvider);
+    saveEmailScheduleBtn?.addEventListener('click', saveEmailSchedule);
+    emailProviderSelect?.addEventListener('change', loadEmailIntegrationStatus);
+
+    function getSelectedCredentialText() {
+        return emailProviderSelect?.value === 'gmail'
+            ? (configInputs.integration_email_gmail_credentials.value || '').trim()
+            : (configInputs.integration_email_outlook_credentials.value || '').trim();
+    }
+
+    async function loadEmailIntegrationStatus() {
+        try {
+            const response = await fetch('/api/admin/integrations/email/status');
+            const data = await response.json();
+            const provider = emailProviderSelect?.value || 'outlook';
+            const details = data[provider] || {};
+            const isConnected = !!details.connected;
+            emailProviderStatus.textContent = isConnected
+                ? `${provider} connected${details.expires_at ? ` (expires at ${new Date(details.expires_at * 1000).toLocaleString()})` : ''}`
+                : `${provider} not connected`;
+            emailProviderStatus.style.color = isConnected ? '#10b981' : 'var(--text-secondary)';
+        } catch (error) {
+            emailProviderStatus.textContent = `Failed to load integration status: ${error.message}`;
+            emailProviderStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function connectEmailProvider() {
+        const provider = emailProviderSelect?.value || 'outlook';
+        let credentials;
+        try {
+            credentials = JSON.parse(getSelectedCredentialText() || '{}');
+        } catch (error) {
+            emailProviderStatus.textContent = 'Invalid credentials JSON.';
+            emailProviderStatus.style.color = '#ef4444';
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/admin/integrations/email/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ provider, credentials })
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to connect provider');
+            emailProviderStatus.textContent = `${provider} connected successfully.`;
+            emailProviderStatus.style.color = '#10b981';
+            await loadEmailIntegrationStatus();
+        } catch (error) {
+            emailProviderStatus.textContent = `Connect failed: ${error.message}`;
+            emailProviderStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function disconnectEmailProvider() {
+        const provider = emailProviderSelect?.value || 'outlook';
+        try {
+            const response = await fetch('/api/admin/integrations/email/disconnect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ provider })
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to disconnect provider');
+            emailProviderStatus.textContent = `${provider} disconnected.`;
+            emailProviderStatus.style.color = 'var(--text-secondary)';
+            await loadEmailIntegrationStatus();
+        } catch (error) {
+            emailProviderStatus.textContent = `Disconnect failed: ${error.message}`;
+            emailProviderStatus.style.color = '#ef4444';
+        }
+    }
+
+    async function saveEmailSchedule() {
+        const payload = {
+            hour: Number.parseInt(configInputs.email_digest_hour.value || '7', 10),
+            minute: Number.parseInt(configInputs.email_digest_minute.value || '30', 10),
+            timezone: (configInputs.email_digest_timezone.value || 'UTC').trim(),
+            provider: (configInputs.email_digest_provider.value || 'outlook').trim().toLowerCase()
+        };
+        emailScheduleStatus.textContent = 'Saving...';
+        emailScheduleStatus.style.color = 'var(--text-secondary)';
+        try {
+            const response = await fetch('/api/admin/integrations/email/schedule', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Failed to save schedule');
+            emailScheduleStatus.textContent = 'Email digest schedule saved.';
+            emailScheduleStatus.style.color = '#10b981';
+            setTimeout(() => { emailScheduleStatus.textContent = ''; }, 4000);
+        } catch (error) {
+            emailScheduleStatus.textContent = `Schedule save failed: ${error.message}`;
+            emailScheduleStatus.style.color = '#ef4444';
+        }
+    }
 
     function renderHealthTile(name, ok, details) {
         const tile = document.createElement('div');
