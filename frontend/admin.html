@@ -68,7 +68,12 @@
     <div class="admin-container">
         <div class="admin-header">
             <h1>Admin Dashboard</h1>
-            <a href="index.html" class="btn" style="background: rgba(255,255,255,0.1); color: white; text-decoration: none;">&larr; Back to Chat</a>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span id="auth-user" class="badge"></span>
+                <span id="auth-role" class="badge"></span>
+                <a href="index.html" class="btn" style="background: rgba(255,255,255,0.1); color: white; text-decoration: none;">&larr; Back to Chat</a>
+                <button class="btn" data-logout-btn style="width: auto;">Logout</button>
+            </div>
         </div>
 
         <div class="card">
@@ -223,6 +228,7 @@
         </div>
     </div>
 
+    <script src="auth.js"></script>
     <script src="admin.js"></script>
 </body>
 </html>
