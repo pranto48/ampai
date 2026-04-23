@@ -58,14 +58,23 @@ document.addEventListener('DOMContentLoaded', () => {
     const healthStatusGrid = document.getElementById('health-status-grid');
     const schedulerDiagnostics = document.getElementById('scheduler-diagnostics');
     const healthUpdatedAt = document.getElementById('health-updated-at');
+    const adminCurrentPasswordInput = document.getElementById('admin-current-password');
+    const adminNewPasswordInput = document.getElementById('admin-new-password');
+    const adminChangePasswordBtn = document.getElementById('admin-change-password-btn');
+    const adminPasswordStatus = document.getElementById('admin-password-status');
 
-    loadAdminSessions();
-    loadConfigs();
-    loadCoreMemories();
-    loadSystemHealth();
-    setupConfigChangeTracking();
-    setupClearKeyButtons();
-    refreshHealthBtn.addEventListener('click', loadSystemHealth);
+    const initializeAdmin = async () => {
+        const user = await enforceAuth({ requiredRole: 'admin' });
+        if (!user) return;
+        loadAdminSessions();
+        loadConfigs();
+        loadCoreMemories();
+        loadSystemHealth();
+        setupConfigChangeTracking();
+        setupClearKeyButtons();
+        refreshHealthBtn.addEventListener('click', loadSystemHealth);
+    };
+    initializeAdmin();
 
     function renderHealthTile(name, ok, details) {
         const tile = document.createElement('div');
@@ -420,4 +429,40 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         reader.readAsText(file);
     });
+
+    if (adminChangePasswordBtn) {
+        adminChangePasswordBtn.addEventListener('click', async () => {
+            const currentPassword = adminCurrentPasswordInput.value;
+            const newPassword = adminNewPasswordInput.value;
+            adminPasswordStatus.textContent = '';
+
+            if (!currentPassword || !newPassword) {
+                adminPasswordStatus.textContent = 'Enter current and new password.';
+                adminPasswordStatus.style.color = '#ef4444';
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/admin/change-password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        current_password: currentPassword,
+                        new_password: newPassword,
+                    }),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Failed to change password');
+                }
+                adminCurrentPasswordInput.value = '';
+                adminNewPasswordInput.value = '';
+                adminPasswordStatus.textContent = 'Password updated.';
+                adminPasswordStatus.style.color = '#10b981';
+            } catch (error) {
+                adminPasswordStatus.textContent = error.message;
+                adminPasswordStatus.style.color = '#ef4444';
+            }
+        });
+    }
 });

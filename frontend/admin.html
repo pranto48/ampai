@@ -68,11 +68,33 @@
     <div class="admin-container">
         <div class="admin-header">
             <h1>Admin Dashboard</h1>
-            <div style="display: flex; align-items: center; gap: 8px;">
+            <div class="user-menu-container" style="position: static;">
                 <span id="auth-user" class="badge"></span>
                 <span id="auth-role" class="badge"></span>
-                <a href="index.html" class="btn" style="background: rgba(255,255,255,0.1); color: white; text-decoration: none;">&larr; Back to Chat</a>
-                <button class="btn" data-logout-btn style="width: auto;">Logout</button>
+                <button class="btn user-menu-trigger" type="button" data-user-menu-btn>Menu ▾</button>
+                <div class="user-menu-panel" data-user-menu-panel>
+                    <a href="index.html" class="user-menu-item">&larr; Back to Chat</a>
+                    <button class="user-menu-item" data-logout-btn type="button">Logout</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Admin Password</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Change the admin password used for login.</p>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 14px;">
+                <div>
+                    <label style="display:block; margin-bottom:6px;">Current Password</label>
+                    <input type="password" id="admin-current-password" class="modern-input" placeholder="Current password">
+                </div>
+                <div>
+                    <label style="display:block; margin-bottom:6px;">New Password</label>
+                    <input type="password" id="admin-new-password" class="modern-input" placeholder="At least 8 characters">
+                </div>
+            </div>
+            <div style="margin-top: 12px; display: flex; gap: 10px; align-items: center;">
+                <button id="admin-change-password-btn" class="btn primary-btn" style="width: auto;">Change Password</button>
+                <span id="admin-password-status" style="font-size: 0.9rem;"></span>
             </div>
         </div>
 
