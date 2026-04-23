@@ -3,7 +3,7 @@ import re
 import json
 import urllib.parse
 import urllib.request
-from langchain_community.chat_message_histories import SQLChatMessageHistory, RedisChatMessageHistory
+from langchain_community.chat_message_histories import RedisChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from memory_indexer import MemoryIndexer
@@ -13,7 +13,7 @@ from typing import List, Dict, Any
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_models import ChatOllama
-from database import DATABASE_URL, get_config, get_core_memories, add_core_memory, create_task
+from database import get_config, get_core_memories, add_core_memory, create_task, get_sql_chat_history
 
 from langchain_core.chat_history import BaseChatMessageHistory
 
@@ -386,7 +386,7 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
             content += f"\n\n✅ Created {len(created_tasks)} task(s): #{', #'.join(str(tid) for tid in created_tasks)}"
     
     # Save Raw History to PostgreSQL for Admin Logging/Export
-    sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+    sql_history = get_sql_chat_history(session_id)
     
     # Store images locally as markdown in raw history
     message_log = message
