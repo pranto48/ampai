@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+langchain
+langchain-community
+langchain-openai
+langchain-google-genai
+langchain-anthropic
+python-dotenv
+psycopg2-binary
+langchain-postgres
+redis
+python-multipart
+PyPDF2
+duckduckgo-search
+APScheduler

@@ -1,0 +1,44 @@
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: agent_postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=ampai
+      - POSTGRES_PASSWORD=ampai
+      - POSTGRES_DB=ampai
+    volumes:
+      - ./agent_data/pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:alpine
+    container_name: agent_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./agent_data/redisdata:/data
+
+  agent-web-app:
+    build: .
+    container_name: ai_agent_web
+    depends_on:
+      - db
+      - redis
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./agent_data:/app/data
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+    environment:
+      - DATABASE_URL=postgresql://ampai:ampai@db:5432/ampai
+      - REDIS_URL=redis://redis:6379/0
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
