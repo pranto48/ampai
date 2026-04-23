@@ -103,7 +103,13 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
             search_results = search.run(message)
             web_context = f"\n\n--- LIVE WEB SEARCH RESULTS FOR '{message}' ---\n{search_results}\nUse this real-time information to answer accurately.\n"
         except Exception as e:
-            print(f"Web search error: {e}")
+            error_msg = str(e)
+            print(f"Web search error: {error_msg}")
+            web_context = (
+                "\n\n--- LIVE WEB SEARCH STATUS ---\n"
+                f"Web search failed with error: {error_msg}\n"
+                "If results are unavailable, say that clearly instead of inventing web facts.\n"
+            )
 
     file_context = ""
     image_contents = []
