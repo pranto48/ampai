@@ -1,8 +1,39 @@
 document.addEventListener('DOMContentLoaded', () => {
+    async function ensureAuth() {
+        const token = localStorage.getItem('ampai_token') || '';
+        if (!token) {
+            alert('Please login from chat page first.');
+            window.location.href = 'index.html';
+            return false;
+        }
+        const res = await apiFetch('/api/auth/whoami', { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!res.ok) {
+            alert('Authentication expired.');
+            localStorage.removeItem('ampai_token');
+            window.location.href = 'index.html';
+            return false;
+        }
+        const who = await res.json();
+        if (who.role !== 'admin') {
+            alert('Admin token required.');
+            window.location.href = 'index.html';
+            return false;
+        }
+        return true;
+    }
+
+    async function apiFetch(url, options = {}) {
+        const token = localStorage.getItem('ampai_token') || '';
+        const headers = options.headers || {};
+        headers['Authorization'] = `Bearer ${token}`;
+        return fetch(url, { ...options, headers });
+    }
     const memoriesTbody = document.getElementById('memories-tbody');
     const importFile = document.getElementById('import-file');
     const importBtn = document.getElementById('import-btn');
     const importStatus = document.getElementById('import-status');
+    const usersTbody = document.getElementById('users-tbody');
+    const createUserBtn = document.getElementById('create-user-btn');
 
     const logModal = document.getElementById('log-modal');
     const closeModalBtn = document.getElementById('close-modal');
@@ -20,10 +51,14 @@ document.addEventListener('DOMContentLoaded', () => {
         'anthropic_api_key': document.getElementById('config-anthropic-key'),
         'openrouter_api_key': document.getElementById('config-openrouter-key'),
         'openrouter_model': document.getElementById('config-openrouter-model'),
+        'imap_host': document.getElementById('config-imap-host'),
+        'imap_username': document.getElementById('config-imap-username'),
+        'imap_password': document.getElementById('config-imap-password'),
         'anythingllm_base_url': document.getElementById('config-anythingllm-url'),
         'anythingllm_api_key': document.getElementById('config-anythingllm-key'),
         'anythingllm_workspace': document.getElementById('config-anythingllm-workspace'),
         'default_model': document.getElementById('config-default-model'),
+        'web_search_secondary_provider': document.getElementById('config-web-search-secondary-provider'),
         'web_fallback_provider': document.getElementById('config-web-fallback-provider'),
         'serpapi_api_key': document.getElementById('config-serpapi-key'),
         'bing_api_key': document.getElementById('config-bing-key'),
@@ -194,7 +229,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadCoreMemories() {
         try {
-            const res = await fetch('/api/admin/core-memories');
+            const res = await apiFetch('/api/admin/core-memories');
             const data = await res.json();
             coreMemoriesContainer.innerHTML = '';
             
@@ -223,7 +258,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     delBtn.style.fontSize = '1.2rem';
                     delBtn.style.lineHeight = '1';
                     delBtn.onclick = async () => {
-                        await fetch(`/api/admin/core-memories/${mem.id}`, { method: 'DELETE' });
+                        await apiFetch(`/api/admin/core-memories/${mem.id}`, { method: 'DELETE' });
                         loadCoreMemories();
                     };
                     
@@ -241,7 +276,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadConfigs() {
         try {
-            const res = await fetch('/api/admin/configs');
+            const res = await apiFetch('/api/admin/configs');
             const data = await res.json();
             for (const [key, input] of Object.entries(configInputs)) {
                 if (input.type === 'checkbox') {
@@ -285,7 +320,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const res = await fetch('/api/admin/configs', {
+            const res = await apiFetch('/api/admin/configs', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ configs: payload })
@@ -308,7 +343,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadAdminSessions() {
         try {
-            const response = await fetch('/api/sessions');
+            const response = await apiFetch('/api/sessions');
             const data = await response.json();
             
             memoriesTbody.innerHTML = '';
@@ -365,7 +400,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function exportMemory(sessionId) {
         try {
-            const response = await fetch(`/api/export/${sessionId}`);
+            const response = await apiFetch(`/api/export/${sessionId}`);
             const data = await response.json();
             
             const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
@@ -386,7 +421,7 @@ document.addEventListener('DOMContentLoaded', () => {
         logModal.classList.add('show');
 
         try {
-            const res = await fetch(`/api/history/${sessionId}`);
+            const res = await apiFetch(`/api/history/${sessionId}`);
             const data = await res.json();
             
             modalChatBox.innerHTML = ''; // clear loading
@@ -423,6 +458,82 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+
+    async function loadHealth() {
+        try {
+            const res = await apiFetch('/api/health');
+            if (!res.ok) return;
+            const data = await res.json();
+            const el = document.createElement('div');
+            el.className = 'card';
+            el.innerHTML = `<h2>Diagnostics</h2><pre style="white-space:pre-wrap;">${JSON.stringify(data, null, 2)}</pre>`;
+            document.querySelector('.admin-container')?.appendChild(el);
+        } catch (e) { console.error(e); }
+    }
+
+
+    async function loadUsers() {
+        if (!usersTbody) return;
+        try {
+            const res = await apiFetch('/api/admin/users');
+            const data = await res.json();
+            const users = data.users || [];
+            usersTbody.innerHTML = users.map(u => `
+                <tr>
+                    <td>${u.id}</td>
+                    <td>${u.username}</td>
+                    <td>
+                        <select data-role-user-id="${u.id}" class="modern-input" style="padding:4px 8px; font-size:0.8rem; width:100px;">
+                            <option value="user" ${u.role === 'user' ? 'selected' : ''}>user</option>
+                            <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>admin</option>
+                        </select>
+                    </td>
+                    <td><button data-del-user-id="${u.id}" class="btn" style="width:auto; padding:6px 10px;">Delete</button></td>
+                </tr>
+            `).join('') || '<tr><td colspan="4" style="text-align:center;">No users</td></tr>';
+        } catch (e) {
+            console.error('Failed to load users', e);
+        }
+    }
+
+    if (createUserBtn) {
+        createUserBtn.addEventListener('click', async () => {
+            const username = document.getElementById('new-username')?.value?.trim();
+            const password = document.getElementById('new-password')?.value || '';
+            const role = document.getElementById('new-role')?.value || 'user';
+            if (!username || !password) return alert('Username and password required');
+            const res = await apiFetch('/api/admin/users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, role })
+            });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || 'Create failed');
+            document.getElementById('new-username').value = '';
+            document.getElementById('new-password').value = '';
+            loadUsers();
+        });
+    }
+
+    document.addEventListener('change', async (e) => {
+        const userId = e.target?.getAttribute?.('data-role-user-id');
+        if (!userId) return;
+        await apiFetch(`/api/admin/users/${userId}/role`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ role: e.target.value })
+        });
+        loadUsers();
+    });
+
+    document.addEventListener('click', async (e) => {
+        const userId = e.target?.getAttribute?.('data-del-user-id');
+        if (!userId) return;
+        if (!confirm('Delete this user?')) return;
+        await apiFetch(`/api/admin/users/${userId}`, { method: 'DELETE' });
+        loadUsers();
+    });
+
     closeModalBtn.addEventListener('click', () => {
         logModal.classList.remove('show');
     });
@@ -456,7 +567,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 importStatus.textContent = "Importing...";
                 importStatus.style.color = "var(--text-secondary)";
 
-                const response = await fetch('/api/import', {
+                const response = await apiFetch('/api/import', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({

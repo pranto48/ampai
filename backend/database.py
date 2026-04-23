@@ -1,5 +1,6 @@
 import os
-import json
+import logging
+import hashlib
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Tuple
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
@@ -7,8 +8,6 @@ from cryptography.fernet import Fernet, InvalidToken
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from logging_utils import get_logger
 
-# Allow overriding for local testing vs docker
-# Default to Postgres container format
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
 CHAT_HISTORY_TABLE = os.getenv("CHAT_HISTORY_TABLE", "chat_message_store")
 
@@ -17,6 +16,7 @@ metadata = MetaData()
 ENCRYPTED_PREFIX = "enc::"
 logger = get_logger(__name__)
 
+# LangChain SQLChatMessageHistory compatibility table.
 message_store = Table(
     'message_store', metadata,
     Column('id', Integer, primary_key=True),
@@ -28,9 +28,9 @@ session_metadata = Table(
     'session_metadata', metadata,
     Column('session_id', String, primary_key=True),
     Column('category', String, default='Uncategorized'),
-    Column('pinned', Integer, nullable=False, default=0),
-    Column('archived', Integer, nullable=False, default=0),
-    Column('updated_at', DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    Column('pinned', Boolean, default=False),
+    Column('archived', Boolean, default=False),
+    Column('updated_at', String, default=lambda: datetime.now(timezone.utc).isoformat())
 )
 
 app_configs = Table(
@@ -94,12 +94,69 @@ tasks = Table(
     "tasks",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("title", String, nullable=False),
-    Column("description", String),
-    Column("status", String, nullable=False, default="todo"),
-    Column("priority", String, nullable=False, default="medium"),
-    Column("due_at", DateTime(timezone=True), nullable=True),
+    Column("username", String, nullable=False),
     Column("session_id", String, nullable=True),
+    Column("filename", String, nullable=False),
+    Column("url", String, nullable=False),
+    Column("mime_type", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
+memory_groups = Table(
+    "memory_groups",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String, nullable=False),
+    Column("description", String, nullable=True),
+    Column("created_by", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
+memory_group_members = Table(
+    "memory_group_members",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("group_id", Integer, nullable=False),
+    Column("username", String, nullable=False),
+)
+
+memory_group_sessions = Table(
+    "memory_group_sessions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("group_id", Integer, nullable=False),
+    Column("session_id", String, nullable=False),
+)
+
+tasks = Table(
+    'tasks', metadata,
+    Column('id', Integer, primary_key=True, autoincrement=True),
+    Column('title', String),
+    Column('description', String),
+    Column('status', String, default='todo'),
+    Column('priority', String, default='medium'),
+    Column('due_at', String),
+    Column('session_id', String),
+    Column('created_at', String, default=lambda: datetime.now(timezone.utc).isoformat()),
+    Column('updated_at', String, default=lambda: datetime.now(timezone.utc).isoformat())
+)
+
+users = Table(
+    "users",
+    metadata,
+    Column("username", String, primary_key=True),
+    Column("role", String, nullable=False, default="user"),
+    Column("password_hash", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
+users = Table(
+    "users",
+    metadata,
+    Column("username", String, primary_key=True),
+    Column("role", String, nullable=False, default="user"),
+    Column("password_hash", String, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
@@ -164,108 +221,57 @@ def _load_fernet_keys() -> List[Fernet]:
     return fernets
 
 
-def encrypt_config_value(value: Optional[str]) -> Optional[str]:
-    if value is None or value == "":
-        return value
-    if value.startswith(ENCRYPTED_PREFIX):
-        return value
-
-    fernets = _load_fernet_keys()
-    if not fernets:
-        return value
-
-    token = fernets[0].encrypt(value.encode("utf-8")).decode("utf-8")
-    return f"{ENCRYPTED_PREFIX}{token}"
+users = Table(
+    'users', metadata,
+    Column('id', Integer, primary_key=True, autoincrement=True),
+    Column('username', String, unique=True),
+    Column('password_hash', String),
+    Column('role', String, default='user'),
+    Column('created_at', String, default=lambda: datetime.now(timezone.utc).isoformat())
+)
 
 
-def decrypt_config_value(value: Optional[str]) -> Optional[str]:
-    if value is None or value == "":
-        return value
-    if not value.startswith(ENCRYPTED_PREFIX):
-        return value
-
-    token = value[len(ENCRYPTED_PREFIX):]
-    fernets = _load_fernet_keys()
-    for f in fernets:
-        try:
-            return f.decrypt(token.encode("utf-8")).decode("utf-8")
-        except InvalidToken:
-            continue
-        except Exception:
-            continue
-    return None
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-def migrate_app_config_encryption() -> dict:
+try:
+    engine = create_engine(DATABASE_URL)
+    metadata.create_all(engine)
+except Exception:
+    pass
+
+
+def get_sql_chat_history(session_id: str):
+    """Compatibility helper used by older agent/main revisions."""
+    return SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+
+
+def _ensure_session_metadata_columns(conn):
+    # Lightweight runtime migration for existing deployments.
+    conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS pinned BOOLEAN DEFAULT FALSE"))
+    conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE"))
+    conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS updated_at VARCHAR"))
+
+
+def touch_session(session_id: str):
     if not engine:
-        return {"updated": 0, "failed": 0, "checked": 0}
-
-    updated = 0
-    failed = 0
-    checked = 0
-
+        return
     try:
         with engine.connect() as conn:
-            stmt = select(app_configs.c.config_key, app_configs.c.config_value)
-            rows = conn.execute(stmt).fetchall()
-            for key, value in rows:
-                checked += 1
-                if value is None or value == "":
-                    continue
-
-                current_plain = decrypt_config_value(value)
-                if current_plain is None:
-                    failed += 1
-                    continue
-
-                reencrypted = encrypt_config_value(current_plain)
-                if reencrypted != value:
-                    upsert_stmt = text(
-                        "INSERT INTO app_configs (config_key, config_value) VALUES (:k, :v) "
-                        "ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value"
-                    )
-                    conn.execute(upsert_stmt, {"k": key, "v": reencrypted})
-                    updated += 1
-            conn.commit()
-    except Exception as e:
-        logger.exception("Error migrating app config encryption", exc_info=e)
-
-    return {"updated": updated, "failed": failed, "checked": checked}
-
-def _upsert_session_metadata(session_id: str, category: Optional[str] = None, pinned: Optional[bool] = None, archived: Optional[bool] = None, touch_updated_at: bool = False):
-    if not engine:
-        return False
-    try:
-        with engine.connect() as conn:
+            _ensure_session_metadata_columns(conn)
             upsert_stmt = text(
-                """
-                INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at)
-                VALUES (:s, COALESCE(:c, 'Uncategorized'), COALESCE(:p, 0), COALESCE(:a, 0), NOW())
-                ON CONFLICT (session_id) DO UPDATE SET
-                    category = COALESCE(:c, session_metadata.category),
-                    pinned = COALESCE(:p, session_metadata.pinned),
-                    archived = COALESCE(:a, session_metadata.archived),
-                    updated_at = CASE WHEN :touch = 1 THEN NOW() ELSE session_metadata.updated_at END
-                """
+                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) "
+                "VALUES (:s, :c, FALSE, FALSE, :u) "
+                "ON CONFLICT (session_id) DO UPDATE SET updated_at = EXCLUDED.updated_at"
             )
-            conn.execute(
-                upsert_stmt,
-                {
-                    "s": session_id,
-                    "c": category,
-                    "p": int(pinned) if pinned is not None else None,
-                    "a": int(archived) if archived is not None else None,
-                    "touch": 1 if touch_updated_at else 0,
-                },
-            )
+            conn.execute(upsert_stmt, {"s": session_id, "c": "Uncategorized", "u": _now_iso()})
             conn.commit()
-            return True
     except Exception as e:
-        print(f"Error upserting session metadata: {e}")
-        return False
+        logger.warning(f"Error touching session: {e}")
 
 
-def get_all_sessions(query: Optional[str] = None, category: Optional[str] = None, archived: Optional[bool] = None):
+def get_all_sessions(query: str = "", include_archived: bool = False):
     if not engine:
         return []
     try:
@@ -293,56 +299,42 @@ def get_all_sessions(query: Optional[str] = None, category: Optional[str] = None
 
                 msg_type, content = parsed
 
-                bucket = by_session.setdefault(session_id, {"roles": set(), "fingerprints": set()})
-                fingerprint = f"{msg_type}:{content}"
-                if fingerprint in bucket["fingerprints"]:
-                    continue
-                bucket["fingerprints"].add(fingerprint)
-                bucket["roles"].add(msg_type)
-
-            # Include sessions that have at least one valid message.
-            session_ids = sorted([session_id for session_id, data in by_session.items() if data["fingerprints"]])
-            
-            # Fetch metadata
-            stmt_cats = select(
+            stmt_meta = select(
                 session_metadata.c.session_id,
                 session_metadata.c.category,
                 session_metadata.c.pinned,
                 session_metadata.c.archived,
                 session_metadata.c.updated_at,
             )
-            cats_result = conn.execute(stmt_cats)
             meta_map = {
                 row[0]: {
                     "category": row[1] or "Uncategorized",
                     "pinned": bool(row[2]),
                     "archived": bool(row[3]),
-                    "updated_at": row[4].isoformat() if row[4] else None,
+                    "updated_at": row[4],
                 }
-                for row in cats_result
+                for row in conn.execute(stmt_meta)
             }
-            
+
             output = []
+            q = query.lower().strip()
             for s_id in session_ids:
-                meta = meta_map.get(s_id, {})
-                output.append({
-                    "session_id": s_id,
-                    "category": meta.get("category", "Uncategorized"),
-                    "pinned": meta.get("pinned", False),
-                    "archived": meta.get("archived", False),
-                    "updated_at": meta.get("updated_at"),
+                meta = meta_map.get(s_id, {
+                    "category": "Uncategorized",
+                    "pinned": False,
+                    "archived": False,
+                    "updated_at": None,
                 })
-            if query:
-                query_l = query.lower()
-                output = [s for s in output if query_l in s["session_id"].lower()]
-            if category:
-                output = [s for s in output if s["category"] == category]
-            if archived is not None:
-                output = [s for s in output if s["archived"] is archived]
-            output.sort(key=lambda s: (s["pinned"], s["updated_at"] or ""), reverse=True)
+                if not include_archived and meta["archived"]:
+                    continue
+                if q and q not in s_id.lower() and q not in meta["category"].lower():
+                    continue
+                output.append({"session_id": s_id, **meta})
+
+            output.sort(key=lambda x: (not x["pinned"], x.get("updated_at") or "", x["session_id"]), reverse=False)
             return output
     except Exception as e:
-        logger.exception("Error fetching sessions", exc_info=e)
+        logger.warning(f"Error fetching sessions: {e}")
         return []
 
 
@@ -424,20 +416,48 @@ def get_duplicate_message_counts() -> Dict[str, int]:
         return {}
 
 def set_session_category(session_id: str, category: str):
+    return _upsert_session_metadata(session_id=session_id, category=category)
+
+
+def set_session_pinned(session_id: str, value: bool):
+    return _upsert_session_metadata(session_id=session_id, pinned=value)
+
+
+def set_session_archived(session_id: str, value: bool):
+    return _upsert_session_metadata(session_id=session_id, archived=value)
+
+
+def touch_session_updated_at(session_id: str):
+    return _upsert_session_metadata(session_id=session_id, touch_updated_at=True)
+
+
+def set_session_pinned(session_id: str, pinned: bool):
+    return _upsert_session_metadata(session_id, pinned=pinned, touch_updated_at=True)
+
+
+def set_session_archived(session_id: str, archived: bool):
+    return _upsert_session_metadata(session_id, archived=archived, touch_updated_at=True)
+
+
+def touch_session_updated_at(session_id: str):
+    return _upsert_session_metadata(session_id, touch_updated_at=True)
+
+
+def set_session_flags(session_id: str, pinned: bool = None, archived: bool = None):
     if not engine:
         return False
     try:
         with engine.connect() as conn:
-            # Upsert logic for sqlite: INSERT OR REPLACE
+            _ensure_session_metadata_columns(conn)
             upsert_stmt = text(
-                "INSERT INTO session_metadata (session_id, category) VALUES (:s, :c) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category"
+                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, FALSE, FALSE, :u) "
+                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category, updated_at = EXCLUDED.updated_at"
             )
-            conn.execute(upsert_stmt, {"s": session_id, "c": category})
+            conn.execute(upsert_stmt, {"s": session_id, "c": category, "u": _now_iso()})
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error setting category", exc_info=e)
+        logger.warning(f"Error setting category: {e}")
         return False
 
 
@@ -461,8 +481,9 @@ def delete_session_metadata(session_id: str):
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error deleting session metadata", exc_info=e)
+        logger.warning(f"Error deleting session metadata: {e}")
         return False
+
 
 def get_config(key: str, default=None):
     if not engine: return default
@@ -470,13 +491,11 @@ def get_config(key: str, default=None):
         with engine.connect() as conn:
             stmt = select(app_configs.c.config_value).where(app_configs.c.config_key == key)
             result = conn.execute(stmt).first()
-            if result:
-                decrypted = decrypt_config_value(result[0])
-                return decrypted if decrypted is not None else default
-            return default
+            return result[0] if result else default
     except Exception as e:
-        logger.exception("Error getting config", extra={"config_key": key}, exc_info=e)
+        logger.warning(f"Error getting config {key}: {e}")
         return default
+
 
 def set_config(key: str, value: str):
     if not engine: return False
@@ -490,231 +509,149 @@ def set_config(key: str, value: str):
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error setting config", extra={"config_key": key}, exc_info=e)
+        logger.warning(f"Error setting config {key}: {e}")
         return False
+
 
 def get_all_configs():
     if not engine: return {}
     try:
         with engine.connect() as conn:
-            from sqlalchemy import inspect
-            if not inspect(engine).has_table("app_configs"): return {}
+            if not inspect(engine).has_table("app_configs"):
+                return {}
             stmt = select(app_configs.c.config_key, app_configs.c.config_value)
-            result = conn.execute(stmt)
-            output = {}
-            for row in result:
-                decrypted = decrypt_config_value(row[1])
-                output[row[0]] = decrypted if decrypted is not None else ""
-            return output
+            return {row[0]: row[1] for row in conn.execute(stmt)}
     except Exception as e:
-        logger.exception("Error getting all configs", exc_info=e)
+        logger.warning(f"Error getting all configs: {e}")
         return {}
+
 
 def add_core_memory(fact: str):
     if not engine: return False
     try:
         with engine.connect() as conn:
-            stmt = text("INSERT INTO core_memories (fact) VALUES (:f)")
-            conn.execute(stmt, {"f": fact})
+            conn.execute(text("INSERT INTO core_memories (fact) VALUES (:f)"), {"f": fact})
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error adding core memory", exc_info=e)
+        logger.warning(f"Error adding core memory: {e}")
         return False
+
 
 def get_core_memories():
     if not engine: return []
     try:
         with engine.connect() as conn:
-            from sqlalchemy import inspect
-            if not inspect(engine).has_table("core_memories"): return []
+            if not inspect(engine).has_table("core_memories"):
+                return []
             stmt = select(core_memories.c.id, core_memories.c.fact)
-            result = conn.execute(stmt)
-            return [{"id": row[0], "fact": row[1]} for row in result]
+            return [{"id": row[0], "fact": row[1]} for row in conn.execute(stmt)]
     except Exception as e:
-        logger.exception("Error getting core memories", exc_info=e)
+        logger.warning(f"Error getting core memories: {e}")
         return []
+
 
 def delete_core_memory(mem_id: int):
     if not engine: return False
     try:
         with engine.connect() as conn:
-            stmt = text("DELETE FROM core_memories WHERE id = :id")
-            conn.execute(stmt, {"id": mem_id})
+            conn.execute(text("DELETE FROM core_memories WHERE id = :id"), {"id": mem_id})
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error deleting core memory", exc_info=e)
+        logger.warning(f"Error deleting core memory: {e}")
         return False
+
 
 def get_network_targets():
     if not engine: return []
     try:
         with engine.connect() as conn:
-            from sqlalchemy import inspect
-            if not inspect(engine).has_table("network_targets"): return []
+            if not inspect(engine).has_table("network_targets"):
+                return []
             stmt = select(network_targets.c.id, network_targets.c.name, network_targets.c.ip_address)
-            result = conn.execute(stmt)
-            return [{"id": row[0], "name": row[1], "ip_address": row[2]} for row in result]
+            return [{"id": row[0], "name": row[1], "ip_address": row[2]} for row in conn.execute(stmt)]
     except Exception as e:
-        logger.exception("Error getting network targets", exc_info=e)
+        logger.warning(f"Error getting network targets: {e}")
         return []
+
 
 def add_network_target(name: str, ip_address: str):
     if not engine: return False
     try:
         with engine.connect() as conn:
-            stmt = text("INSERT INTO network_targets (name, ip_address) VALUES (:n, :i)")
-            conn.execute(stmt, {"n": name, "i": ip_address})
+            conn.execute(text("INSERT INTO network_targets (name, ip_address) VALUES (:n, :i)"), {"n": name, "i": ip_address})
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error adding network target", exc_info=e)
+        logger.warning(f"Error adding network target: {e}")
         return False
+
 
 def delete_network_target(target_id: int):
     if not engine: return False
     try:
         with engine.connect() as conn:
-            stmt = text("DELETE FROM network_targets WHERE id = :id")
-            conn.execute(stmt, {"id": target_id})
+            conn.execute(text("DELETE FROM network_targets WHERE id = :id"), {"id": target_id})
             conn.commit()
             return True
     except Exception as e:
-        logger.exception("Error deleting network target", exc_info=e)
+        logger.warning(f"Error deleting network target: {e}")
         return False
 
 
-def _parse_iso_datetime(value: Optional[str]):
-    if not value:
-        return None
-    try:
-        normalized = value.replace("Z", "+00:00")
-        return datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-
-
-def create_task(title: str, description: str = "", status: str = "todo", priority: str = "medium", due_at: Optional[str] = None, session_id: Optional[str] = None):
+def create_task(title: str, description: str = "", priority: str = "medium", due_at: str = None, session_id: str = None):
     if not engine:
         return None
     try:
-        now = datetime.now(timezone.utc)
-        due_dt = _parse_iso_datetime(due_at)
         with engine.connect() as conn:
+            now = _now_iso()
             stmt = text(
                 "INSERT INTO tasks (title, description, status, priority, due_at, session_id, created_at, updated_at) "
-                "VALUES (:title, :description, :status, :priority, :due_at, :session_id, :created_at, :updated_at) "
-                "RETURNING id"
+                "VALUES (:t, :d, 'todo', :p, :due, :sid, :c, :u) RETURNING id"
             )
-            result = conn.execute(stmt, {
-                "title": title,
-                "description": description,
-                "status": status,
-                "priority": priority,
-                "due_at": due_dt,
-                "session_id": session_id,
-                "created_at": now,
-                "updated_at": now,
-            })
-            task_id = result.scalar()
+            res = conn.execute(stmt, {"t": title, "d": description, "p": priority, "due": due_at, "sid": session_id, "c": now, "u": now})
+            task_id = res.scalar()
             conn.commit()
-            return get_task_by_id(task_id)
+            return task_id
     except Exception as e:
-        logger.exception("Error creating task", exc_info=e)
+        logger.warning(f"Error creating task: {e}")
         return None
 
 
-def get_task_by_id(task_id: int):
-    if not engine:
-        return None
-    try:
-        with engine.connect() as conn:
-            stmt = text("SELECT id, title, description, status, priority, due_at, session_id, created_at, updated_at FROM tasks WHERE id = :id")
-            row = conn.execute(stmt, {"id": task_id}).mappings().first()
-            if not row:
-                return None
-            return dict(row)
-    except Exception as e:
-        logger.exception("Error fetching task by id", exc_info=e)
-        return None
-
-
-def list_tasks(status: Optional[str] = None, priority: Optional[str] = None, session_id: Optional[str] = None, due_before: Optional[str] = None, due_after: Optional[str] = None):
+def list_tasks(status: str = None):
     if not engine:
         return []
     try:
-        where_parts = []
-        params = {}
-        if status:
-            where_parts.append("status = :status")
-            params["status"] = status
-        if priority:
-            where_parts.append("priority = :priority")
-            params["priority"] = priority
-        if session_id:
-            where_parts.append("session_id = :session_id")
-            params["session_id"] = session_id
-        if due_before:
-            parsed = _parse_iso_datetime(due_before)
-            if parsed:
-                where_parts.append("due_at <= :due_before")
-                params["due_before"] = parsed
-        if due_after:
-            parsed = _parse_iso_datetime(due_after)
-            if parsed:
-                where_parts.append("due_at >= :due_after")
-                params["due_after"] = parsed
-
-        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
-        query = (
-            "SELECT id, title, description, status, priority, due_at, session_id, created_at, updated_at "
-            f"FROM tasks {where_sql} ORDER BY COALESCE(due_at, created_at) ASC, id DESC"
-        )
         with engine.connect() as conn:
-            rows = conn.execute(text(query), params).mappings().all()
-            return [dict(row) for row in rows]
+            query = select(tasks)
+            if status:
+                query = query.where(tasks.c.status == status)
+            rows = conn.execute(query).fetchall()
+            return [dict(r._mapping) for r in rows]
     except Exception as e:
-        logger.exception("Error listing tasks", exc_info=e)
+        logger.warning(f"Error listing tasks: {e}")
         return []
 
 
-def update_task(task_id: int, title: Optional[str] = None, description: Optional[str] = None, status: Optional[str] = None, priority: Optional[str] = None, due_at: Optional[str] = None, session_id: Optional[str] = None):
+def update_task(task_id: int, updates: dict):
     if not engine:
-        return None
+        return False
     try:
-        set_parts = ["updated_at = :updated_at"]
-        params = {"id": task_id, "updated_at": datetime.now(timezone.utc)}
-
-        if title is not None:
-            set_parts.append("title = :title")
-            params["title"] = title
-        if description is not None:
-            set_parts.append("description = :description")
-            params["description"] = description
-        if status is not None:
-            set_parts.append("status = :status")
-            params["status"] = status
-        if priority is not None:
-            set_parts.append("priority = :priority")
-            params["priority"] = priority
-        if due_at is not None:
-            params["due_at"] = _parse_iso_datetime(due_at) if due_at else None
-            set_parts.append("due_at = :due_at")
-        if session_id is not None:
-            set_parts.append("session_id = :session_id")
-            params["session_id"] = session_id
-
+        allowed = {"title", "description", "status", "priority", "due_at", "session_id"}
+        safe_updates = {k: v for k, v in updates.items() if k in allowed and v is not None}
+        if not safe_updates:
+            return False
+        safe_updates["updated_at"] = _now_iso()
+        set_clause = ", ".join([f"{k} = :{k}" for k in safe_updates.keys()])
+        safe_updates["id"] = task_id
         with engine.connect() as conn:
-            stmt = text(f"UPDATE tasks SET {', '.join(set_parts)} WHERE id = :id")
-            result = conn.execute(stmt, params)
+            conn.execute(text(f"UPDATE tasks SET {set_clause} WHERE id = :id"), safe_updates)
             conn.commit()
-            if result.rowcount == 0:
-                return None
-            return get_task_by_id(task_id)
+        return True
     except Exception as e:
-        logger.exception("Error updating task", exc_info=e)
-        return None
+        logger.warning(f"Error updating task: {e}")
+        return False
 
 
 def delete_task(task_id: int):
@@ -722,12 +659,467 @@ def delete_task(task_id: int):
         return False
     try:
         with engine.connect() as conn:
-            stmt = text("DELETE FROM tasks WHERE id = :id")
-            result = conn.execute(stmt, {"id": task_id})
+            conn.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_id})
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.warning(f"Error deleting task: {e}")
+        return False
+
+
+
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
+
+def create_user(username: str, password: str, role: str = 'user'):
+    if not engine:
+        return False, 'db_unavailable'
+    username = (username or '').strip()
+    if not username or not password:
+        return False, 'username_password_required'
+    if len(password) < 4:
+        return False, 'password_too_short'
+    try:
+        with engine.connect() as conn:
+            existing = conn.execute(select(users.c.id).where(users.c.username == username)).first()
+            if existing:
+                return False, 'username_exists'
+            conn.execute(
+                text("INSERT INTO users (username, password_hash, role, created_at) VALUES (:u, :p, :r, :c)"),
+                {'u': username, 'p': _hash_password(password), 'r': role, 'c': _now_iso()}
+            )
+            conn.commit()
+            return True, 'created'
+    except Exception as e:
+        logger.warning(f"Error creating user: {e}")
+        return False, 'create_failed'
+
+
+def ensure_default_admin(username: str, password: str):
+    return create_user(username=username, password=password, role='admin')
+
+
+def verify_user_credentials(username: str, password: str):
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(users.c.id, users.c.username, users.c.password_hash, users.c.role).where(users.c.username == username)
+            ).first()
+            if not row:
+                return None
+            if row.password_hash != _hash_password(password):
+                return None
+            return {'id': row.id, 'username': row.username, 'role': row.role}
+    except Exception as e:
+        logger.warning(f"Error verifying user credentials: {e}")
+        return None
+
+
+def list_users():
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(select(users.c.id, users.c.username, users.c.role, users.c.created_at)).fetchall()
+            return [dict(r._mapping) for r in rows]
+    except Exception as e:
+        logger.warning(f"Error listing users: {e}")
+        return []
+
+
+def set_user_role(user_id: int, role: str):
+    if not engine:
+        return False
+    if role not in {'admin', 'user'}:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(text('UPDATE users SET role = :r WHERE id = :id'), {'r': role, 'id': user_id})
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.warning(f"Error setting user role: {e}")
+        return False
+
+
+def delete_user(user_id: int):
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(text('DELETE FROM users WHERE id = :id'), {'id': user_id})
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.warning(f"Error deleting user: {e}")
+        return False
+
+
+def ensure_default_users(default_users: List[Dict[str, str]]) -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            for entry in default_users:
+                username = (entry.get("username") or "").strip()
+                role = (entry.get("role") or "user").strip().lower()
+                password_hash = entry.get("password_hash")
+                if not username or role not in {"admin", "user"} or not password_hash:
+                    continue
+                conn.execute(
+                    text(
+                        "INSERT INTO users (username, role, password_hash, created_at, updated_at) "
+                        "VALUES (:username, :role, :password_hash, NOW(), NOW()) "
+                        "ON CONFLICT (username) DO NOTHING"
+                    ),
+                    {"username": username, "role": role, "password_hash": password_hash},
+                )
+            conn.commit()
+    except Exception as e:
+        logger.exception("Error ensuring default users", exc_info=e)
+
+
+def get_user(username: str) -> Optional[Dict[str, str]]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT username, role, password_hash, created_at, updated_at "
+                    "FROM users WHERE username = :username"
+                ),
+                {"username": username},
+            ).mappings().first()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.exception("Error fetching user", extra={"username": username}, exc_info=e)
+        return None
+
+
+def list_users() -> List[Dict[str, str]]:
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT username, role, created_at, updated_at "
+                    "FROM users ORDER BY username ASC"
+                )
+            ).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as e:
+        logger.exception("Error listing users", exc_info=e)
+        return []
+
+
+def create_user(username: str, role: str, password_hash: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (username, role, password_hash, created_at, updated_at) "
+                    "VALUES (:username, :role, :password_hash, NOW(), NOW())"
+                ),
+                {"username": username, "role": role, "password_hash": password_hash},
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.exception("Error creating user", extra={"username": username}, exc_info=e)
+        return False
+
+
+def update_user(username: str, role: Optional[str] = None, password_hash: Optional[str] = None) -> bool:
+    if not engine:
+        return False
+    if role is None and password_hash is None:
+        return True
+    try:
+        params = {"username": username}
+        set_parts = ["updated_at = NOW()"]
+        if role is not None:
+            set_parts.append("role = :role")
+            params["role"] = role
+        if password_hash is not None:
+            set_parts.append("password_hash = :password_hash")
+            params["password_hash"] = password_hash
+
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(f"UPDATE users SET {', '.join(set_parts)} WHERE username = :username"),
+                params,
+            )
             conn.commit()
             return result.rowcount > 0
     except Exception as e:
-        logger.exception("Error deleting task", exc_info=e)
+        logger.exception("Error updating user", extra={"username": username}, exc_info=e)
+        return False
+
+
+def delete_user(username: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("DELETE FROM users WHERE username = :username"), {"username": username})
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.exception("Error deleting user", extra={"username": username}, exc_info=e)
+        return False
+
+
+def ensure_default_users(default_users: List[Dict[str, str]]) -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            for entry in default_users:
+                username = (entry.get("username") or "").strip()
+                role = (entry.get("role") or "user").strip().lower()
+                password_hash = entry.get("password_hash")
+                if not username or role not in {"admin", "user"} or not password_hash:
+                    continue
+                conn.execute(
+                    text(
+                        "INSERT INTO users (username, role, password_hash, created_at, updated_at) "
+                        "VALUES (:username, :role, :password_hash, NOW(), NOW()) "
+                        "ON CONFLICT (username) DO NOTHING"
+                    ),
+                    {"username": username, "role": role, "password_hash": password_hash},
+                )
+            conn.commit()
+    except Exception as e:
+        logger.exception("Error ensuring default users", exc_info=e)
+
+
+def get_user(username: str) -> Optional[Dict[str, str]]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT username, role, password_hash, created_at, updated_at "
+                    "FROM users WHERE username = :username"
+                ),
+                {"username": username},
+            ).mappings().first()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.exception("Error fetching user", extra={"username": username}, exc_info=e)
+        return None
+
+
+def list_users() -> List[Dict[str, str]]:
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT username, role, created_at, updated_at "
+                    "FROM users ORDER BY username ASC"
+                )
+            ).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as e:
+        logger.exception("Error listing users", exc_info=e)
+        return []
+
+
+def create_user(username: str, role: str, password_hash: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (username, role, password_hash, created_at, updated_at) "
+                    "VALUES (:username, :role, :password_hash, NOW(), NOW())"
+                ),
+                {"username": username, "role": role, "password_hash": password_hash},
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.exception("Error creating user", extra={"username": username}, exc_info=e)
+        return False
+
+
+def update_user(username: str, role: Optional[str] = None, password_hash: Optional[str] = None) -> bool:
+    if not engine:
+        return False
+    if role is None and password_hash is None:
+        return True
+    try:
+        params = {"username": username}
+        set_parts = ["updated_at = NOW()"]
+        if role is not None:
+            set_parts.append("role = :role")
+            params["role"] = role
+        if password_hash is not None:
+            set_parts.append("password_hash = :password_hash")
+            params["password_hash"] = password_hash
+
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(f"UPDATE users SET {', '.join(set_parts)} WHERE username = :username"),
+                params,
+            )
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.exception("Error updating user", extra={"username": username}, exc_info=e)
+        return False
+
+
+def delete_user(username: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("DELETE FROM users WHERE username = :username"), {"username": username})
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.exception("Error deleting user", extra={"username": username}, exc_info=e)
+        return False
+
+
+def create_memory_group(name: str, description: str, created_by: str):
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            group_id = conn.execute(
+                text(
+                    "INSERT INTO memory_groups (name, description, created_by, created_at) "
+                    "VALUES (:name, :description, :created_by, NOW()) RETURNING id"
+                ),
+                {"name": name, "description": description, "created_by": created_by},
+            ).scalar()
+            conn.execute(
+                text("INSERT INTO memory_group_members (group_id, username) VALUES (:group_id, :username)"),
+                {"group_id": group_id, "username": created_by},
+            )
+            conn.commit()
+            return group_id
+    except Exception as e:
+        logger.exception("Error creating memory group", exc_info=e)
+        return None
+
+
+def add_user_to_memory_group(group_id: int, username: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO memory_group_members (group_id, username) "
+                    "SELECT :group_id, :username "
+                    "WHERE NOT EXISTS (SELECT 1 FROM memory_group_members WHERE group_id = :group_id AND username = :username)"
+                ),
+                {"group_id": group_id, "username": username},
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.exception("Error adding user to memory group", exc_info=e)
+        return False
+
+
+def share_session_to_group(group_id: int, session_id: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO memory_group_sessions (group_id, session_id) "
+                    "SELECT :group_id, :session_id "
+                    "WHERE NOT EXISTS (SELECT 1 FROM memory_group_sessions WHERE group_id = :group_id AND session_id = :session_id)"
+                ),
+                {"group_id": group_id, "session_id": session_id},
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.exception("Error sharing session to group", exc_info=e)
+        return False
+
+
+def list_memory_groups_for_user(username: str):
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT g.id, g.name, g.description, g.created_by, g.created_at "
+                    "FROM memory_groups g "
+                    "JOIN memory_group_members m ON m.group_id = g.id "
+                    "WHERE m.username = :username "
+                    "ORDER BY g.id DESC"
+                ),
+                {"username": username},
+            ).mappings().all()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        logger.exception("Error listing memory groups", exc_info=e)
+        return []
+
+
+def list_shared_sessions_for_user(username: str):
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT DISTINCT s.session_id "
+                    "FROM memory_group_sessions s "
+                    "JOIN memory_group_members m ON m.group_id = s.group_id "
+                    "WHERE m.username = :username ORDER BY s.session_id"
+                ),
+                {"username": username},
+            ).fetchall()
+            return [row[0] for row in rows]
+    except Exception as e:
+        logger.exception("Error listing shared sessions", exc_info=e)
+        return []
+
+
+def add_media_asset(username: str, session_id: Optional[str], filename: str, url: str, mime_type: Optional[str]) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO media_assets (username, session_id, filename, url, mime_type, created_at) "
+                    "VALUES (:username, :session_id, :filename, :url, :mime_type, NOW())"
+                ),
+                {
+                    "username": username,
+                    "session_id": session_id,
+                    "filename": filename,
+                    "url": url,
+                    "mime_type": mime_type,
+                },
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.exception("Error adding media asset", exc_info=e)
         return False
 
 
