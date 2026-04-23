@@ -77,6 +77,17 @@
         </div>
 
         <div class="card">
+            <h2>System Diagnostics</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Recent health checks and scheduler activity.</p>
+            <div style="display: flex; align-items: center; gap: 10px; margin-top: 12px;">
+                <button id="refresh-health-btn" class="btn" style="width: auto;">Refresh Health</button>
+                <span id="health-updated-at" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
+            </div>
+            <div id="health-status-grid" style="display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 12px; margin-top: 16px;"></div>
+            <pre id="scheduler-diagnostics" style="margin-top: 14px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; font-size: 0.82rem; color: var(--text-secondary); white-space: pre-wrap;"></pre>
+        </div>
+
+        <div class="card">
             <h2>Import Memory</h2>
             <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Restore a memory session exported from another Ampai server.</p>
             <div class="import-section">

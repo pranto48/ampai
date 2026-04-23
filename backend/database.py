@@ -1,7 +1,10 @@
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
+from cryptography.fernet import Fernet, InvalidToken
+
+from logging_utils import get_logger
 
 # Allow overriding for local testing vs docker
 # Default to Postgres container format
@@ -10,6 +13,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai
 engine = None
 metadata = MetaData()
 ENCRYPTED_PREFIX = "enc::"
+logger = get_logger(__name__)
 
 message_store = Table(
     'message_store', metadata,
@@ -79,7 +83,7 @@ def _load_fernet_keys() -> List[Fernet]:
         try:
             fernets.append(Fernet(key.encode()))
         except Exception:
-            print("Warning: invalid config encryption key provided; skipping key")
+            logger.warning("Invalid config encryption key provided; skipping key")
     return fernets
 
 
@@ -147,7 +151,7 @@ def migrate_app_config_encryption() -> dict:
                     updated += 1
             conn.commit()
     except Exception as e:
-        print(f"Error migrating app config encryption: {e}")
+        logger.exception("Error migrating app config encryption", exc_info=e)
 
     return {"updated": updated, "failed": failed, "checked": checked}
 
@@ -178,7 +182,7 @@ def get_all_sessions():
                 })
             return output
     except Exception as e:
-        print(f"Error fetching sessions: {e}")
+        logger.exception("Error fetching sessions", exc_info=e)
         return []
 
 def set_session_category(session_id: str, category: str):
@@ -195,7 +199,7 @@ def set_session_category(session_id: str, category: str):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error setting category: {e}")
+        logger.exception("Error setting category", exc_info=e)
         return False
 
 def delete_session_metadata(session_id: str):
@@ -207,7 +211,7 @@ def delete_session_metadata(session_id: str):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error deleting session metadata: {e}")
+        logger.exception("Error deleting session metadata", exc_info=e)
         return False
 
 def get_config(key: str, default=None):
@@ -221,7 +225,7 @@ def get_config(key: str, default=None):
                 return decrypted if decrypted is not None else default
             return default
     except Exception as e:
-        print(f"Error getting config {key}: {e}")
+        logger.exception("Error getting config", extra={"config_key": key}, exc_info=e)
         return default
 
 def set_config(key: str, value: str):
@@ -236,7 +240,7 @@ def set_config(key: str, value: str):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error setting config {key}: {e}")
+        logger.exception("Error setting config", extra={"config_key": key}, exc_info=e)
         return False
 
 def get_all_configs():
@@ -253,7 +257,7 @@ def get_all_configs():
                 output[row[0]] = decrypted if decrypted is not None else ""
             return output
     except Exception as e:
-        print(f"Error getting all configs: {e}")
+        logger.exception("Error getting all configs", exc_info=e)
         return {}
 
 def add_core_memory(fact: str):
@@ -265,7 +269,7 @@ def add_core_memory(fact: str):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error adding core memory: {e}")
+        logger.exception("Error adding core memory", exc_info=e)
         return False
 
 def get_core_memories():
@@ -278,7 +282,7 @@ def get_core_memories():
             result = conn.execute(stmt)
             return [{"id": row[0], "fact": row[1]} for row in result]
     except Exception as e:
-        print(f"Error getting core memories: {e}")
+        logger.exception("Error getting core memories", exc_info=e)
         return []
 
 def delete_core_memory(mem_id: int):
@@ -290,7 +294,7 @@ def delete_core_memory(mem_id: int):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error deleting core memory: {e}")
+        logger.exception("Error deleting core memory", exc_info=e)
         return False
 
 def get_network_targets():
@@ -303,7 +307,7 @@ def get_network_targets():
             result = conn.execute(stmt)
             return [{"id": row[0], "name": row[1], "ip_address": row[2]} for row in result]
     except Exception as e:
-        print(f"Error getting network targets: {e}")
+        logger.exception("Error getting network targets", exc_info=e)
         return []
 
 def add_network_target(name: str, ip_address: str):
@@ -315,7 +319,7 @@ def add_network_target(name: str, ip_address: str):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error adding network target: {e}")
+        logger.exception("Error adding network target", exc_info=e)
         return False
 
 def delete_network_target(target_id: int):
@@ -327,7 +331,7 @@ def delete_network_target(target_id: int):
             conn.commit()
             return True
     except Exception as e:
-        print(f"Error deleting network target: {e}")
+        logger.exception("Error deleting network target", exc_info=e)
         return False
 
 
@@ -367,7 +371,7 @@ def create_task(title: str, description: str = "", status: str = "todo", priorit
             conn.commit()
             return get_task_by_id(task_id)
     except Exception as e:
-        print(f"Error creating task: {e}")
+        logger.exception("Error creating task", exc_info=e)
         return None
 
 
@@ -382,7 +386,7 @@ def get_task_by_id(task_id: int):
                 return None
             return dict(row)
     except Exception as e:
-        print(f"Error fetching task by id: {e}")
+        logger.exception("Error fetching task by id", exc_info=e)
         return None
 
 
@@ -421,7 +425,7 @@ def list_tasks(status: Optional[str] = None, priority: Optional[str] = None, ses
             rows = conn.execute(text(query), params).mappings().all()
             return [dict(row) for row in rows]
     except Exception as e:
-        print(f"Error listing tasks: {e}")
+        logger.exception("Error listing tasks", exc_info=e)
         return []
 
 
@@ -459,7 +463,7 @@ def update_task(task_id: int, title: Optional[str] = None, description: Optional
                 return None
             return get_task_by_id(task_id)
     except Exception as e:
-        print(f"Error updating task: {e}")
+        logger.exception("Error updating task", exc_info=e)
         return None
 
 
@@ -473,5 +477,5 @@ def delete_task(task_id: int):
             conn.commit()
             return result.rowcount > 0
     except Exception as e:
-        print(f"Error deleting task: {e}")
+        logger.exception("Error deleting task", exc_info=e)
         return False
