@@ -3,7 +3,15 @@ import re
 import json
 import time
 from apscheduler.schedulers.background import BackgroundScheduler
-from database import get_network_targets, list_tasks, engine, get_config, set_config
+from database import (
+    engine,
+    get_config,
+    get_network_targets,
+    get_sql_chat_history,
+    list_tasks,
+    set_config,
+    set_session_category,
+)
 from sqlalchemy import text
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -62,6 +70,7 @@ def ping_target(ip_address: str) -> dict:
 
 def run_network_sweep():
     LAST_RUN["network_sweep"] = datetime.now(timezone.utc).isoformat()
+    LAST_ERRORS["network_sweep"] = None
     logger.info("Running scheduled network sweep")
     targets = get_network_targets()
     if not targets:
@@ -91,10 +100,12 @@ def run_network_sweep():
         history.add_ai_message(ai_message)
     except Exception as e:
         logger.exception("Error saving network sweep report to DB", exc_info=e)
+        LAST_ERRORS["network_sweep"] = str(e)
 
 
 def run_task_reminders():
     LAST_RUN["task_reminders"] = datetime.now(timezone.utc).isoformat()
+    LAST_ERRORS["task_reminders"] = None
     logger.info("Running scheduled task reminders")
     now = datetime.now(timezone.utc)
     soon = now + timedelta(hours=24)
@@ -127,20 +138,14 @@ def run_task_reminders():
     timestamp = now.strftime("%Y-%m-%d %H:%M:%S UTC")
     summary = "\n".join(reminder_lines)
     try:
-        with engine.connect() as conn:
-            upsert_meta = text(
-                "INSERT INTO session_metadata (session_id, category) VALUES (:s, :c) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category"
-            )
-            conn.execute(upsert_meta, {"s": session_id, "c": "System Tasks"})
-
-            ins_user = text("INSERT INTO message_store (session_id, message) VALUES (:s, :m)")
-            conn.execute(ins_user, {"s": session_id, "m": f"Run task reminder check at {timestamp}"})
-            conn.execute(ins_user, {"s": session_id, "m": f"**Task Reminder Report ({timestamp})**\n{summary}"})
-            conn.commit()
+        set_session_category(session_id, "System Tasks")
+        history = get_sql_chat_history(session_id)
+        history.add_user_message(f"Run task reminder check at {timestamp}")
+        history.add_ai_message(f"**Task Reminder Report ({timestamp})**\n{summary}")
         logger.info("Task reminders recorded", extra={"reminder_count": len(reminder_lines)})
     except Exception as e:
         logger.exception("Error saving task reminders", exc_info=e)
+        LAST_ERRORS["task_reminders"] = str(e)
 
 
 def _load_email_credentials(provider: str):
@@ -189,11 +194,12 @@ def run_email_digest_job():
         else:
             messages = fetch_outlook_todays_messages(token, tz=tz_name, max_results=max_results)
     except Exception as exc:
-        print(f"Email digest job failed before summarization: {exc}")
+        logger.exception("Email digest job failed before summarization", exc_info=exc, extra={"provider": provider})
+        LAST_ERRORS["email_digest"] = str(exc)
         return
 
     if not messages:
-        print("Email digest job: no messages found for today.")
+        logger.info("Email digest job: no messages found for today", extra={"provider": provider})
         return
 
     digest_lines = []
@@ -222,7 +228,7 @@ def run_email_digest_job():
         use_web_search=False,
         attachments=[],
     )
-    print(f"Email digest job saved to {session_id}.")
+    logger.info("Email digest job saved", extra={"session_id": session_id, "provider": provider})
 
 def start_scheduler():
     if not scheduler.running:
@@ -254,5 +260,6 @@ def get_scheduler_diagnostics() -> dict:
     return {
         "running": scheduler.running,
         "last_run": LAST_RUN,
+        "last_errors": LAST_ERRORS,
         "jobs": [job.id for job in scheduler.get_jobs()],
     }
