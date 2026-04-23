@@ -88,7 +88,12 @@ document.addEventListener('DOMContentLoaded', () => {
         'resend_api_key': document.getElementById('config-resend-api-key'),
         'resend_from_email': document.getElementById('config-resend-from-email'),
         'notification_email_to': document.getElementById('config-notification-email-to'),
-        'chat_reply_email_notifications': document.getElementById('config-chat-reply-email-notifications')
+        'chat_reply_email_notifications': document.getElementById('config-chat-reply-email-notifications'),
+        'notification_default_browser_notify_on_away_replies': document.getElementById('config-notification-default-browser-notify-on-away-replies'),
+        'notification_default_email_notify_on_away_replies': document.getElementById('config-notification-default-email-notify-on-away-replies'),
+        'notification_default_minimum_notify_interval_seconds': document.getElementById('config-notification-default-minimum-notify-interval-seconds'),
+        'notification_default_digest_mode': document.getElementById('config-notification-default-digest-mode'),
+        'notification_default_digest_interval_minutes': document.getElementById('config-notification-default-digest-interval-minutes')
     };
     const SECRET_CONFIG_KEYS = new Set([
         'generic_api_key',

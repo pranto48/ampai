@@ -1577,232 +1577,217 @@ def export_all_sessions_for_backup():
         return []
 
 
-
-def _to_dt(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        normalized = value.replace('Z', '+00:00')
-        dt = datetime.fromisoformat(normalized)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        return None
-
-
-def _extract_snippet(content: str, query: str, radius: int = 70) -> str:
-    text_content = (content or '').strip()
-    if not text_content:
-        return ''
-    if not query:
-        return text_content[: min(len(text_content), radius * 2)]
-
-    pattern = re.compile(re.escape(query), re.IGNORECASE)
-    match = pattern.search(text_content)
-    if not match:
-        return text_content[: min(len(text_content), radius * 2)]
-
-    start = max(0, match.start() - radius)
-    end = min(len(text_content), match.end() + radius)
-    snippet = text_content[start:end]
-    if start > 0:
-        snippet = '…' + snippet
-    if end < len(text_content):
-        snippet = snippet + '…'
-    return snippet
-
-
-def ensure_session_owner(session_id: str, username: str) -> bool:
-    if not engine or not session_id or not username:
-        return False
+def migrate_notification_preferences_schema() -> None:
+    if not engine:
+        return
     try:
         with engine.connect() as conn:
-            _ensure_session_metadata_columns(conn)
-            conn.execute(text('ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS owner_username VARCHAR'))
             conn.execute(
                 text(
-                    'INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at, owner_username) '
-                    'VALUES (:session_id, :category, FALSE, FALSE, :updated_at, :owner_username) '
-                    'ON CONFLICT (session_id) DO UPDATE SET '
-                    'owner_username = COALESCE(session_metadata.owner_username, EXCLUDED.owner_username), '
-                    'updated_at = EXCLUDED.updated_at'
+                    """
+                    CREATE TABLE IF NOT EXISTS user_notification_preferences (
+                        username VARCHAR PRIMARY KEY,
+                        browser_notify_on_away_replies BOOLEAN NOT NULL DEFAULT TRUE,
+                        email_notify_on_away_replies BOOLEAN NOT NULL DEFAULT FALSE,
+                        minimum_notify_interval_seconds INTEGER NOT NULL DEFAULT 300,
+                        digest_mode VARCHAR NOT NULL DEFAULT 'immediate',
+                        digest_interval_minutes INTEGER NOT NULL DEFAULT 30,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS pending_reply_notifications (
+                        id SERIAL PRIMARY KEY,
+                        username VARCHAR NOT NULL,
+                        session_id VARCHAR NOT NULL,
+                        reply_preview TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        delivered_at TIMESTAMPTZ
+                    )
+                    """
+                )
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Failed migrating notification preference schema", exc_info=exc)
+
+
+migrate_notification_preferences_schema()
+
+
+def _as_bool(value, default: bool) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_effective_notification_preferences(username: str) -> Dict[str, object]:
+    defaults = {
+        "browser_notify_on_away_replies": _as_bool(get_config("notification_default_browser_notify_on_away_replies", "true"), True),
+        "email_notify_on_away_replies": _as_bool(
+            get_config("notification_default_email_notify_on_away_replies", get_config("chat_reply_email_notifications", "false")),
+            False,
+        ),
+        "minimum_notify_interval_seconds": max(0, int(get_config("notification_default_minimum_notify_interval_seconds", "300") or "300")),
+        "digest_mode": (get_config("notification_default_digest_mode", "immediate") or "immediate").strip().lower(),
+        "digest_interval_minutes": max(1, int(get_config("notification_default_digest_interval_minutes", "30") or "30")),
+    }
+
+    if defaults["digest_mode"] not in {"immediate", "periodic"}:
+        defaults["digest_mode"] = "immediate"
+
+    if not engine:
+        return defaults
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT browser_notify_on_away_replies, email_notify_on_away_replies,
+                           minimum_notify_interval_seconds, digest_mode, digest_interval_minutes
+                    FROM user_notification_preferences WHERE username = :username
+                    """
+                ),
+                {"username": username},
+            ).mappings().first()
+            if not row:
+                return defaults
+            merged = {**defaults, **dict(row)}
+            merged["digest_mode"] = (merged.get("digest_mode") or "immediate").strip().lower()
+            if merged["digest_mode"] not in {"immediate", "periodic"}:
+                merged["digest_mode"] = "immediate"
+            merged["minimum_notify_interval_seconds"] = max(0, int(merged.get("minimum_notify_interval_seconds") or 0))
+            merged["digest_interval_minutes"] = max(1, int(merged.get("digest_interval_minutes") or 30))
+            return merged
+    except Exception as exc:
+        logger.exception("Error loading effective notification preferences", extra={"username": username}, exc_info=exc)
+        return defaults
+
+
+def upsert_user_notification_preferences(
+    username: str,
+    browser_notify_on_away_replies: bool,
+    email_notify_on_away_replies: bool,
+    minimum_notify_interval_seconds: int,
+    digest_mode: str,
+    digest_interval_minutes: int,
+) -> bool:
+    if not engine:
+        return False
+
+    normalized_mode = (digest_mode or "immediate").strip().lower()
+    if normalized_mode not in {"immediate", "periodic"}:
+        normalized_mode = "immediate"
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO user_notification_preferences (
+                        username,
+                        browser_notify_on_away_replies,
+                        email_notify_on_away_replies,
+                        minimum_notify_interval_seconds,
+                        digest_mode,
+                        digest_interval_minutes,
+                        created_at,
+                        updated_at
+                    ) VALUES (
+                        :username, :browser_notify_on_away_replies, :email_notify_on_away_replies,
+                        :minimum_notify_interval_seconds, :digest_mode, :digest_interval_minutes, NOW(), NOW()
+                    )
+                    ON CONFLICT (username) DO UPDATE SET
+                        browser_notify_on_away_replies = EXCLUDED.browser_notify_on_away_replies,
+                        email_notify_on_away_replies = EXCLUDED.email_notify_on_away_replies,
+                        minimum_notify_interval_seconds = EXCLUDED.minimum_notify_interval_seconds,
+                        digest_mode = EXCLUDED.digest_mode,
+                        digest_interval_minutes = EXCLUDED.digest_interval_minutes,
+                        updated_at = NOW()
+                    """
                 ),
                 {
-                    'session_id': session_id,
-                    'category': 'Uncategorized',
-                    'updated_at': _now_iso(),
-                    'owner_username': username,
+                    "username": username,
+                    "browser_notify_on_away_replies": bool(browser_notify_on_away_replies),
+                    "email_notify_on_away_replies": bool(email_notify_on_away_replies),
+                    "minimum_notify_interval_seconds": max(0, int(minimum_notify_interval_seconds)),
+                    "digest_mode": normalized_mode,
+                    "digest_interval_minutes": max(1, int(digest_interval_minutes)),
                 },
             )
             conn.commit()
-            return True
-    except Exception as e:
-        logger.exception('Error ensuring session owner', exc_info=e)
+        return True
+    except Exception as exc:
+        logger.exception("Error upserting notification preferences", extra={"username": username}, exc_info=exc)
         return False
 
 
-def get_accessible_session_ids(username: str, is_admin: bool = False) -> set[str]:
+def enqueue_pending_reply_notification(username: str, session_id: str, reply_preview: str) -> bool:
     if not engine:
-        return set()
+        return False
     try:
         with engine.connect() as conn:
-            if is_admin:
-                rows = conn.execute(text(f'SELECT DISTINCT session_id FROM {CHAT_HISTORY_TABLE} WHERE session_id IS NOT NULL')).fetchall()
-                return {r[0] for r in rows if r[0]}
-
-            _ensure_session_metadata_columns(conn)
-            conn.execute(text('ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS owner_username VARCHAR'))
-            owned_rows = conn.execute(
-                text('SELECT session_id FROM session_metadata WHERE owner_username = :username'),
-                {'username': username},
-            ).fetchall()
-            shared_rows = conn.execute(
+            conn.execute(
                 text(
-                    'SELECT DISTINCT s.session_id '
-                    'FROM memory_group_sessions s '
-                    'JOIN memory_group_members m ON m.group_id = s.group_id '
-                    'WHERE m.username = :username'
+                    """
+                    INSERT INTO pending_reply_notifications (username, session_id, reply_preview, created_at)
+                    VALUES (:username, :session_id, :reply_preview, NOW())
+                    """
                 ),
-                {'username': username},
-            ).fetchall()
+                {
+                    "username": username,
+                    "session_id": session_id,
+                    "reply_preview": (reply_preview or "")[:500],
+                },
+            )
+            conn.commit()
+        return True
+    except Exception as exc:
+        logger.exception("Error enqueuing pending reply notification", exc_info=exc)
+        return False
 
-        return {r[0] for r in owned_rows + shared_rows if r[0]}
-    except Exception as e:
-        logger.exception('Error loading accessible sessions', exc_info=e)
-        return set()
 
-
-def find_report_matches(
-    *,
-    username: str,
-    is_admin: bool = False,
-    keyword: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    session_id: Optional[str] = None,
-    category: Optional[str] = None,
-    shared_only: bool = False,
-    limit: int = 120,
-) -> List[Dict[str, Any]]:
+def list_pending_reply_notifications_for_digest(max_age_minutes: int = 30) -> List[Dict[str, object]]:
     if not engine:
         return []
-
-    keyword = (keyword or '').strip()
-    lower_keyword = keyword.lower()
-    from_dt = _to_dt(date_from)
-    to_dt = _to_dt(date_to)
-    accessible_ids = get_accessible_session_ids(username=username, is_admin=is_admin)
-    shared_ids = set(list_shared_sessions_for_user(username)) if not is_admin else set()
-
-    if not is_admin:
-        if shared_only:
-            accessible_ids = accessible_ids.intersection(shared_ids)
-        if session_id and session_id not in accessible_ids:
-            return []
-        if not accessible_ids:
-            return []
-
-    filters = ['h.session_id IS NOT NULL']
-    params: Dict[str, Any] = {}
-    if session_id:
-        filters.append('h.session_id = :session_id')
-        params['session_id'] = session_id
-
-    if category:
-        filters.append('COALESCE(sm.category, :default_category) = :category')
-        params['default_category'] = 'Uncategorized'
-        params['category'] = category
-
-    if not is_admin:
-        filters.append('h.session_id = ANY(:accessible_ids)')
-        params['accessible_ids'] = sorted(accessible_ids)
-
-    where_sql = ' AND '.join(filters)
-    sql = text(
-        f"""
-        SELECT h.id, h.session_id, h.message, COALESCE(sm.category, 'Uncategorized') AS category, sm.updated_at, sm.owner_username
-        FROM {CHAT_HISTORY_TABLE} h
-        LEFT JOIN session_metadata sm ON sm.session_id = h.session_id
-        WHERE {where_sql}
-        ORDER BY h.id DESC
-        LIMIT :limit
-        """
-    )
-    params['limit'] = max(10, min(limit, 500))
-
-    now = datetime.now(timezone.utc)
-    ranked: List[Dict[str, Any]] = []
-
     try:
         with engine.connect() as conn:
-            rows = conn.execute(sql, params).mappings().all()
-
-        for row in rows:
-            parsed = _parse_chat_payload(row['message'])
-            if not parsed:
-                continue
-            msg_type, content = parsed
-            haystack = content.lower()
-            if lower_keyword and lower_keyword not in haystack:
-                continue
-
-            updated_dt = _to_dt(row.get('updated_at')) or now
-            if from_dt and updated_dt < from_dt:
-                continue
-            if to_dt and updated_dt > to_dt:
-                continue
-
-            exact_boost = 4.0 if lower_keyword and re.search(rf'\b{re.escape(lower_keyword)}\b', haystack) else (1.5 if lower_keyword else 0.0)
-            days_old = max(0.0, (now - updated_dt).total_seconds() / 86400.0)
-            recency_boost = max(0.0, 2.5 - math.log(days_old + 1.0, 2))
-            role_weight = 1.5 if msg_type == 'ai' else 1.0
-            if msg_type == 'ai' and ('summary' in haystack or 'report' in haystack):
-                role_weight += 0.5
-
-            score = round((exact_boost + recency_boost) * role_weight, 4)
-            ranked.append({
-                'session_id': row['session_id'],
-                'category': row['category'] or 'Uncategorized',
-                'owner_username': row.get('owner_username'),
-                'message_role': msg_type,
-                'snippet': _extract_snippet(content, keyword),
-                'updated_at': updated_dt.isoformat(),
-                'score': score,
-                'shared_via_group': row['session_id'] in shared_ids if not is_admin else False,
-            })
-
-        ranked.sort(key=lambda r: (-r['score'], r['updated_at']), reverse=False)
-        return ranked[: max(1, min(limit, 200))]
-    except Exception as e:
-        logger.exception('Error searching report matches', exc_info=e)
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT id, username, session_id, reply_preview, created_at
+                    FROM pending_reply_notifications
+                    WHERE delivered_at IS NULL
+                      AND created_at <= NOW() - make_interval(mins => :max_age_minutes)
+                    ORDER BY username ASC, created_at ASC
+                    """
+                ),
+                {"max_age_minutes": max(1, int(max_age_minutes))},
+            ).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as exc:
+        logger.exception("Error listing pending reply notifications", exc_info=exc)
         return []
 
 
-def build_session_report_card(session_id: str, username: str, is_admin: bool = False) -> Dict[str, Any]:
-    allowed = get_accessible_session_ids(username=username, is_admin=is_admin)
-    if not is_admin and session_id not in allowed:
-        return {}
-
-    messages = list_chat_messages(session_id, dedupe=True)
-    if not messages:
-        return {}
-
-    ai_messages = [m['content'] for m in messages if m.get('type') == 'ai']
-    human_messages = [m['content'] for m in messages if m.get('type') == 'human']
-    highlights = []
-    for txt in ai_messages[:3]:
-        clean = ' '.join(txt.split())
-        highlights.append(clean[:240] + ('…' if len(clean) > 240 else ''))
-
-    return {
-        'session_id': session_id,
-        'totals': {
-            'messages': len(messages),
-            'human_messages': len(human_messages),
-            'ai_messages': len(ai_messages),
-        },
-        'highlights': highlights,
-        'open_questions': [q for q in human_messages if q.strip().endswith('?')][:5],
-        'latest_ai_summary': highlights[0] if highlights else '',
-    }
+def mark_pending_reply_notifications_delivered(ids: List[int]) -> int:
+    if not engine or not ids:
+        return 0
+    clean_ids = [int(i) for i in ids]
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("UPDATE pending_reply_notifications SET delivered_at = NOW() WHERE id = ANY(:ids)"),
+                {"ids": clean_ids},
+            )
+            conn.commit()
+            return int(result.rowcount or 0)
+    except Exception as exc:
+        logger.exception("Error marking pending reply notifications delivered", exc_info=exc)
+        return 0

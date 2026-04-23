@@ -15,7 +15,33 @@
             <button class="btn user-menu-trigger" type="button" data-user-menu-btn>Menu ▾</button>
             <div class="user-menu-panel" data-user-menu-panel>
                 <a href="admin.html" class="user-menu-item">Admin Panel</a>
+                <button class="user-menu-item" data-notification-settings-btn type="button">Notification Settings</button>
                 <button class="user-menu-item" data-logout-btn type="button">Logout</button>
+            </div>
+        </div>
+        <div id="notification-settings-modal" class="modal">
+            <div class="modal-content" style="max-width: 520px;">
+                <h3 style="margin-bottom: 12px;">Notification Preferences</h3>
+                <div style="display:flex; flex-direction:column; gap:10px;">
+                    <label><input type="checkbox" id="pref-browser-away"> Browser notify on away replies</label>
+                    <label><input type="checkbox" id="pref-email-away"> Email notify on away replies</label>
+                    <label>Minimum notify interval (seconds)
+                        <input type="number" id="pref-min-interval" min="0" class="modern-input" value="300">
+                    </label>
+                    <label>Digest mode
+                        <select id="pref-digest-mode" class="modern-input">
+                            <option value="immediate">Immediate</option>
+                            <option value="periodic">Periodic</option>
+                        </select>
+                    </label>
+                    <label>Digest interval (minutes)
+                        <input type="number" id="pref-digest-interval" min="1" class="modern-input" value="30">
+                    </label>
+                </div>
+                <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+                    <button id="pref-cancel-btn" class="btn" type="button">Cancel</button>
+                    <button id="pref-save-btn" class="btn primary-btn" type="button">Save</button>
+                </div>
             </div>
         </div>
         <!-- Update Banner -->

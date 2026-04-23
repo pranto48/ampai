@@ -78,6 +78,9 @@ from database import (
     touch_session,
     touch_session_updated_at,
     update_task,
+    get_effective_notification_preferences,
+    upsert_user_notification_preferences,
+    enqueue_pending_reply_notification,
 )
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
@@ -187,6 +190,14 @@ class MemoryGroupShareRequest(BaseModel):
 class ChatReplyNotificationRequest(BaseModel):
     session_id: str
     reply_preview: str
+
+
+class NotificationPreferencesUpdateRequest(BaseModel):
+    browser_notify_on_away_replies: bool = True
+    email_notify_on_away_replies: bool = False
+    minimum_notify_interval_seconds: int = 300
+    digest_mode: str = "immediate"
+    digest_interval_minutes: int = 30
 
 
 class TaskCreateRequest(BaseModel):
@@ -425,6 +436,19 @@ def _check_redis_health() -> dict:
         return {"ok": False, "details": str(exc)}
 
 
+def _notification_throttle_active(username: str, session_id: str, interval_seconds: int) -> bool:
+    if interval_seconds <= 0:
+        return False
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+        redis_client = Redis.from_url(redis_url, socket_timeout=2)
+        key = f"notify:chat-reply:{username}:{session_id}"
+        added = redis_client.set(key, "1", ex=interval_seconds, nx=True)
+        return not bool(added)
+    except Exception:
+        return False
+
+
 def _check_model_provider_health() -> dict:
     provider = (get_all_configs().get("default_model") or "ollama").strip().lower()
     try:
@@ -543,18 +567,55 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
 
 @app.post("/api/notifications/chat-reply")
 def notify_chat_reply(request: ChatReplyNotificationRequest, current_user: UserContext = Depends(require_authenticated_user)):
-    enabled = str(get_config("chat_reply_email_notifications", "false")).strip().lower() in {"1", "true", "yes", "on"}
-    if not enabled:
-        return {"status": "disabled"}
+    prefs = get_effective_notification_preferences(current_user.username)
+    interval_seconds = int(prefs.get("minimum_notify_interval_seconds") or 0)
+    if _notification_throttle_active(current_user.username, request.session_id, interval_seconds):
+        return {"status": "throttled"}
 
     preview = (request.reply_preview or "").strip()
     if len(preview) > 500:
         preview = preview[:500] + "..."
+
+    digest_mode = (prefs.get("digest_mode") or "immediate").strip().lower()
+    if digest_mode == "periodic":
+        queued = enqueue_pending_reply_notification(current_user.username, request.session_id, preview)
+        return {"status": "queued" if queued else "queue_failed"}
+
+    if not bool(prefs.get("email_notify_on_away_replies")):
+        return {"status": "email_disabled"}
+
     sent = _send_resend_email(
         subject=f"AmpAI reply ready for {current_user.username}",
-        body_text=f"Session: {request.session_id}\n\nReply preview:\n{preview}",
+        body_text=f"User: {current_user.username}\nSession: {request.session_id}\n\nReply preview:\n{preview}",
     )
     return {"status": "sent" if sent else "not_sent"}
+
+
+@app.get("/api/users/me/notification-preferences")
+def get_my_notification_preferences(current_user: UserContext = Depends(require_authenticated_user)):
+    return get_effective_notification_preferences(current_user.username)
+
+
+@app.put("/api/users/me/notification-preferences")
+def update_my_notification_preferences(
+    request: NotificationPreferencesUpdateRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    digest_mode = (request.digest_mode or "immediate").strip().lower()
+    if digest_mode not in {"immediate", "periodic"}:
+        raise HTTPException(status_code=400, detail="digest_mode must be immediate or periodic")
+
+    ok = upsert_user_notification_preferences(
+        username=current_user.username,
+        browser_notify_on_away_replies=bool(request.browser_notify_on_away_replies),
+        email_notify_on_away_replies=bool(request.email_notify_on_away_replies),
+        minimum_notify_interval_seconds=max(0, int(request.minimum_notify_interval_seconds)),
+        digest_mode=digest_mode,
+        digest_interval_minutes=max(1, int(request.digest_interval_minutes)),
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save notification preferences")
+    return {"status": "success", "preferences": get_effective_notification_preferences(current_user.username)}
 
 
 @app.post("/api/integrations/email/summary-today")
@@ -1141,6 +1202,11 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "default_model": configs.get("default_model"),
         "chat_agent_name": configs.get("chat_agent_name") or "AI Agent",
         "chat_agent_avatar_url": configs.get("chat_agent_avatar_url") or "",
+        "notification_default_browser_notify_on_away_replies": configs.get("notification_default_browser_notify_on_away_replies", "true"),
+        "notification_default_email_notify_on_away_replies": configs.get("notification_default_email_notify_on_away_replies", configs.get("chat_reply_email_notifications", "false")),
+        "notification_default_minimum_notify_interval_seconds": configs.get("notification_default_minimum_notify_interval_seconds", "300"),
+        "notification_default_digest_mode": configs.get("notification_default_digest_mode", "immediate"),
+        "notification_default_digest_interval_minutes": configs.get("notification_default_digest_interval_minutes", "30"),
     }
 
 
