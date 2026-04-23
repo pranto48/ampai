@@ -2,6 +2,7 @@ import os
 import logging
 from datetime import datetime, timezone
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, select, inspect, text, Boolean
+from langchain_community.chat_message_histories import SQLChatMessageHistory
 
 
 def get_logger(name: str):
@@ -79,6 +80,11 @@ try:
     metadata.create_all(engine)
 except Exception:
     pass
+
+
+def get_sql_chat_history(session_id: str):
+    """Compatibility helper used by older agent/main revisions."""
+    return SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
 
 
 def _ensure_session_metadata_columns(conn):
