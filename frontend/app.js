@@ -21,6 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
     const sidebar = document.querySelector('.sidebar');
     const tasksViewBtn = document.getElementById('tasks-view-btn');
+    const sidebarChatBtn = document.getElementById('sidebar-chat-btn');
     const taskQuickAddInput = document.getElementById('task-quick-add-input');
     const taskQuickAddBtn = document.getElementById('task-quick-add-btn');
     const summarizeEmailBtn = document.getElementById('summarize-email-btn');
@@ -28,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentSessionId = generateSessionId();
     let currentSessionCategory = "Uncategorized";
     let currentView = 'chat';
+    let taskFilter = 'today';
     let sessionFilters = { query: '', archived: false };
     let sessionsById = {};
     currentSessionIdDisplay.textContent = currentSessionId;
@@ -104,6 +106,12 @@ document.addEventListener('DOMContentLoaded', () => {
         tasksViewBtn.addEventListener('click', async () => {
             currentView = 'tasks';
             await renderTasksView();
+        });
+    }
+    if (sidebarChatBtn) {
+        sidebarChatBtn.addEventListener('click', () => {
+            currentView = 'chat';
+            loadSessionHistory(currentSessionId);
         });
     }
 
@@ -665,56 +673,87 @@ document.addEventListener('DOMContentLoaded', () => {
     async function renderTasksView() {
         const tasks = await fetchTasks();
         const now = new Date();
-        const groups = {
-            overdue: [],
-            active: [],
-            complete: [],
-        };
+        const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 
-        tasks.forEach((task) => {
+        const bucketForTask = (task) => {
             const status = (task.status || '').toLowerCase();
             const dueDate = task.due_at ? new Date(task.due_at) : null;
-            if (status === 'done' || status === 'completed') groups.complete.push(task);
-            else if (dueDate && dueDate < now) groups.overdue.push(task);
-            else groups.active.push(task);
+            if (status === 'done' || status === 'completed') return 'done';
+            if (dueDate && dueDate < now) return 'overdue';
+            if (dueDate && dueDate >= startOfToday && dueDate <= endOfToday) return 'today';
+            return 'upcoming';
+        };
+
+        const filteredTasks = tasks.filter((task) => bucketForTask(task) === taskFilter);
+        const sortedTasks = filteredTasks.sort((a, b) => {
+            const aDue = a.due_at ? new Date(a.due_at).getTime() : Number.MAX_SAFE_INTEGER;
+            const bDue = b.due_at ? new Date(b.due_at).getTime() : Number.MAX_SAFE_INTEGER;
+            return aDue - bDue;
         });
 
-        const renderGroup = (title, list) => {
-            const items = list.map((task) => {
-                const due = task.due_at ? new Date(task.due_at).toLocaleString() : 'No due date';
-                return `
-                    <div class="message ai-message" style="margin-bottom:8px;">
-                        <div class="avatar">T</div>
-                        <div class="bubble" style="width:100%;">
-                            <div style="display:flex; justify-content:space-between; gap:8px; align-items:center;">
-                                <strong>#${task.id} ${task.title}</strong>
-                                <span class="badge">${task.priority || 'medium'}</span>
-                            </div>
-                            <div style="font-size:0.85rem; color:var(--text-secondary); margin:6px 0;">${task.description || ''}</div>
-                            <div style="font-size:0.8rem; color:var(--text-secondary); margin-bottom:8px;">Due: ${due} | Status: ${task.status}</div>
-                            <div style="display:flex; gap:6px; flex-wrap:wrap;">
-                                <button class="btn task-complete-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px;">Complete</button>
-                                <button class="btn task-edit-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px;">Edit</button>
-                                <button class="btn task-delete-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px; color:#ef4444;">Delete</button>
-                            </div>
+        const renderTaskCard = (task) => {
+            const due = task.due_at ? new Date(task.due_at).toLocaleString() : 'No due date';
+            const isDone = ['done', 'completed'].includes((task.status || '').toLowerCase());
+            return `
+                <div class="message ai-message" style="margin-bottom:8px;">
+                    <div class="avatar">T</div>
+                    <div class="bubble" style="width:100%;">
+                        <div style="display:flex; justify-content:space-between; gap:8px; align-items:center;">
+                            <strong>#${task.id} ${task.title}</strong>
+                            <span class="badge">${task.priority || 'medium'}</span>
+                        </div>
+                        <div style="font-size:0.85rem; color:var(--text-secondary); margin:6px 0;">${task.description || ''}</div>
+                        <div style="font-size:0.8rem; color:var(--text-secondary); margin-bottom:8px;">Due: ${due} | Status: ${task.status}</div>
+                        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                            ${isDone ? '' : `<button class="btn task-complete-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px;">Complete</button>`}
+                            <button class="btn task-edit-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px;">Edit</button>
+                            <button class="btn task-delete-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px; color:#ef4444;">Delete</button>
                         </div>
                     </div>
-                `;
-            }).join('');
-            return `<h3 style="margin: 12px 0 8px;">${title} (${list.length})</h3>${items || '<div style="color:var(--text-secondary);">None</div>'}`;
+                </div>
+            `;
         };
 
         chatMessages.innerHTML = `
             <div class="message ai-message welcome-message">
                 <div class="avatar">AI</div>
                 <div class="bubble">
-                    <p><strong>Tasks Dashboard</strong> — grouped by overdue, active, and completed.</p>
+                    <p><strong>Tasks Dashboard</strong> — create, filter, update, and complete tasks.</p>
                 </div>
             </div>
-            ${renderGroup('Overdue', groups.overdue)}
-            ${renderGroup('Active', groups.active)}
-            ${renderGroup('Completed', groups.complete)}
+            <div style="margin: 12px 0; display: flex; gap: 6px; flex-wrap: wrap;">
+                <button class="btn task-filter-btn" data-filter="today" style="width:auto; padding:6px 10px; ${taskFilter === 'today' ? 'border-color: var(--primary-color); color: var(--primary-color);' : ''}">Today</button>
+                <button class="btn task-filter-btn" data-filter="upcoming" style="width:auto; padding:6px 10px; ${taskFilter === 'upcoming' ? 'border-color: var(--primary-color); color: var(--primary-color);' : ''}">Upcoming</button>
+                <button class="btn task-filter-btn" data-filter="done" style="width:auto; padding:6px 10px; ${taskFilter === 'done' ? 'border-color: var(--primary-color); color: var(--primary-color);' : ''}">Done</button>
+                <button class="btn task-filter-btn" data-filter="overdue" style="width:auto; padding:6px 10px; ${taskFilter === 'overdue' ? 'border-color: var(--primary-color); color: var(--primary-color);' : ''}">Overdue</button>
+            </div>
+            <div style="display:flex; gap:6px; flex-wrap: wrap; margin-bottom: 12px;">
+                <input id="tasks-create-title" class="modern-input" placeholder="Task title" style="max-width: 260px;" />
+                <input id="tasks-create-due" type="datetime-local" class="modern-input" style="max-width: 220px;" />
+                <button id="tasks-create-btn" class="btn primary-btn" style="width:auto; padding: 8px 12px;">Create</button>
+            </div>
+            <h3 style="margin: 12px 0 8px; text-transform: capitalize;">${taskFilter} (${sortedTasks.length})</h3>
+            ${sortedTasks.map(renderTaskCard).join('') || '<div style="color:var(--text-secondary);">No tasks in this filter.</div>'}
         `;
+
+        document.querySelectorAll('.task-filter-btn').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                taskFilter = btn.dataset.filter;
+                await renderTasksView();
+            });
+        });
+
+        const createBtn = document.getElementById('tasks-create-btn');
+        createBtn?.addEventListener('click', async () => {
+            const titleInput = document.getElementById('tasks-create-title');
+            const dueInput = document.getElementById('tasks-create-due');
+            const title = titleInput?.value?.trim();
+            if (!title) return;
+            const dueAt = dueInput?.value ? new Date(dueInput.value).toISOString() : null;
+            await createTask({ title, due_at: dueAt, session_id: currentSessionId });
+            await renderTasksView();
+        });
 
         document.querySelectorAll('.task-complete-btn').forEach((btn) => {
             btn.addEventListener('click', async () => {
@@ -732,7 +771,8 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.addEventListener('click', async () => {
                 const newTitle = prompt('New task title:');
                 if (!newTitle) return;
-                await patchTask(btn.dataset.taskId, { title: newTitle });
+                const newDue = prompt('New due date ISO (optional):');
+                await patchTask(btn.dataset.taskId, { title: newTitle, due_at: newDue || null });
                 await renderTasksView();
             });
         });

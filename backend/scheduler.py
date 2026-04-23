@@ -3,8 +3,14 @@ import re
 import json
 import time
 from apscheduler.schedulers.background import BackgroundScheduler
-from database import get_network_targets, list_tasks, engine, get_config, set_config
-from sqlalchemy import text
+from database import (
+    get_network_targets,
+    list_tasks,
+    get_config,
+    set_config,
+    set_session_category,
+    get_sql_chat_history,
+)
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from agent import chat_with_agent
@@ -127,17 +133,10 @@ def run_task_reminders():
     timestamp = now.strftime("%Y-%m-%d %H:%M:%S UTC")
     summary = "\n".join(reminder_lines)
     try:
-        with engine.connect() as conn:
-            upsert_meta = text(
-                "INSERT INTO session_metadata (session_id, category) VALUES (:s, :c) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category"
-            )
-            conn.execute(upsert_meta, {"s": session_id, "c": "System Tasks"})
-
-            ins_user = text("INSERT INTO message_store (session_id, message) VALUES (:s, :m)")
-            conn.execute(ins_user, {"s": session_id, "m": f"Run task reminder check at {timestamp}"})
-            conn.execute(ins_user, {"s": session_id, "m": f"**Task Reminder Report ({timestamp})**\n{summary}"})
-            conn.commit()
+        set_session_category(session_id, "System Tasks")
+        history = get_sql_chat_history(session_id)
+        history.add_user_message(f"Run task reminder check at {timestamp}")
+        history.add_ai_message(f"**Task Reminder Report ({timestamp})**\n{summary}")
         logger.info("Task reminders recorded", extra={"reminder_count": len(reminder_lines)})
     except Exception as e:
         logger.exception("Error saving task reminders", exc_info=e)
