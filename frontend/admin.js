@@ -59,12 +59,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const schedulerDiagnostics = document.getElementById('scheduler-diagnostics');
     const healthUpdatedAt = document.getElementById('health-updated-at');
 
-    loadAdminSessions();
-    loadConfigs();
-    loadCoreMemories();
-    loadSystemHealth();
-    setupConfigChangeTracking();
-    setupClearKeyButtons();
+    const initializeAdmin = async () => {
+        const user = await enforceAuth({ requiredRole: 'admin' });
+        if (!user) return;
+        loadAdminSessions();
+        loadConfigs();
+        loadCoreMemories();
+        loadSystemHealth();
+        setupConfigChangeTracking();
+        setupClearKeyButtons();
+    };
+    initializeAdmin();
     refreshHealthBtn.addEventListener('click', loadSystemHealth);
 
     function renderHealthTile(name, ok, details) {
