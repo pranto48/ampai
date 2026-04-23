@@ -139,6 +139,27 @@
             </table>
         </div>
 
+        
+        <div class="card">
+            <h2>Report Search</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Search reportable chat history and export as JSON/CSV.</p>
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap:10px; margin-top: 14px;">
+                <input id="admin-report-q" class="modern-input" placeholder="Keyword">
+                <input id="admin-report-session-id" class="modern-input" placeholder="Session ID">
+                <input id="admin-report-date-from" type="date" class="modern-input">
+                <input id="admin-report-date-to" type="date" class="modern-input">
+                <input id="admin-report-category" class="modern-input" placeholder="Category">
+            </div>
+            <label style="display:flex; gap:8px; margin-top:10px; color:var(--text-secondary);"><input type="checkbox" id="admin-report-shared-only">Shared only</label>
+            <div style="display:flex; gap:8px; margin-top:10px;">
+                <button id="admin-report-search-btn" class="btn" style="width:auto;">Search</button>
+                <button id="admin-report-export-json-btn" class="btn" style="width:auto;">Export JSON</button>
+                <button id="admin-report-export-csv-btn" class="btn" style="width:auto;">Export CSV</button>
+            </div>
+            <div id="admin-report-status" style="font-size:0.9rem; margin-top:8px;"></div>
+        </div>
+
+
         <div class="card">
             <h2>System Diagnostics</h2>
             <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 8px;">Recent health checks and scheduler activity.</p>

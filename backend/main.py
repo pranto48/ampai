@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import logging
+import json
 import os
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta, timezone
@@ -50,6 +51,10 @@ from database import (
     list_memory_groups_for_user,
     list_shared_sessions_for_user,
     export_all_sessions_for_backup,
+    ensure_session_owner,
+    find_report_matches,
+    build_session_report_card,
+    get_accessible_session_ids,
     list_chat_messages,
     get_sql_chat_history,
     list_tasks,
@@ -408,6 +413,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
         )
+        ensure_session_owner(request.session_id, user.username)
         touch_session(request.session_id)
         return result
     except Exception as e:
@@ -542,6 +548,57 @@ def get_media_assets(
     return {"media": list_media_assets(username=username)}
 
 
+def _can_access_session(session_id: str, current_user: UserContext) -> bool:
+    if current_user.role == "admin":
+        return True
+    return session_id in get_accessible_session_ids(username=current_user.username, is_admin=False)
+
+
+@app.get("/api/reports/find")
+def find_reports(
+    q: Optional[str] = Query(default=None),
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    session_id: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    shared_only: bool = Query(default=False),
+    limit: int = Query(default=60, ge=1, le=200),
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    if session_id and not _can_access_session(session_id, current_user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
+
+    matches = find_report_matches(
+        username=current_user.username,
+        is_admin=current_user.role == "admin",
+        keyword=q,
+        date_from=date_from,
+        date_to=date_to,
+        session_id=session_id,
+        category=category,
+        shared_only=shared_only,
+        limit=limit,
+    )
+    return {"count": len(matches), "matches": matches}
+
+
+@app.get("/api/reports/session-summary/{session_id}")
+def get_session_summary_report(session_id: str, current_user: UserContext = Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, current_user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
+
+    report = build_session_report_card(
+        session_id=session_id,
+        username=current_user.username,
+        is_admin=current_user.role == "admin",
+    )
+    if not report:
+        raise HTTPException(status_code=404, detail="No session data available")
+    return report
+
+
+
+
 @app.get("/api/sessions")
 def get_sessions(
     query: Optional[str] = Query(default=None),
@@ -551,7 +608,9 @@ def get_sessions(
 ):
     sessions = get_all_sessions(query=query, category=category, archived=archived)
     if current_user.role != "admin":
+        accessible_ids = get_accessible_session_ids(username=current_user.username, is_admin=False)
         shared_ids = set(list_shared_sessions_for_user(current_user.username))
+        sessions = [s for s in sessions if s.get("session_id") in accessible_ids]
         for session in sessions:
             if session["session_id"] in shared_ids:
                 session["shared_via_group"] = True
@@ -560,6 +619,8 @@ def get_sessions(
 
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str, user=Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
     try:
         messages = list_chat_messages(session_id, dedupe=True)
         return {"messages": messages}
@@ -569,6 +630,8 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
 
 @app.post("/api/sessions/{session_id}/category")
 def update_category(session_id: str, request: CategoryRequest, user=Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
     success = set_session_category(session_id, request.category)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to update category")
@@ -577,6 +640,8 @@ def update_category(session_id: str, request: CategoryRequest, user=Depends(requ
 
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str, user=Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
     try:
         delete_session_metadata(session_id)
         SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL).clear()
@@ -588,6 +653,8 @@ def delete_session(session_id: str, user=Depends(require_authenticated_user)):
 
 @app.get("/api/export/{session_id}")
 def export_session(session_id: str, user=Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
     try:
         messages = list_chat_messages(session_id, dedupe=True)
 
@@ -606,6 +673,7 @@ def export_session(session_id: str, user=Depends(require_authenticated_user)):
 @app.post("/api/import")
 def import_session(request: ImportRequest, user=Depends(require_authenticated_user)):
     try:
+        ensure_session_owner(request.session_id, user.username)
         history = get_sql_chat_history(request.session_id)
         existing_messages = {(msg["type"], msg["content"]) for msg in list_chat_messages(request.session_id, dedupe=False)}
         inserted = 0
