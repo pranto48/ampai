@@ -9,6 +9,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai
 
 engine = None
 metadata = MetaData()
+ENCRYPTED_PREFIX = "enc::"
 
 message_store = Table(
     'message_store', metadata,
@@ -61,6 +62,94 @@ try:
     metadata.create_all(engine)
 except Exception:
     pass
+
+
+def _load_fernet_keys() -> List[Fernet]:
+    active_key = os.getenv("CONFIG_ENCRYPTION_KEY")
+    previous_keys = os.getenv("CONFIG_ENCRYPTION_PREVIOUS_KEYS", "")
+
+    keys = []
+    if active_key:
+        keys.append(active_key)
+    if previous_keys:
+        keys.extend([k.strip() for k in previous_keys.split(",") if k.strip()])
+
+    fernets: List[Fernet] = []
+    for key in keys:
+        try:
+            fernets.append(Fernet(key.encode()))
+        except Exception:
+            print("Warning: invalid config encryption key provided; skipping key")
+    return fernets
+
+
+def encrypt_config_value(value: Optional[str]) -> Optional[str]:
+    if value is None or value == "":
+        return value
+    if value.startswith(ENCRYPTED_PREFIX):
+        return value
+
+    fernets = _load_fernet_keys()
+    if not fernets:
+        return value
+
+    token = fernets[0].encrypt(value.encode("utf-8")).decode("utf-8")
+    return f"{ENCRYPTED_PREFIX}{token}"
+
+
+def decrypt_config_value(value: Optional[str]) -> Optional[str]:
+    if value is None or value == "":
+        return value
+    if not value.startswith(ENCRYPTED_PREFIX):
+        return value
+
+    token = value[len(ENCRYPTED_PREFIX):]
+    fernets = _load_fernet_keys()
+    for f in fernets:
+        try:
+            return f.decrypt(token.encode("utf-8")).decode("utf-8")
+        except InvalidToken:
+            continue
+        except Exception:
+            continue
+    return None
+
+
+def migrate_app_config_encryption() -> dict:
+    if not engine:
+        return {"updated": 0, "failed": 0, "checked": 0}
+
+    updated = 0
+    failed = 0
+    checked = 0
+
+    try:
+        with engine.connect() as conn:
+            stmt = select(app_configs.c.config_key, app_configs.c.config_value)
+            rows = conn.execute(stmt).fetchall()
+            for key, value in rows:
+                checked += 1
+                if value is None or value == "":
+                    continue
+
+                current_plain = decrypt_config_value(value)
+                if current_plain is None:
+                    failed += 1
+                    continue
+
+                reencrypted = encrypt_config_value(current_plain)
+                if reencrypted != value:
+                    upsert_stmt = text(
+                        "INSERT INTO app_configs (config_key, config_value) VALUES (:k, :v) "
+                        "ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value"
+                    )
+                    conn.execute(upsert_stmt, {"k": key, "v": reencrypted})
+                    updated += 1
+            conn.commit()
+    except Exception as e:
+        print(f"Error migrating app config encryption: {e}")
+
+    return {"updated": updated, "failed": failed, "checked": checked}
 
 def get_all_sessions():
     if not engine:
@@ -128,7 +217,8 @@ def get_config(key: str, default=None):
             stmt = select(app_configs.c.config_value).where(app_configs.c.config_key == key)
             result = conn.execute(stmt).first()
             if result:
-                return result[0]
+                decrypted = decrypt_config_value(result[0])
+                return decrypted if decrypted is not None else default
             return default
     except Exception as e:
         print(f"Error getting config {key}: {e}")
@@ -142,7 +232,7 @@ def set_config(key: str, value: str):
                 "INSERT INTO app_configs (config_key, config_value) VALUES (:k, :v) "
                 "ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value"
             )
-            conn.execute(upsert_stmt, {"k": key, "v": value})
+            conn.execute(upsert_stmt, {"k": key, "v": encrypt_config_value(value)})
             conn.commit()
             return True
     except Exception as e:
@@ -157,7 +247,11 @@ def get_all_configs():
             if not inspect(engine).has_table("app_configs"): return {}
             stmt = select(app_configs.c.config_key, app_configs.c.config_value)
             result = conn.execute(stmt)
-            return {row[0]: row[1] for row in result}
+            output = {}
+            for row in result:
+                decrypted = decrypt_config_value(row[1])
+                output[row[0]] = decrypted if decrypted is not None else ""
+            return output
     except Exception as e:
         print(f"Error getting all configs: {e}")
         return {}
