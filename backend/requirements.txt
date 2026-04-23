@@ -16,5 +16,4 @@ PyPDF2
 duckduckgo-search
 ddgs
 APScheduler
-python-jose[cryptography]
-passlib[bcrypt]
+cryptography
