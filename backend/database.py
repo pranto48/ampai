@@ -9,6 +9,7 @@ from logging_utils import get_logger
 # Allow overriding for local testing vs docker
 # Default to Postgres container format
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
+CHAT_HISTORY_TABLE = os.getenv("CHAT_HISTORY_TABLE", "message_store")
 
 engine = None
 metadata = MetaData()
@@ -70,6 +71,31 @@ try:
 except Exception:
     pass
 
+DEFAULT_APP_CONFIG_KEYS = [
+    "web_search_secondary_provider",
+    "web_fallback_provider",
+    "serpapi_api_key",
+    "bing_api_key",
+    "custom_web_search_url",
+    "custom_web_search_api_key",
+]
+
+
+def ensure_default_app_config_keys():
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            for key in DEFAULT_APP_CONFIG_KEYS:
+                upsert_stmt = text(
+                    "INSERT INTO app_configs (config_key, config_value) VALUES (:k, :v) "
+                    "ON CONFLICT (config_key) DO NOTHING"
+                )
+                conn.execute(upsert_stmt, {"k": key, "v": ""})
+            conn.commit()
+    except Exception as e:
+        logger.exception("Error ensuring default config keys", exc_info=e)
+
 
 def migrate_session_metadata_schema():
     if not engine:
@@ -93,6 +119,7 @@ def migrate_session_metadata_schema():
 
 
 migrate_session_metadata_schema()
+ensure_default_app_config_keys()
 
 
 def _load_fernet_keys() -> List[Fernet]:
@@ -288,7 +315,10 @@ def get_all_sessions(query: Optional[str] = None, category: Optional[str] = None
                 })
             if query:
                 query_l = query.lower()
-                output = [s for s in output if query_l in s["session_id"].lower()]
+                output = [
+                    s for s in output
+                    if query_l in s["session_id"].lower() or query_l in (s["category"] or "").lower()
+                ]
             if category:
                 output = [s for s in output if s["category"] == category]
             if archived is not None:
@@ -308,21 +338,19 @@ def get_sql_chat_history(session_id: str) -> SQLChatMessageHistory:
     )
 
 def set_session_category(session_id: str, category: str):
-    if not engine:
-        return False
-    try:
-        with engine.connect() as conn:
-            # Upsert logic for sqlite: INSERT OR REPLACE
-            upsert_stmt = text(
-                "INSERT INTO session_metadata (session_id, category) VALUES (:s, :c) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category"
-            )
-            conn.execute(upsert_stmt, {"s": session_id, "c": category})
-            conn.commit()
-            return True
-    except Exception as e:
-        logger.exception("Error setting category", exc_info=e)
-        return False
+    return _upsert_session_metadata(session_id=session_id, category=category)
+
+
+def set_session_pinned(session_id: str, value: bool):
+    return _upsert_session_metadata(session_id=session_id, pinned=value)
+
+
+def set_session_archived(session_id: str, value: bool):
+    return _upsert_session_metadata(session_id=session_id, archived=value)
+
+
+def touch_session_updated_at(session_id: str):
+    return _upsert_session_metadata(session_id=session_id, touch_updated_at=True)
 
 def delete_session_metadata(session_id: str):
     if not engine: return False
