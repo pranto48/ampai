@@ -5,19 +5,17 @@ import shutil
 import uuid
 
 from database import (
-    get_all_sessions, set_session_category, delete_session_metadata, DATABASE_URL,
+    get_all_sessions, set_session_category, delete_session_metadata, get_sql_chat_history,
     get_all_configs, set_config, get_core_memories, delete_core_memory,
     get_network_targets, add_network_target, delete_network_target, migrate_app_config_encryption
 )
 from agent import chat_with_agent, get_redis_history
 from scheduler import start_scheduler, run_network_sweep
-from langchain_community.chat_message_histories import SQLChatMessageHistory
 from passlib.context import CryptContext
 from pydantic import BaseModel
 
 from agent import chat_with_agent, get_redis_history
 from database import (
-    DATABASE_URL,
     add_network_target,
     create_task,
     delete_core_memory,
@@ -28,6 +26,7 @@ from database import (
     get_all_sessions,
     get_core_memories,
     get_network_targets,
+    get_sql_chat_history,
     list_tasks,
     set_config,
     set_session_category,
@@ -292,7 +291,7 @@ def get_sessions(_: UserContext = Depends(require_authenticated_user)):
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+        history = get_sql_chat_history(session_id)
         messages = []
         for msg in history.messages:
             messages.append({"type": msg.type, "content": msg.content})
@@ -314,7 +313,7 @@ def delete_session(session_id: str, _: UserContext = Depends(require_authenticat
     try:
         delete_session_metadata(session_id)
 
-        sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+        sql_history = get_sql_chat_history(session_id)
         sql_history.clear()
 
         redis_history = get_redis_history(session_id)
@@ -328,7 +327,7 @@ def delete_session(session_id: str, _: UserContext = Depends(require_authenticat
 @app.get("/api/export/{session_id}")
 def export_session(session_id: str, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+        history = get_sql_chat_history(session_id)
         messages = [{"type": msg.type, "content": msg.content} for msg in history.messages]
 
         sessions = get_all_sessions()
@@ -346,16 +345,29 @@ def export_session(session_id: str, _: UserContext = Depends(require_authenticat
 @app.post("/api/import")
 def import_session(request: ImportRequest, _: UserContext = Depends(require_authenticated_user)):
     try:
-        history = SQLChatMessageHistory(session_id=request.session_id, connection_string=DATABASE_URL)
+        history = get_sql_chat_history(request.session_id)
+        existing_messages = {(msg.type, msg.content) for msg in history.messages}
+        inserted = 0
+        skipped = 0
 
         for msg in request.messages:
+            key = (msg.type, msg.content)
+            if key in existing_messages:
+                skipped += 1
+                continue
             if msg.type == "human":
                 history.add_user_message(msg.content)
+                inserted += 1
             elif msg.type == "ai":
                 history.add_ai_message(msg.content)
+                inserted += 1
+            else:
+                skipped += 1
+                continue
+            existing_messages.add(key)
 
         set_session_category(request.session_id, request.category)
-        return {"status": "success", "session_id": request.session_id}
+        return {"status": "success", "session_id": request.session_id, "inserted": inserted, "skipped": skipped}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

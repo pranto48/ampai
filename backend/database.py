@@ -1,7 +1,10 @@
 import os
+import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
+from langchain_community.chat_message_histories import SQLChatMessageHistory
 
 # Allow overriding for local testing vs docker
 # Default to Postgres container format
@@ -10,6 +13,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai
 engine = None
 metadata = MetaData()
 ENCRYPTED_PREFIX = "enc::"
+CHAT_HISTORY_TABLE = os.getenv("CHAT_HISTORY_TABLE", "chat_message_store")
 
 message_store = Table(
     'message_store', metadata,
@@ -157,13 +161,41 @@ def get_all_sessions():
     try:
         with engine.connect() as conn:
             inspector = inspect(engine)
-            if not inspector.has_table("message_store"):
+            if not inspector.has_table(CHAT_HISTORY_TABLE):
                 return []
-                
-            # Fetch all distinct sessions
-            stmt_sessions = select(message_store.c.session_id).distinct()
-            sessions_result = conn.execute(stmt_sessions)
-            session_ids = [row[0] for row in sessions_result]
+
+            # Derive sessions from the same canonical SQL history table used by /api/history.
+            session_rows = conn.execute(
+                text(
+                    f"SELECT id, session_id, message FROM {CHAT_HISTORY_TABLE} "
+                    "WHERE session_id IS NOT NULL ORDER BY id ASC"
+                )
+            ).fetchall()
+
+            # Safeguard: filter malformed/partial records and dedupe duplicated message rows.
+            by_session = {}
+            for _, session_id, raw_message in session_rows:
+                if not session_id or not raw_message:
+                    continue
+                try:
+                    payload = json.loads(raw_message)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+
+                msg_type = payload.get("type")
+                content = ((payload.get("data") or {}).get("content")) if isinstance(payload, dict) else None
+                if msg_type not in {"human", "ai"} or not isinstance(content, str):
+                    continue
+
+                bucket = by_session.setdefault(session_id, {"roles": set(), "fingerprints": set()})
+                fingerprint = f"{msg_type}:{content}"
+                if fingerprint in bucket["fingerprints"]:
+                    continue
+                bucket["fingerprints"].add(fingerprint)
+                bucket["roles"].add(msg_type)
+
+            # Include sessions that have at least one valid message.
+            session_ids = sorted([session_id for session_id, data in by_session.items() if data["fingerprints"]])
             
             # Fetch categories
             stmt_cats = select(session_metadata.c.session_id, session_metadata.c.category)
@@ -180,6 +212,14 @@ def get_all_sessions():
     except Exception as e:
         print(f"Error fetching sessions: {e}")
         return []
+
+
+def get_sql_chat_history(session_id: str) -> SQLChatMessageHistory:
+    return SQLChatMessageHistory(
+        session_id=session_id,
+        connection_string=DATABASE_URL,
+        table_name=CHAT_HISTORY_TABLE,
+    )
 
 def set_session_category(session_id: str, category: str):
     if not engine:
