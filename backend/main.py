@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import shutil
 import uuid
 import ftplib
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -157,6 +158,11 @@ class MemoryGroupShareRequest(BaseModel):
     session_id: str
 
 
+class ChatReplyNotificationRequest(BaseModel):
+    session_id: str
+    reply_preview: str
+
+
 class TaskCreateRequest(BaseModel):
     title: str
     description: str = ""
@@ -228,6 +234,27 @@ def _load_integration_credentials(provider: str) -> Dict[str, str]:
 
 def _save_integration_credentials(provider: str, credentials: Dict[str, str]) -> None:
     set_config(f"integration_email_{provider}_credentials", json.dumps(credentials))
+
+
+def _send_resend_email(subject: str, body_text: str) -> bool:
+    api_key = (get_config("resend_api_key") or "").strip()
+    from_email = (get_config("resend_from_email") or "").strip()
+    to_email = (get_config("notification_email_to") or "").strip()
+    if not api_key or not from_email or not to_email:
+        return False
+
+    payload = json.dumps({"from": from_email, "to": [to_email], "subject": subject, "text": body_text}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception:
+        return False
 
 
 def _ensure_valid_email_access_token(provider: str) -> str:
@@ -386,6 +413,78 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     except Exception as e:
         logger.exception("chat failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/notifications/chat-reply")
+def notify_chat_reply(request: ChatReplyNotificationRequest, current_user: UserContext = Depends(require_authenticated_user)):
+    enabled = str(get_config("chat_reply_email_notifications", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return {"status": "disabled"}
+
+    preview = (request.reply_preview or "").strip()
+    if len(preview) > 500:
+        preview = preview[:500] + "..."
+    sent = _send_resend_email(
+        subject=f"AmpAI reply ready for {current_user.username}",
+        body_text=f"Session: {request.session_id}\n\nReply preview:\n{preview}",
+    )
+    return {"status": "sent" if sent else "not_sent"}
+
+
+@app.post("/api/integrations/email/summary-today")
+def summarize_todays_email(request: EmailSummaryTodayRequest, _: UserContext = Depends(require_authenticated_user)):
+    provider = request.provider.strip().lower()
+    tz_name = request.timezone.strip() or "UTC"
+    try:
+        ZoneInfo(tz_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid timezone: {tz_name}") from exc
+
+    messages = _fetch_todays_email_messages(
+        provider=provider,
+        timezone_name=tz_name,
+        max_results=max(1, min(request.max_results, 100)),
+    )
+
+    if not messages:
+        return {"status": "success", "summary": "No messages found for today.", "messages_count": 0}
+
+    digest_lines = []
+    for idx, msg in enumerate(messages, 1):
+        digest_lines.append(
+            f"{idx}. From: {msg.get('from', '')}\n"
+            f"   Subject: {msg.get('subject', '(No subject)')}\n"
+            f"   Date: {msg.get('date', '')}\n"
+            f"   Snippet: {msg.get('snippet', '')}"
+        )
+
+    date_label = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    prompt = (
+        f"Summarize my {provider.title()} email inbox for {date_label} ({tz_name}). "
+        "Provide: (1) key topics, (2) urgent follow-ups, (3) calendar/time-sensitive items, "
+        "(4) a concise executive digest.\n\n"
+        "Today's messages:\n"
+        + "\n\n".join(digest_lines)
+    )
+
+    model_type = request.model_type or get_config("default_model", "ollama")
+    result = chat_with_agent(
+        session_id=request.session_id,
+        message=prompt,
+        model_type=model_type,
+        api_key=request.api_key,
+        memory_mode="full",
+        use_web_search=False,
+        attachments=[],
+    )
+    return {
+        "status": "success",
+        "provider": provider,
+        "timezone": tz_name,
+        "messages_count": len(messages),
+        "summary": result.get("content", ""),
+        "session_id": request.session_id,
+    }
 
 
 @app.post("/api/upload")

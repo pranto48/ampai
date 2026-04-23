@@ -53,6 +53,28 @@ def _send_resend_email(subject: str, body_text: str):
     except Exception:
         return False
 
+
+def _send_resend_email(subject: str, body_text: str):
+    api_key = (get_config("resend_api_key") or "").strip()
+    from_email = (get_config("resend_from_email") or "").strip()
+    to_email = (get_config("notification_email_to") or "").strip()
+    if not api_key or not from_email or not to_email:
+        return False
+    payload = json.dumps(
+        {"from": from_email, "to": [to_email], "subject": subject, "text": body_text}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception:
+        return False
+
 def ping_target(ip_address: str) -> dict:
     try:
         result = subprocess.run(['ping', '-c', '3', '-W', '2', ip_address], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

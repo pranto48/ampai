@@ -80,7 +80,8 @@ document.addEventListener('DOMContentLoaded', () => {
         'backup_ftp_path': document.getElementById('config-backup-ftp-path'),
         'resend_api_key': document.getElementById('config-resend-api-key'),
         'resend_from_email': document.getElementById('config-resend-from-email'),
-        'notification_email_to': document.getElementById('config-notification-email-to')
+        'notification_email_to': document.getElementById('config-notification-email-to'),
+        'chat_reply_email_notifications': document.getElementById('config-chat-reply-email-notifications')
     };
     const SECRET_CONFIG_KEYS = new Set([
         'generic_api_key',
@@ -192,12 +193,16 @@ document.addEventListener('DOMContentLoaded', () => {
     function setupConfigChangeTracking() {
         for (const [key, input] of Object.entries(configInputs)) {
             input.addEventListener('input', () => {
-                if (input.value !== (initialConfigValues[key] ?? '')) {
+                const currentValue = input.type === 'checkbox' ? String(!!input.checked) : input.value;
+                if (currentValue !== (initialConfigValues[key] ?? '')) {
                     dirtyConfigKeys.add(key);
                 } else {
                     dirtyConfigKeys.delete(key);
                 }
             });
+            if (input.type === 'checkbox') {
+                input.addEventListener('change', () => input.dispatchEvent(new Event('input')));
+            }
         }
     }
 
@@ -274,12 +279,18 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await apiFetch('/api/admin/configs');
             const data = await res.json();
             for (const [key, input] of Object.entries(configInputs)) {
-                if (data[key]) {
-                    input.value = data[key];
+                if (input.type === 'checkbox') {
+                    const checked = String(data[key] || '').toLowerCase() === 'true';
+                    input.checked = checked;
+                    initialConfigValues[key] = String(checked);
                 } else {
-                    input.value = '';
+                    if (data[key]) {
+                        input.value = data[key];
+                    } else {
+                        input.value = '';
+                    }
+                    initialConfigValues[key] = input.value;
                 }
-                initialConfigValues[key] = input.value;
                 dirtyConfigKeys.delete(key);
             }
         } catch (e) {
@@ -294,7 +305,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const payload = {};
         for (const key of dirtyConfigKeys) {
             const input = configInputs[key];
-            const value = input.value.trim();
+            const value = input.type === 'checkbox' ? String(!!input.checked) : input.value.trim();
             if (SECRET_CONFIG_KEYS.has(key) && value === '') {
                 payload[key] = CLEAR_VALUE_SENTINEL;
             } else {

@@ -67,6 +67,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const currentSessionIdDisplay = document.getElementById('current-session-id');
     const sessionCategorySelect = document.getElementById('session-category');
     const deleteSessionBtn = document.getElementById('delete-session-btn');
+    const fullscreenChatBtn = document.getElementById('fullscreen-chat-btn');
     const attachBtn = document.getElementById('attach-btn');
     const fileInput = document.getElementById('file-input');
     const attachmentPreview = document.getElementById('attachment-preview');
@@ -95,6 +96,20 @@ document.addEventListener('DOMContentLoaded', () => {
     currentSessionIdDisplay.textContent = currentSessionId;
 
     let globalConfigs = {};
+    let isUserAway = false;
+
+    function toggleFullscreenChat() {
+        const container = document.querySelector('.app-container');
+        if (!container) return;
+        container.classList.toggle('chat-fullscreen');
+        localStorage.setItem('chat_fullscreen', container.classList.contains('chat-fullscreen') ? '1' : '0');
+    }
+
+    function setSidebarMinimized(minimized) {
+        if (!sidebar) return;
+        sidebar.classList.toggle('minimized', !!minimized);
+        localStorage.setItem('sidebar_minimized', minimized ? '1' : '0');
+    }
 
     function setSidebarMinimized(minimized) {
         if (!sidebar) return;
@@ -151,11 +166,24 @@ document.addEventListener('DOMContentLoaded', () => {
         setSidebarMinimized(savedMinimized ? savedMinimized === '1' : shouldAutoMinimize);
     }
 
+    const appContainer = document.querySelector('.app-container');
+    if (appContainer && localStorage.getItem('chat_fullscreen') === '1') {
+        appContainer.classList.add('chat-fullscreen');
+    }
+
     if (sidebarMinimizeBtn) {
         sidebarMinimizeBtn.addEventListener('click', () => {
             setSidebarMinimized(!sidebar.classList.contains('minimized'));
         });
     }
+
+    if (fullscreenChatBtn) {
+        fullscreenChatBtn.addEventListener('click', toggleFullscreenChat);
+    }
+
+    window.addEventListener('blur', () => { isUserAway = true; });
+    window.addEventListener('focus', () => { isUserAway = false; });
+    document.addEventListener('visibilitychange', () => { isUserAway = document.hidden; });
 
     if (sessionSearchInput) {
         sessionSearchInput.addEventListener('input', () => {
@@ -505,6 +533,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 // Refresh sessions list in case this was a new session
                 loadSessions();
+                if (isUserAway) {
+                    if ('Notification' in window) {
+                        if (Notification.permission === 'granted') {
+                            new Notification('AmpAI Reply Ready', { body: data.response?.slice(0, 120) || 'New AI reply received.' });
+                        } else if (Notification.permission !== 'denied') {
+                            Notification.requestPermission();
+                        }
+                    }
+                    fetch('/api/notifications/chat-reply', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            session_id: currentSessionId,
+                            reply_preview: data.response || '',
+                        }),
+                    }).catch(() => {});
+                }
             } else {
                 appendMessage('ai', `Error: ${data.detail || 'Something went wrong.'}`);
             }
