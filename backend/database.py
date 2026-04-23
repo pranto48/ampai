@@ -13,9 +13,12 @@ def get_logger(name: str):
 logger = get_logger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
+CHAT_HISTORY_TABLE = os.getenv("CHAT_HISTORY_TABLE", "chat_message_store")
 
 engine = None
 metadata = MetaData()
+ENCRYPTED_PREFIX = "enc::"
+logger = get_logger(__name__)
 
 # LangChain SQLChatMessageHistory compatibility table.
 message_store = Table(
@@ -108,7 +111,7 @@ def get_all_sessions(query: str = "", include_archived: bool = False):
     try:
         with engine.connect() as conn:
             inspector = inspect(engine)
-            if not inspector.has_table("message_store"):
+            if not inspector.has_table(CHAT_HISTORY_TABLE):
                 return []
 
             _ensure_session_metadata_columns(conn)
@@ -157,6 +160,34 @@ def get_all_sessions(query: str = "", include_archived: bool = False):
 
 
 def set_session_category(session_id: str, category: str):
+    return _upsert_session_metadata(session_id=session_id, category=category)
+
+
+def set_session_pinned(session_id: str, value: bool):
+    return _upsert_session_metadata(session_id=session_id, pinned=value)
+
+
+def set_session_archived(session_id: str, value: bool):
+    return _upsert_session_metadata(session_id=session_id, archived=value)
+
+
+def touch_session_updated_at(session_id: str):
+    return _upsert_session_metadata(session_id=session_id, touch_updated_at=True)
+
+
+def set_session_pinned(session_id: str, pinned: bool):
+    return _upsert_session_metadata(session_id, pinned=pinned, touch_updated_at=True)
+
+
+def set_session_archived(session_id: str, archived: bool):
+    return _upsert_session_metadata(session_id, archived=archived, touch_updated_at=True)
+
+
+def touch_session_updated_at(session_id: str):
+    return _upsert_session_metadata(session_id, touch_updated_at=True)
+
+
+def set_session_flags(session_id: str, pinned: bool = None, archived: bool = None):
     if not engine:
         return False
     try:
@@ -236,7 +267,7 @@ def set_config(key: str, value: str):
                 "INSERT INTO app_configs (config_key, config_value) VALUES (:k, :v) "
                 "ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value"
             )
-            conn.execute(upsert_stmt, {"k": key, "v": value})
+            conn.execute(upsert_stmt, {"k": key, "v": encrypt_config_value(value)})
             conn.commit()
             return True
     except Exception as e:
