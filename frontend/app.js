@@ -38,6 +38,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const apiKeyLabel = document.getElementById('api-key-label');
     const newChatBtn = document.getElementById('new-chat-btn');
     const sessionsList = document.getElementById('sessions-list');
+    const sessionSearchInput = document.getElementById('session-search');
+    const showArchivedToggle = document.getElementById('show-archived-toggle');
     const currentSessionTitle = document.getElementById('current-session-title');
     const currentSessionIdDisplay = document.getElementById('current-session-id');
     const sessionCategorySelect = document.getElementById('session-category');
@@ -53,9 +55,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const summarizeEmailBtn = document.getElementById('summarize-email-btn');
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
     const sidebar = document.querySelector('.sidebar');
+    const tasksViewBtn = document.getElementById('tasks-view-btn');
+    const sidebarChatBtn = document.getElementById('sidebar-chat-btn');
+    const taskQuickAddInput = document.getElementById('task-quick-add-input');
+    const taskQuickAddBtn = document.getElementById('task-quick-add-btn');
+    const summarizeEmailBtn = document.getElementById('summarize-email-btn');
 
     let currentSessionId = generateSessionId();
     let currentSessionCategory = "Uncategorized";
+    let currentView = 'chat';
+    let taskFilter = 'today';
+    let sessionFilters = { query: '', archived: false };
+    let sessionsById = {};
     currentSessionIdDisplay.textContent = currentSessionId;
 
     let globalConfigs = {};
@@ -108,6 +119,62 @@ document.addEventListener('DOMContentLoaded', () => {
         document.addEventListener('click', (e) => {
             if (sidebar.classList.contains('open') && !sidebar.contains(e.target) && !mobileMenuBtn.contains(e.target)) {
                 sidebar.classList.remove('open');
+            }
+        });
+    }
+
+    if (tasksViewBtn) {
+        tasksViewBtn.addEventListener('click', async () => {
+            currentView = 'tasks';
+            await renderTasksView();
+        });
+    }
+    if (sidebarChatBtn) {
+        sidebarChatBtn.addEventListener('click', () => {
+            currentView = 'chat';
+            loadSessionHistory(currentSessionId);
+        });
+    }
+
+    if (taskQuickAddBtn && taskQuickAddInput) {
+        taskQuickAddBtn.addEventListener('click', async () => {
+            const title = taskQuickAddInput.value.trim();
+            if (!title) return;
+            const created = await createTask({ title, session_id: currentSessionId });
+            if (created) {
+                taskQuickAddInput.value = '';
+                if (currentView === 'tasks') await renderTasksView();
+            }
+        });
+    }
+
+    if (summarizeEmailBtn) {
+        summarizeEmailBtn.addEventListener('click', async () => {
+            appendMessage('ai', 'Generating today’s email summary...');
+            summarizeEmailBtn.disabled = true;
+            try {
+                const response = await fetch('/api/integrations/email/summary-today', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        provider: 'outlook',
+                        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+                        session_id: currentSessionId,
+                        model_type: modelSelect.value,
+                        api_key: apiKeyInput.value || null,
+                    }),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    appendMessage('ai', `Email summary error: ${data.detail || 'Failed to summarize inbox.'}`);
+                    return;
+                }
+                appendMessage('ai', data.summary || 'No summary generated.');
+                loadSessions();
+            } catch (error) {
+                appendMessage('ai', `Email summary failed: ${error.message}`);
+            } finally {
+                summarizeEmailBtn.disabled = false;
             }
         });
     }
@@ -290,7 +357,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     newChatBtn.addEventListener('click', () => {
+        currentView = 'chat';
         currentSessionId = generateSessionId();
+        currentSessionCategory = "Uncategorized";
+        sessionCategorySelect.value = "Uncategorized";
         currentSessionIdDisplay.textContent = currentSessionId;
         chatMessages.innerHTML = `
             <div class="message ai-message welcome-message">
@@ -307,6 +377,22 @@ document.addEventListener('DOMContentLoaded', () => {
         e.preventDefault();
         const message = messageInput.value.trim();
         if (!message && currentAttachments.length === 0) return;
+        currentView = 'chat';
+
+        if (message.toLowerCase().startsWith('/task ')) {
+            const quickTitle = message.substring(6).trim();
+            if (quickTitle) {
+                const created = await createTask({ title: quickTitle, session_id: currentSessionId });
+                if (created) {
+                    appendMessage('ai', `✅ Task created: #${created.id} ${created.title}`);
+                } else {
+                    appendMessage('ai', 'Failed to create task.');
+                }
+            }
+            messageInput.value = '';
+            sendBtn.setAttribute('disabled', 'true');
+            return;
+        }
 
         const sentAttachments = [...currentAttachments];
         currentAttachments = [];
@@ -373,7 +459,23 @@ document.addEventListener('DOMContentLoaded', () => {
         return 'session_' + Math.random().toString(36).substring(2, 9);
     }
 
-    function appendMessage(role, content, isPreFormatted = false) {
+    async function createTask(payload) {
+        try {
+            const response = await fetch('/api/tasks', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!response.ok) return null;
+            const data = await response.json();
+            return data.task;
+        } catch (error) {
+            console.error('Failed to create task', error);
+            return null;
+        }
+    }
+
+    function appendMessage(role, content, isPreFormatted = false, webSearchStatus = null) {
         const div = document.createElement('div');
         div.className = `message ${role}-message`;
         
@@ -395,6 +497,30 @@ document.addEventListener('DOMContentLoaded', () => {
                 .replace(/\n/g, '<br>');
                 
             bubble.innerHTML = formattedContent;
+        }
+
+        if (role === 'ai' && webSearchStatus) {
+            const statusBadge = document.createElement('div');
+            statusBadge.style.marginTop = '8px';
+            statusBadge.style.display = 'inline-block';
+            statusBadge.style.fontSize = '0.75rem';
+            statusBadge.style.padding = '3px 8px';
+            statusBadge.style.borderRadius = '999px';
+
+            if (webSearchStatus.status === 'success') {
+                statusBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+                statusBadge.style.border = '1px solid rgba(16, 185, 129, 0.35)';
+                statusBadge.style.color = '#10b981';
+                statusBadge.textContent = `Search: ${webSearchStatus.provider || 'available'} (${webSearchStatus.status})`;
+            } else {
+                statusBadge.style.background = 'rgba(239, 68, 68, 0.12)';
+                statusBadge.style.border = '1px solid rgba(239, 68, 68, 0.35)';
+                statusBadge.style.color = '#ef4444';
+                statusBadge.textContent = `Search: ${(webSearchStatus.provider || 'none')} (${webSearchStatus.status || 'failed'})`;
+                statusBadge.title = webSearchStatus.error || 'Web search failed';
+            }
+
+            bubble.appendChild(statusBadge);
         }
 
         div.appendChild(avatar);
@@ -441,18 +567,22 @@ document.addEventListener('DOMContentLoaded', () => {
             const archived = showArchivedToggle && showArchivedToggle.checked ? 'true' : 'false';
             const response = await apiFetch(`/api/sessions?query=${query}&archived=${archived}`);
             const data = await response.json();
-            
+
             sessionsList.innerHTML = '';
             if (data.sessions && data.sessions.length > 0) {
-                // Group sessions by category
+                data.sessions.sort((a, b) => {
+                    if ((b.pinned ? 1 : 0) !== (a.pinned ? 1 : 0)) return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+                    return new Date(b.updated_at || 0) - new Date(a.updated_at || 0);
+                });
+                sessionsById = {};
                 const groups = {};
                 data.sessions.forEach(s => {
+                    sessionsById[s.session_id] = s;
                     if (!groups[s.category]) groups[s.category] = [];
-                    groups[s.category].push(s.session_id);
+                    groups[s.category].push(s);
                 });
-                
+
                 for (const [category, ids] of Object.entries(groups)) {
-                    // Create Category Header
                     const header = document.createElement('div');
                     header.className = 'category-header';
                     header.style.fontSize = '0.75rem';
@@ -463,19 +593,71 @@ document.addEventListener('DOMContentLoaded', () => {
                     header.style.fontWeight = 'bold';
                     header.textContent = category;
                     sessionsList.appendChild(header);
-                    
-                    ids.forEach(sessionId => {
+
+                    ids.forEach((session) => {
+                        const sessionId = session.session_id;
                         const li = document.createElement('li');
                         li.className = 'session-item';
+                        li.dataset.sessionId = sessionId;
+                        li.style.display = 'flex';
+                        li.style.justifyContent = 'space-between';
+                        li.style.alignItems = 'center';
                         if (sessionId === currentSessionId) {
                             li.classList.add('active');
                             sessionCategorySelect.value = category; // Update dropdown for active
                         }
-                        li.textContent = sessionId;
-                        li.onclick = () => {
-                            sessionCategorySelect.value = category;
+
+                        const label = document.createElement('span');
+                        label.textContent = `${session.pinned ? '📌 ' : ''}${sessionId}`;
+                        label.style.flex = '1';
+                        label.style.overflow = 'hidden';
+                        label.style.textOverflow = 'ellipsis';
+                        label.style.whiteSpace = 'nowrap';
+                        label.onclick = () => {
+                            sessionCategorySelect.value = session.category;
                             loadSessionHistory(sessionId);
-                        }
+                        };
+
+                        const controls = document.createElement('span');
+                        controls.style.display = 'flex';
+                        controls.style.gap = '6px';
+
+                        const pinBtn = document.createElement('button');
+                        pinBtn.className = 'btn icon-btn';
+                        pinBtn.style.width = 'auto';
+                        pinBtn.style.padding = '2px 6px';
+                        pinBtn.textContent = session.pinned ? '📌' : '📍';
+                        pinBtn.title = session.pinned ? 'Unpin session' : 'Pin session';
+                        pinBtn.onclick = async (event) => {
+                            event.stopPropagation();
+                            await fetch(`/api/sessions/${sessionId}/pin`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ value: !session.pinned }),
+                            });
+                            loadSessions();
+                        };
+
+                        const archiveBtn = document.createElement('button');
+                        archiveBtn.className = 'btn icon-btn';
+                        archiveBtn.style.width = 'auto';
+                        archiveBtn.style.padding = '2px 6px';
+                        archiveBtn.textContent = session.archived ? '♻️' : '🗄️';
+                        archiveBtn.title = session.archived ? 'Unarchive session' : 'Archive session';
+                        archiveBtn.onclick = async (event) => {
+                            event.stopPropagation();
+                            await fetch(`/api/sessions/${sessionId}/archive`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ value: !session.archived }),
+                            });
+                            loadSessions();
+                        };
+
+                        controls.appendChild(pinBtn);
+                        controls.appendChild(archiveBtn);
+                        li.appendChild(label);
+                        li.appendChild(controls);
                         sessionsList.appendChild(li);
                     });
                 }
@@ -488,14 +670,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function loadSessionHistory(sessionId) {
+        currentView = 'chat';
         currentSessionId = sessionId;
         currentSessionIdDisplay.textContent = sessionId;
         
         // Update UI active state
         document.querySelectorAll('.session-item').forEach(el => {
-            if (el.textContent === sessionId) el.classList.add('active');
+            if (el.dataset.sessionId === sessionId) el.classList.add('active');
             else el.classList.remove('active');
         });
+        if (sessionsById[sessionId]?.category) {
+            sessionCategorySelect.value = sessionsById[sessionId].category;
+            currentSessionCategory = sessionsById[sessionId].category;
+        }
 
         try {
             chatMessages.innerHTML = '<div style="text-align:center; color:var(--text-secondary); margin-top:20px;">Loading memory...</div>';
@@ -522,6 +709,136 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             chatMessages.innerHTML = `<div style="color:red; text-align:center;">Failed to load memory: ${error.message}</div>`;
         }
+    }
+
+    async function fetchTasks(filters = {}) {
+        const query = new URLSearchParams(filters).toString();
+        const res = await fetch(`/api/tasks${query ? `?${query}` : ''}`);
+        if (!res.ok) return [];
+        const data = await res.json();
+        return data.tasks || [];
+    }
+
+    async function patchTask(taskId, payload) {
+        const res = await fetch(`/api/tasks/${taskId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        return res.ok;
+    }
+
+    async function removeTask(taskId) {
+        const res = await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+        return res.ok;
+    }
+
+    async function renderTasksView() {
+        const tasks = await fetchTasks();
+        const now = new Date();
+        const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+        const bucketForTask = (task) => {
+            const status = (task.status || '').toLowerCase();
+            const dueDate = task.due_at ? new Date(task.due_at) : null;
+            if (status === 'done' || status === 'completed') return 'done';
+            if (dueDate && dueDate < now) return 'overdue';
+            if (dueDate && dueDate >= startOfToday && dueDate <= endOfToday) return 'today';
+            return 'upcoming';
+        };
+
+        const filteredTasks = tasks.filter((task) => bucketForTask(task) === taskFilter);
+        const sortedTasks = filteredTasks.sort((a, b) => {
+            const aDue = a.due_at ? new Date(a.due_at).getTime() : Number.MAX_SAFE_INTEGER;
+            const bDue = b.due_at ? new Date(b.due_at).getTime() : Number.MAX_SAFE_INTEGER;
+            return aDue - bDue;
+        });
+
+        const renderTaskCard = (task) => {
+            const due = task.due_at ? new Date(task.due_at).toLocaleString() : 'No due date';
+            const isDone = ['done', 'completed'].includes((task.status || '').toLowerCase());
+            return `
+                <div class="message ai-message" style="margin-bottom:8px;">
+                    <div class="avatar">T</div>
+                    <div class="bubble" style="width:100%;">
+                        <div style="display:flex; justify-content:space-between; gap:8px; align-items:center;">
+                            <strong>#${task.id} ${task.title}</strong>
+                            <span class="badge">${task.priority || 'medium'}</span>
+                        </div>
+                        <div style="font-size:0.85rem; color:var(--text-secondary); margin:6px 0;">${task.description || ''}</div>
+                        <div style="font-size:0.8rem; color:var(--text-secondary); margin-bottom:8px;">Due: ${due} | Status: ${task.status}</div>
+                        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                            ${isDone ? '' : `<button class="btn task-complete-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px;">Complete</button>`}
+                            <button class="btn task-edit-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px;">Edit</button>
+                            <button class="btn task-delete-btn" data-task-id="${task.id}" style="width:auto; padding:4px 8px; color:#ef4444;">Delete</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+
+        chatMessages.innerHTML = `
+            <div class="message ai-message welcome-message">
+                <div class="avatar">AI</div>
+                <div class="bubble">
+                    <p><strong>Tasks Dashboard</strong> — create, filter, update, and complete tasks.</p>
+                </div>
+            </div>
+            <div style="margin: 12px 0; display: flex; gap: 6px; flex-wrap: wrap;">
+                <button class="btn task-filter-btn" data-filter="today" style="width:auto; padding:6px 10px; ${taskFilter === 'today' ? 'border-color: var(--primary-color); color: var(--primary-color);' : ''}">Today</button>
+                <button class="btn task-filter-btn" data-filter="upcoming" style="width:auto; padding:6px 10px; ${taskFilter === 'upcoming' ? 'border-color: var(--primary-color); color: var(--primary-color);' : ''}">Upcoming</button>
+                <button class="btn task-filter-btn" data-filter="done" style="width:auto; padding:6px 10px; ${taskFilter === 'done' ? 'border-color: var(--primary-color); color: var(--primary-color);' : ''}">Done</button>
+                <button class="btn task-filter-btn" data-filter="overdue" style="width:auto; padding:6px 10px; ${taskFilter === 'overdue' ? 'border-color: var(--primary-color); color: var(--primary-color);' : ''}">Overdue</button>
+            </div>
+            <div style="display:flex; gap:6px; flex-wrap: wrap; margin-bottom: 12px;">
+                <input id="tasks-create-title" class="modern-input" placeholder="Task title" style="max-width: 260px;" />
+                <input id="tasks-create-due" type="datetime-local" class="modern-input" style="max-width: 220px;" />
+                <button id="tasks-create-btn" class="btn primary-btn" style="width:auto; padding: 8px 12px;">Create</button>
+            </div>
+            <h3 style="margin: 12px 0 8px; text-transform: capitalize;">${taskFilter} (${sortedTasks.length})</h3>
+            ${sortedTasks.map(renderTaskCard).join('') || '<div style="color:var(--text-secondary);">No tasks in this filter.</div>'}
+        `;
+
+        document.querySelectorAll('.task-filter-btn').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                taskFilter = btn.dataset.filter;
+                await renderTasksView();
+            });
+        });
+
+        const createBtn = document.getElementById('tasks-create-btn');
+        createBtn?.addEventListener('click', async () => {
+            const titleInput = document.getElementById('tasks-create-title');
+            const dueInput = document.getElementById('tasks-create-due');
+            const title = titleInput?.value?.trim();
+            if (!title) return;
+            const dueAt = dueInput?.value ? new Date(dueInput.value).toISOString() : null;
+            await createTask({ title, due_at: dueAt, session_id: currentSessionId });
+            await renderTasksView();
+        });
+
+        document.querySelectorAll('.task-complete-btn').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                await patchTask(btn.dataset.taskId, { status: 'done' });
+                await renderTasksView();
+            });
+        });
+        document.querySelectorAll('.task-delete-btn').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                await removeTask(btn.dataset.taskId);
+                await renderTasksView();
+            });
+        });
+        document.querySelectorAll('.task-edit-btn').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                const newTitle = prompt('New task title:');
+                if (!newTitle) return;
+                const newDue = prompt('New due date ISO (optional):');
+                await patchTask(btn.dataset.taskId, { title: newTitle, due_at: newDue || null });
+                await renderTasksView();
+            });
+        });
     }
 
     // --- Update Checker Logic ---
