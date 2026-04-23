@@ -1100,69 +1100,16 @@ def list_shared_sessions_for_user(username: str):
         return []
 
 
-def ensure_session_access_schema() -> None:
-    if not engine:
-        return
-    try:
-        with engine.connect() as conn:
-            conn.execute(
-                text(
-                    "CREATE TABLE IF NOT EXISTS session_access ("
-                    "session_id VARCHAR PRIMARY KEY, "
-                    "owner_username VARCHAR NOT NULL, "
-                    "visibility VARCHAR NOT NULL DEFAULT 'private', "
-                    "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
-                    "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
-                )
-            )
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_session_access_owner ON session_access(owner_username)"))
-            conn.commit()
-    except Exception as e:
-        logger.exception("Error ensuring session_access schema", exc_info=e)
-
-
-def set_session_owner(session_id: str, owner_username: str, visibility: str = "private") -> bool:
+def memory_group_exists(group_id: int) -> bool:
     if not engine:
         return False
-    ensure_session_access_schema()
     try:
         with engine.connect() as conn:
-            conn.execute(
-                text(
-                    "INSERT INTO session_access (session_id, owner_username, visibility, created_at, updated_at) "
-                    "VALUES (:session_id, :owner_username, :visibility, NOW(), NOW()) "
-                    "ON CONFLICT (session_id) DO UPDATE SET "
-                    "owner_username = EXCLUDED.owner_username, "
-                    "visibility = EXCLUDED.visibility, "
-                    "updated_at = NOW()"
-                ),
-                {
-                    "session_id": session_id,
-                    "owner_username": owner_username,
-                    "visibility": visibility or "private",
-                },
-            )
-            conn.commit()
-            return True
+            exists = conn.execute(text("SELECT 1 FROM memory_groups WHERE id = :group_id"), {"group_id": group_id}).first()
+            return bool(exists)
     except Exception as e:
-        logger.exception("Error setting session owner", exc_info=e)
+        logger.exception("Error checking memory group", exc_info=e)
         return False
-
-
-def get_session_owner(session_id: str) -> Optional[str]:
-    if not engine:
-        return None
-    ensure_session_access_schema()
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(
-                text("SELECT owner_username FROM session_access WHERE session_id = :session_id"),
-                {"session_id": session_id},
-            ).first()
-            return row[0] if row else None
-    except Exception as e:
-        logger.exception("Error getting session owner", exc_info=e)
-        return None
 
 
 def session_exists(session_id: str) -> bool:
@@ -1170,54 +1117,123 @@ def session_exists(session_id: str) -> bool:
         return False
     try:
         with engine.connect() as conn:
-            row = conn.execute(
+            exists = conn.execute(
                 text(f"SELECT 1 FROM {CHAT_HISTORY_TABLE} WHERE session_id = :session_id LIMIT 1"),
                 {"session_id": session_id},
             ).first()
-            if row:
-                return True
-            md_row = conn.execute(
-                text("SELECT 1 FROM session_metadata WHERE session_id = :session_id LIMIT 1"),
-                {"session_id": session_id},
-            ).first()
-            if md_row:
-                return True
-            ensure_session_access_schema()
-            access_row = conn.execute(
-                text("SELECT 1 FROM session_access WHERE session_id = :session_id LIMIT 1"),
-                {"session_id": session_id},
-            ).first()
-            return bool(access_row)
+            return bool(exists)
     except Exception as e:
         logger.exception("Error checking session existence", exc_info=e)
         return False
 
 
-def user_can_access_session(session_id: str, username: str, role: str) -> bool:
-    if role == "admin":
-        return True
+def memory_group_membership_exists(group_id: int, username: str) -> bool:
     if not engine:
         return False
-    ensure_session_access_schema()
     try:
-        shared_ids = set(list_shared_sessions_for_user(username))
         with engine.connect() as conn:
-            row = conn.execute(
-                text("SELECT owner_username, visibility FROM session_access WHERE session_id = :session_id"),
-                {"session_id": session_id},
+            exists = conn.execute(
+                text(
+                    "SELECT 1 FROM memory_group_members "
+                    "WHERE group_id = :group_id AND username = :username"
+                ),
+                {"group_id": group_id, "username": username},
             ).first()
-            if row:
-                owner_username, visibility = row
-                if owner_username == username:
-                    return True
-                if visibility == "public":
-                    return True
-                if session_id in shared_ids:
-                    return True
-                return False
-            return session_id in shared_ids
+            return bool(exists)
     except Exception as e:
-        logger.exception("Error checking session access", exc_info=e)
+        logger.exception("Error checking memory group membership", exc_info=e)
+        return False
+
+
+def memory_group_session_share_exists(group_id: int, session_id: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text(
+                    "SELECT 1 FROM memory_group_sessions "
+                    "WHERE group_id = :group_id AND session_id = :session_id"
+                ),
+                {"group_id": group_id, "session_id": session_id},
+            ).first()
+            return bool(exists)
+    except Exception as e:
+        logger.exception("Error checking memory group session share", exc_info=e)
+        return False
+
+
+def get_memory_group_members(group_id: int):
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT username FROM memory_group_members "
+                    "WHERE group_id = :group_id ORDER BY username"
+                ),
+                {"group_id": group_id},
+            ).fetchall()
+            return [row[0] for row in rows]
+    except Exception as e:
+        logger.exception("Error listing memory group members", exc_info=e)
+        return []
+
+
+def get_memory_group_sessions(group_id: int):
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT session_id FROM memory_group_sessions "
+                    "WHERE group_id = :group_id ORDER BY session_id"
+                ),
+                {"group_id": group_id},
+            ).fetchall()
+            return [row[0] for row in rows]
+    except Exception as e:
+        logger.exception("Error listing memory group sessions", exc_info=e)
+        return []
+
+
+def remove_user_from_memory_group(group_id: int, username: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    "DELETE FROM memory_group_members "
+                    "WHERE group_id = :group_id AND username = :username"
+                ),
+                {"group_id": group_id, "username": username},
+            )
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.exception("Error removing memory group member", exc_info=e)
+        return False
+
+
+def unshare_session_from_group(group_id: int, session_id: str) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    "DELETE FROM memory_group_sessions "
+                    "WHERE group_id = :group_id AND session_id = :session_id"
+                ),
+                {"group_id": group_id, "session_id": session_id},
+            )
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.exception("Error unsharing memory group session", exc_info=e)
         return False
 
 
