@@ -297,7 +297,7 @@ def _check_model_provider_health() -> dict:
 
 def _check_search_provider_health() -> dict:
     configs = get_all_configs()
-    fallback = (configs.get("web_fallback_provider") or "").strip().lower()
+    fallback = (configs.get("web_search_secondary_provider") or configs.get("web_fallback_provider") or "").strip().lower()
     if fallback == "serpapi":
         return {"ok": bool(configs.get("serpapi_api_key")), "provider": "serpapi"}
     if fallback == "bing":
@@ -384,6 +384,7 @@ def chat(request: ChatRequest, _: UserContext = Depends(require_authenticated_us
         return {
             "response": response.get("content", ""),
             "web_search_status": response.get("web_search_status"),
+            "search_metadata": response.get("web_search_status"),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

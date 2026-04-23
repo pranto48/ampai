@@ -165,6 +165,14 @@
 
             <div style="margin-bottom: 20px;">
                 <h3>Web Search Fallback Provider</h3>
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Secondary Provider (used after DuckDuckGo)</label>
+                <select id="config-web-search-secondary-provider" class="modern-input" style="width: 320px; margin-bottom: 12px;">
+                    <option value="">None</option>
+                    <option value="serpapi">SerpAPI</option>
+                    <option value="bing">Bing</option>
+                    <option value="custom">Custom Provider</option>
+                </select>
+
                 <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Fallback Provider (used if DuckDuckGo fails)</label>
                 <select id="config-web-fallback-provider" class="modern-input" style="width: 320px; margin-bottom: 12px;">
                     <option value="">None</option>
