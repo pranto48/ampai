@@ -682,12 +682,18 @@ def create_user(username: str, password: str, role: str = 'user'):
         return False, 'password_too_short'
     try:
         with engine.connect() as conn:
-            existing = conn.execute(select(users.c.id).where(users.c.username == username)).first()
+            existing = conn.execute(
+                text("SELECT 1 FROM users WHERE username = :u LIMIT 1"),
+                {"u": username},
+            ).first()
             if existing:
                 return False, 'username_exists'
             conn.execute(
-                text("INSERT INTO users (username, password_hash, role, created_at) VALUES (:u, :p, :r, :c)"),
-                {'u': username, 'p': _hash_password(password), 'r': role, 'c': _now_iso()}
+                text(
+                    "INSERT INTO users (username, password_hash, role, created_at, updated_at) "
+                    "VALUES (:u, :p, :r, :c, :u2)"
+                ),
+                {'u': username, 'p': _hash_password(password), 'r': role, 'c': _now_iso(), 'u2': _now_iso()}
             )
             conn.commit()
             return True, 'created'
@@ -706,13 +712,16 @@ def verify_user_credentials(username: str, password: str):
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                select(users.c.id, users.c.username, users.c.password_hash, users.c.role).where(users.c.username == username)
+                text(
+                    "SELECT username, password_hash, role FROM users WHERE username = :username"
+                ),
+                {"username": username},
             ).first()
             if not row:
                 return None
-            if row.password_hash != _hash_password(password):
+            if row[1] != _hash_password(password):
                 return None
-            return {'id': row.id, 'username': row.username, 'role': row.role}
+            return {'id': 0, 'username': row[0], 'role': row[2]}
     except Exception as e:
         logger.warning(f"Error verifying user credentials: {e}")
         return None
