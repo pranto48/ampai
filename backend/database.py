@@ -1791,3 +1791,185 @@ def mark_pending_reply_notifications_delivered(ids: List[int]) -> int:
     except Exception as exc:
         logger.exception("Error marking pending reply notifications delivered", exc_info=exc)
         return 0
+
+
+def ensure_enterprise_tables() -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS audit_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        username VARCHAR,
+                        action VARCHAR NOT NULL,
+                        session_id VARCHAR,
+                        category VARCHAR,
+                        details TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS session_insights (
+                        session_id VARCHAR PRIMARY KEY,
+                        summary TEXT,
+                        tags TEXT,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Error ensuring enterprise tables", exc_info=exc)
+
+
+def log_audit_event(username: str, action: str, session_id: Optional[str] = None, category: Optional[str] = None, details: Optional[str] = None) -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO audit_events (username, action, session_id, category, details, created_at)
+                    VALUES (:username, :action, :session_id, :category, :details, NOW())
+                    """
+                ),
+                {
+                    "username": username,
+                    "action": action,
+                    "session_id": session_id,
+                    "category": category,
+                    "details": (details or "")[:2000],
+                },
+            )
+            conn.commit()
+    except Exception:
+        # do not fail user flow on audit logging
+        pass
+
+
+def list_audit_events(limit: int = 200) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    safe_limit = max(1, min(int(limit), 1000))
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT id, username, action, session_id, category, details, created_at
+                    FROM audit_events
+                    ORDER BY id DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": safe_limit},
+            ).mappings().all()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def upsert_session_insight(session_id: str, summary: str, tags: List[str]) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO session_insights (session_id, summary, tags, updated_at)
+                    VALUES (:session_id, :summary, :tags, NOW())
+                    ON CONFLICT (session_id) DO UPDATE SET
+                        summary = EXCLUDED.summary,
+                        tags = EXCLUDED.tags,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "session_id": session_id,
+                    "summary": (summary or "")[:4000],
+                    "tags": ",".join([t.strip() for t in tags if t.strip()])[:1000],
+                },
+            )
+            conn.commit()
+        return True
+    except Exception as exc:
+        logger.exception("Error upserting session insight", exc_info=exc)
+        return False
+
+
+def get_session_insight(session_id: str) -> Dict[str, str]:
+    if not engine:
+        return {}
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT summary, tags, updated_at FROM session_insights WHERE session_id = :session_id"),
+                {"session_id": session_id},
+            ).mappings().first()
+            return dict(row) if row else {}
+    except Exception:
+        return {}
+
+
+def redact_pii_text(text_value: str) -> str:
+    text_value = text_value or ""
+    # email
+    redacted = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[REDACTED_EMAIL]", text_value)
+    # phone
+    redacted = re.sub(r"\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?){2}\d{4}\b", "[REDACTED_PHONE]", redacted)
+    # ssn-like
+    redacted = re.sub(r"\b\d{3}-\d{2}-\d{4}\b", "[REDACTED_SSN]", redacted)
+    # credit-card like 13-19 digits
+    redacted = re.sub(r"\b(?:\d[ -]*?){13,19}\b", "[REDACTED_CARD]", redacted)
+    return redacted
+
+
+def apply_retention_policy(max_age_days: int = 365, archive_only: bool = True) -> Dict[str, int]:
+    if not engine:
+        return {"archived": 0, "deleted": 0}
+    max_age_days = max(1, int(max_age_days))
+    archived = 0
+    deleted = 0
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT session_id
+                    FROM session_metadata
+                    WHERE updated_at IS NOT NULL
+                      AND updated_at::timestamptz < NOW() - make_interval(days => :days)
+                    """
+                ),
+                {"days": max_age_days},
+            ).fetchall()
+            stale_ids = [r[0] for r in rows if r and r[0]]
+            if not stale_ids:
+                return {"archived": 0, "deleted": 0}
+            if archive_only:
+                result = conn.execute(
+                    text("UPDATE session_metadata SET archived = TRUE WHERE session_id = ANY(:ids)"),
+                    {"ids": stale_ids},
+                )
+                archived = int(result.rowcount or 0)
+            else:
+                conn.execute(text(f"DELETE FROM {CHAT_HISTORY_TABLE} WHERE session_id = ANY(:ids)"), {"ids": stale_ids})
+                result = conn.execute(text("DELETE FROM session_metadata WHERE session_id = ANY(:ids)"), {"ids": stale_ids})
+                deleted = int(result.rowcount or 0)
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Retention policy failed", exc_info=exc)
+    return {"archived": archived, "deleted": deleted}
+
+
+ensure_enterprise_tables()

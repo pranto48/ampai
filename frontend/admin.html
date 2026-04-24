@@ -420,10 +420,22 @@
                         <input id="config-email-digest-timezone" type="text" class="modern-input" placeholder="UTC">
                     </div>
                 </div>
-                <div style="margin-top: 12px; display:flex; align-items:center; gap: 10px;">
-                    <button id="save-email-schedule-btn" class="btn" style="width:auto;">Save Email Schedule</button>
-                    <span id="email-schedule-status" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
-                </div>
+            <div style="margin-top: 12px; display:flex; align-items:center; gap: 10px;">
+                <button id="save-email-schedule-btn" class="btn" style="width:auto;">Save Email Schedule</button>
+                <span id="email-schedule-status" style="font-size: 0.85rem; color: var(--text-secondary);"></span>
+            </div>
+        </div>
+
+            <div style="margin-bottom: 20px;">
+                <h3>Governance & Retention</h3>
+                <label style="display:flex; align-items:center; gap:8px; color:var(--text-secondary); font-size:0.9rem; margin-bottom:8px;">
+                    <input type="checkbox" id="config-pii-redaction-enabled">
+                    Enable PII redaction before memory persistence
+                </label>
+                <label style="display:block; font-size:0.85rem; color:var(--text-secondary); margin-bottom:6px;">Retention max age (days)</label>
+                <input type="number" id="config-retention-max-age-days" class="modern-input" min="1" value="365" style="max-width: 220px; margin-bottom: 8px;">
+                <button id="run-retention-btn" class="btn" style="width:auto;">Run Retention Now (Archive old)</button>
+                <span id="retention-status" style="margin-left:8px; color:var(--text-secondary);"></span>
             </div>
             
             <button id="save-configs-btn" class="btn primary-btn" style="width: auto; margin-top: 10px;">Save Configurations</button>

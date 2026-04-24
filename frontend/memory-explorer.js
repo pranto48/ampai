@@ -40,7 +40,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }),
     });
     if (!res.ok) {
-      body.innerHTML = `<tr><td colspan="6">Failed to load explorer data</td></tr>`;
+      body.innerHTML = `<tr><td colspan="9">Failed to load explorer data</td></tr>`;
       return;
     }
     const data = await res.json();
@@ -53,14 +53,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const rows = data.sessions || [];
     if (!rows.length) {
-      body.innerHTML = '<tr><td colspan="6" style="text-align:center;">No memories found</td></tr>';
+      body.innerHTML = '<tr><td colspan="9" style="text-align:center;">No memories found</td></tr>';
     } else {
       body.innerHTML = rows.map((s) => `
         <tr>
           <td>${s.session_id}</td>
           <td>${s.category || '-'}</td>
+          <td>${s.tier || '-'}</td>
           <td>${s.owner || '-'}</td>
           <td>${s.visibility || '-'}</td>
+          <td>${(s.insight?.tags || '').split(',').filter(Boolean).slice(0, 4).join(', ') || '-'}</td>
+          <td>${(s.insight?.summary || '-').slice(0, 110)}</td>
           <td>${fmtDate(s.updated_at)}</td>
           <td><a class="btn" style="width:auto; padding:4px 8px;" href="index.html?session=${encodeURIComponent(s.session_id)}">Open</a></td>
         </tr>

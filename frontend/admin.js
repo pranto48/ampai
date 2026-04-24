@@ -97,7 +97,9 @@ document.addEventListener('DOMContentLoaded', () => {
         'notification_default_email_notify_on_away_replies': document.getElementById('config-notification-default-email-notify-on-away-replies'),
         'notification_default_minimum_notify_interval_seconds': document.getElementById('config-notification-default-minimum-notify-interval-seconds'),
         'notification_default_digest_mode': document.getElementById('config-notification-default-digest-mode'),
-        'notification_default_digest_interval_minutes': document.getElementById('config-notification-default-digest-interval-minutes')
+        'notification_default_digest_interval_minutes': document.getElementById('config-notification-default-digest-interval-minutes'),
+        'pii_redaction_enabled': document.getElementById('config-pii-redaction-enabled'),
+        'retention_max_age_days': document.getElementById('config-retention-max-age-days')
     };
     const SECRET_CONFIG_KEYS = new Set([
         'generic_api_key',
@@ -143,6 +145,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const backupRestoreBtn = document.getElementById('backup-restore-btn');
     const backupRestoreJson = document.getElementById('backup-restore-json');
     const backupRestoreDryRun = document.getElementById('backup-restore-dry-run');
+    const runRetentionBtn = document.getElementById('run-retention-btn');
+    const retentionStatus = document.getElementById('retention-status');
     const groupNameInput = document.getElementById('group-name');
     const groupMembersInput = document.getElementById('group-members');
     const groupSelector = document.getElementById('group-selector');
@@ -180,6 +184,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (backupRestoreBtn) {
             backupRestoreBtn.addEventListener('click', restoreBackup);
         }
+        if (runRetentionBtn) {
+            runRetentionBtn.addEventListener('click', runRetentionNow);
+        }
         loadBackupHistory();
         if (createGroupBtn) {
             createGroupBtn.addEventListener('click', createGroup);
@@ -209,6 +216,29 @@ document.addEventListener('DOMContentLoaded', () => {
             ${details ? `<div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px;">${details}</div>` : ''}
         `;
         return tile;
+    }
+
+    async function runRetentionNow() {
+        if (!runRetentionBtn) return;
+        runRetentionBtn.disabled = true;
+        retentionStatus.textContent = 'Running...';
+        try {
+            const maxAge = Number(document.getElementById('config-retention-max-age-days')?.value || 365);
+            const res = await apiFetch('/api/admin/retention/run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ max_age_days: maxAge, archive_only: true }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Retention run failed');
+            retentionStatus.textContent = `Archived: ${data.archived || 0}, Deleted: ${data.deleted || 0}`;
+            retentionStatus.style.color = '#10b981';
+        } catch (error) {
+            retentionStatus.textContent = error.message;
+            retentionStatus.style.color = '#ef4444';
+        } finally {
+            runRetentionBtn.disabled = false;
+        }
     }
 
     async function loadSystemHealth() {

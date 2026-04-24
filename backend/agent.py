@@ -14,7 +14,7 @@ from logging_utils import get_logger
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_models import ChatOllama
-from database import get_config, get_core_memories, add_core_memory, create_task, get_sql_chat_history
+from database import get_config, get_core_memories, add_core_memory, create_task, get_sql_chat_history, redact_pii_text
 
 from langchain_core.chat_history import BaseChatMessageHistory
 
@@ -256,6 +256,11 @@ def chat_with_agent(
     if attachments:
         attachment_names = [a['filename'] for a in attachments]
         message_log = f"[Attachments: {', '.join(attachment_names)}]\n" + message
+
+    pii_redaction_enabled = str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    if pii_redaction_enabled:
+        message_log = redact_pii_text(message_log)
+        content = redact_pii_text(content)
 
     sql_history.add_user_message(message_log)
     sql_history.add_ai_message(content)
