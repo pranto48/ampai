@@ -6,7 +6,7 @@ import math
 import re
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Dict, Tuple
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, select, inspect, text
+from sqlalchemy import create_engine, MetaData, Table as SATable, Column, Integer, String, DateTime, Boolean, select, inspect, text
 from cryptography.fernet import Fernet, InvalidToken
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from logging_utils import get_logger
@@ -18,6 +18,11 @@ engine = None
 metadata = MetaData()
 ENCRYPTED_PREFIX = "enc::"
 logger = get_logger(__name__)
+
+
+def Table(*args, **kwargs):
+    kwargs.setdefault("extend_existing", True)
+    return SATable(*args, **kwargs)
 
 # LangChain SQLChatMessageHistory compatibility table.
 message_store = Table(
@@ -232,16 +237,6 @@ def _load_fernet_keys() -> List[Fernet]:
         except Exception:
             logger.warning("Invalid config encryption key provided; skipping key")
     return fernets
-
-
-users = Table(
-    'users', metadata,
-    Column('id', Integer, primary_key=True, autoincrement=True),
-    Column('username', String, unique=True),
-    Column('password_hash', String),
-    Column('role', String, default='user'),
-    Column('created_at', String, default=lambda: datetime.now(timezone.utc).isoformat())
-)
 
 
 def _now_iso() -> str:
@@ -687,12 +682,18 @@ def create_user(username: str, password: str, role: str = 'user'):
         return False, 'password_too_short'
     try:
         with engine.connect() as conn:
-            existing = conn.execute(select(users.c.id).where(users.c.username == username)).first()
+            existing = conn.execute(
+                text("SELECT 1 FROM users WHERE username = :u LIMIT 1"),
+                {"u": username},
+            ).first()
             if existing:
                 return False, 'username_exists'
             conn.execute(
-                text("INSERT INTO users (username, password_hash, role, created_at) VALUES (:u, :p, :r, :c)"),
-                {'u': username, 'p': _hash_password(password), 'r': role, 'c': _now_iso()}
+                text(
+                    "INSERT INTO users (username, password_hash, role, created_at, updated_at) "
+                    "VALUES (:u, :p, :r, :c, :u2)"
+                ),
+                {'u': username, 'p': _hash_password(password), 'r': role, 'c': _now_iso(), 'u2': _now_iso()}
             )
             conn.commit()
             return True, 'created'
@@ -711,13 +712,16 @@ def verify_user_credentials(username: str, password: str):
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                select(users.c.id, users.c.username, users.c.password_hash, users.c.role).where(users.c.username == username)
+                text(
+                    "SELECT username, password_hash, role FROM users WHERE username = :username"
+                ),
+                {"username": username},
             ).first()
             if not row:
                 return None
-            if row.password_hash != _hash_password(password):
+            if row[1] != _hash_password(password):
                 return None
-            return {'id': row.id, 'username': row.username, 'role': row.role}
+            return {'id': 0, 'username': row[0], 'role': row[2]}
     except Exception as e:
         logger.warning(f"Error verifying user credentials: {e}")
         return None
@@ -1128,6 +1132,82 @@ def session_exists(session_id: str) -> bool:
     except Exception as e:
         logger.exception("Error checking session existence", exc_info=e)
         return False
+
+
+def get_session_owner(session_id: str) -> Optional[str]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT owner_username FROM session_access WHERE session_id = :session_id"),
+                {"session_id": session_id},
+            ).first()
+            return row[0] if row and row[0] else None
+    except Exception:
+        return None
+
+
+def set_session_owner(session_id: str, owner_username: str, visibility: str = "private") -> bool:
+    if not engine:
+        return False
+    try:
+        vis = visibility if visibility in {"private", "shared"} else "private"
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO session_access (session_id, owner_username, visibility, created_at, updated_at)
+                    VALUES (:session_id, :owner_username, :visibility, NOW(), NOW())
+                    ON CONFLICT (session_id) DO UPDATE SET
+                        owner_username = EXCLUDED.owner_username,
+                        visibility = EXCLUDED.visibility,
+                        updated_at = NOW()
+                    """
+                ),
+                {"session_id": session_id, "owner_username": owner_username, "visibility": vis},
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.exception("Error setting session owner", exc_info=e)
+        return False
+
+
+def ensure_session_owner(session_id: str, owner_username: str) -> bool:
+    if get_session_owner(session_id):
+        return True
+    return set_session_owner(session_id=session_id, owner_username=owner_username, visibility="private")
+
+
+def get_accessible_session_ids(username: str, is_admin: bool = False) -> List[str]:
+    if not engine:
+        return []
+    if is_admin:
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(text("SELECT session_id FROM session_access")).fetchall()
+                return [r[0] for r in rows if r and r[0]]
+        except Exception:
+            return []
+    try:
+        shared_ids = set(list_shared_sessions_for_user(username))
+        with engine.connect() as conn:
+            own_rows = conn.execute(
+                text("SELECT session_id FROM session_access WHERE owner_username = :username"),
+                {"username": username},
+            ).fetchall()
+            own_ids = {r[0] for r in own_rows if r and r[0]}
+            return sorted(own_ids.union(shared_ids))
+    except Exception:
+        return []
+
+
+def user_can_access_session(session_id: str, username: str, role: str = "user") -> bool:
+    if role == "admin":
+        return True
+    accessible_ids = set(get_accessible_session_ids(username=username, is_admin=False))
+    return session_id in accessible_ids
 
 
 def memory_group_membership_exists(group_id: int, username: str) -> bool:
@@ -1791,3 +1871,237 @@ def mark_pending_reply_notifications_delivered(ids: List[int]) -> int:
     except Exception as exc:
         logger.exception("Error marking pending reply notifications delivered", exc_info=exc)
         return 0
+
+
+def ensure_enterprise_tables() -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS audit_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        username VARCHAR,
+                        action VARCHAR NOT NULL,
+                        session_id VARCHAR,
+                        category VARCHAR,
+                        details TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS session_insights (
+                        session_id VARCHAR PRIMARY KEY,
+                        summary TEXT,
+                        tags TEXT,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Error ensuring enterprise tables", exc_info=exc)
+
+
+def log_audit_event(username: str, action: str, session_id: Optional[str] = None, category: Optional[str] = None, details: Optional[str] = None) -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO audit_events (username, action, session_id, category, details, created_at)
+                    VALUES (:username, :action, :session_id, :category, :details, NOW())
+                    """
+                ),
+                {
+                    "username": username,
+                    "action": action,
+                    "session_id": session_id,
+                    "category": category,
+                    "details": (details or "")[:2000],
+                },
+            )
+            conn.commit()
+    except Exception:
+        # do not fail user flow on audit logging
+        pass
+
+
+def list_audit_events(limit: int = 200) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    safe_limit = max(1, min(int(limit), 1000))
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT id, username, action, session_id, category, details, created_at
+                    FROM audit_events
+                    ORDER BY id DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": safe_limit},
+            ).mappings().all()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def upsert_session_insight(session_id: str, summary: str, tags: List[str]) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO session_insights (session_id, summary, tags, updated_at)
+                    VALUES (:session_id, :summary, :tags, NOW())
+                    ON CONFLICT (session_id) DO UPDATE SET
+                        summary = EXCLUDED.summary,
+                        tags = EXCLUDED.tags,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "session_id": session_id,
+                    "summary": (summary or "")[:4000],
+                    "tags": ",".join([t.strip() for t in tags if t.strip()])[:1000],
+                },
+            )
+            conn.commit()
+        return True
+    except Exception as exc:
+        logger.exception("Error upserting session insight", exc_info=exc)
+        return False
+
+
+def get_session_insight(session_id: str) -> Dict[str, str]:
+    if not engine:
+        return {}
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT summary, tags, updated_at FROM session_insights WHERE session_id = :session_id"),
+                {"session_id": session_id},
+            ).mappings().first()
+            return dict(row) if row else {}
+    except Exception:
+        return {}
+
+
+def redact_pii_text(text_value: str) -> str:
+    text_value = text_value or ""
+    # email
+    redacted = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[REDACTED_EMAIL]", text_value)
+    # phone
+    redacted = re.sub(r"\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?){2}\d{4}\b", "[REDACTED_PHONE]", redacted)
+    # ssn-like
+    redacted = re.sub(r"\b\d{3}-\d{2}-\d{4}\b", "[REDACTED_SSN]", redacted)
+    # credit-card like 13-19 digits
+    redacted = re.sub(r"\b(?:\d[ -]*?){13,19}\b", "[REDACTED_CARD]", redacted)
+    return redacted
+
+
+def apply_retention_policy(max_age_days: int = 365, archive_only: bool = True) -> Dict[str, int]:
+    if not engine:
+        return {"archived": 0, "deleted": 0}
+    max_age_days = max(1, int(max_age_days))
+    archived = 0
+    deleted = 0
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT session_id
+                    FROM session_metadata
+                    WHERE updated_at IS NOT NULL
+                      AND updated_at::timestamptz < NOW() - make_interval(days => :days)
+                    """
+                ),
+                {"days": max_age_days},
+            ).fetchall()
+            stale_ids = [r[0] for r in rows if r and r[0]]
+            if not stale_ids:
+                return {"archived": 0, "deleted": 0}
+            if archive_only:
+                result = conn.execute(
+                    text("UPDATE session_metadata SET archived = TRUE WHERE session_id = ANY(:ids)"),
+                    {"ids": stale_ids},
+                )
+                archived = int(result.rowcount or 0)
+            else:
+                conn.execute(text(f"DELETE FROM {CHAT_HISTORY_TABLE} WHERE session_id = ANY(:ids)"), {"ids": stale_ids})
+                result = conn.execute(text("DELETE FROM session_metadata WHERE session_id = ANY(:ids)"), {"ids": stale_ids})
+                deleted = int(result.rowcount or 0)
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Retention policy failed", exc_info=exc)
+    return {"archived": archived, "deleted": deleted}
+
+
+def find_report_matches(
+    username: str,
+    is_admin: bool,
+    keyword: str,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    session_id: Optional[str] = None,
+    category: Optional[str] = None,
+    shared_only: bool = False,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    # Lightweight fallback implementation to keep API stable in deployments with mixed schema versions.
+    matches: List[Dict[str, Any]] = []
+    if not keyword:
+        return matches
+    accessible = set(get_accessible_session_ids(username=username, is_admin=is_admin))
+    for sid in sorted(accessible):
+        if session_id and sid != session_id:
+            continue
+        msgs = list_chat_messages(sid, dedupe=True)
+        for msg in msgs:
+            content = (msg.get("content") or "")
+            if keyword.lower() in content.lower():
+                matches.append(
+                    {
+                        "session_id": sid,
+                        "type": msg.get("type"),
+                        "content": content[:500],
+                    }
+                )
+                if len(matches) >= max(1, int(limit)):
+                    return matches
+    return matches
+
+
+def build_session_report_card(session_id: str, username: str, is_admin: bool) -> Dict[str, Any]:
+    if not user_can_access_session(session_id=session_id, username=username, role="admin" if is_admin else "user"):
+        return {}
+    messages = list_chat_messages(session_id, dedupe=True)
+    return {
+        "session_id": session_id,
+        "message_count": len(messages),
+        "preview": messages[-5:] if messages else [],
+        "insight": get_session_insight(session_id),
+    }
+
+
+def migrate_app_config_encryption() -> Dict[str, Any]:
+    # Compatibility no-op for older branches where encryption migration may not be present.
+    return {"migrated": 0, "skipped": 0}
+
+
+ensure_enterprise_tables()
