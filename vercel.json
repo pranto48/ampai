@@ -7,8 +7,14 @@
     }
   ],
   "routes": [
-    { "handle": "filesystem" },
-    { "src": "/", "dest": "/frontend/index.html" },
-    { "src": "/(.*)", "dest": "/frontend/$1" }
-  ]
+    {
+      "handle": "filesystem",
+      "src": "/(.*)",
+      "dest": "/frontend/$1"
+    }
+  ],
+  "env": {
+    "SUPABASE_URL": "https://<YOUR-PROJECT>.supabase.co",
+    "SUPABASE_ANON_KEY": "public-anon-key"
+  }
 }

@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "migrate:supabase": "ts-node ./scripts/migrate-supabase.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.0.0"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  }
+}
