@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AmpAI | Memory Explorer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-container" style="padding:24px; display:block;">
+    <h1>Memory Explorer</h1>
+    <p style="color:var(--text-secondary); margin-bottom:16px;">Explore memories by category, ownership scope, and date range.</p>
+
+    <div class="card" style="padding:16px; margin-bottom:16px;">
+      <div style="display:grid; grid-template-columns:2fr 1fr 1fr 1fr 1fr auto; gap:8px; align-items:end;">
+        <div>
+          <label>Search</label>
+          <input id="mx-query" class="modern-input" placeholder="session id / category" />
+        </div>
+        <div>
+          <label>Category</label>
+          <select id="mx-category" class="modern-input"><option value="">All</option></select>
+        </div>
+        <div>
+          <label>Scope</label>
+          <select id="mx-scope" class="modern-input">
+            <option value="mine">Mine</option>
+            <option value="shared">Shared via Team</option>
+            <option value="all">All (Admin)</option>
+          </select>
+        </div>
+        <div>
+          <label>Date from</label>
+          <input id="mx-date-from" type="date" class="modern-input" />
+        </div>
+        <div>
+          <label>Date to</label>
+          <input id="mx-date-to" type="date" class="modern-input" />
+        </div>
+        <button id="mx-apply" class="btn primary-btn" style="width:auto;">Apply</button>
+      </div>
+    </div>
+
+    <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+      <button id="mx-prev" class="btn" style="width:auto;">◀ Prev</button>
+      <button id="mx-next" class="btn" style="width:auto;">Next ▶</button>
+      <span id="mx-page" style="color:var(--text-secondary);"></span>
+      <a href="index.html" class="btn" style="width:auto; margin-left:auto;">Back to Chat</a>
+    </div>
+
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Session</th><th>Category</th><th>Tier</th><th>Owner</th><th>Scope</th><th>Tags</th><th>Summary</th><th>Updated</th><th>Open</th>
+        </tr>
+      </thead>
+      <tbody id="mx-body"></tbody>
+    </table>
+  </div>
+  <script src="memory-explorer.js"></script>
+</body>
+</html>

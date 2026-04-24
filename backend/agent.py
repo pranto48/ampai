@@ -14,7 +14,7 @@ from logging_utils import get_logger
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_models import ChatOllama
-from database import get_config, get_core_memories, add_core_memory, create_task, get_sql_chat_history
+from database import get_config, get_core_memories, add_core_memory, create_task, get_sql_chat_history, redact_pii_text
 
 from langchain_core.chat_history import BaseChatMessageHistory
 
@@ -52,10 +52,23 @@ def get_short_redis_history(session_id: str):
     return ShortTermRedisMessageHistory(session_id=session_id, k=6)
 
 
-def get_llm(model_type: str, api_key: str = None):
+def _parse_model_list(raw_value: str, defaults: List[str]) -> List[str]:
+    if not raw_value:
+        return defaults
+    items = [line.strip() for line in raw_value.replace(",", "\n").splitlines()]
+    cleaned = [item for item in items if item]
+    return cleaned or defaults
+
+
+def get_llm(model_type: str, api_key: str = None, model_name: str = None):
     if model_type == "ollama":
         base_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
-        return ChatOllama(model="gemma", base_url=base_url)
+        configured_models = _parse_model_list(
+            get_config("ollama_model_list"),
+            ["llama3.2", "gemma", "mistral", "qwen2.5"],
+        )
+        selected_model = (model_name or get_config("ollama_model") or configured_models[0]).strip()
+        return ChatOllama(model=selected_model, base_url=base_url)
     elif model_type == "openai":
         key = api_key or get_config("openai_api_key") or os.getenv("OPENAI_API_KEY")
         if not key:
@@ -80,17 +93,30 @@ def get_llm(model_type: str, api_key: str = None):
         key = api_key or get_config("generic_api_key") or "not-needed"
         if not base_url:
             raise ValueError("Generic Base URL is required")
-        return ChatOpenAI(model="local-model", api_key=key, base_url=base_url)
+        configured_models = _parse_model_list(
+            get_config("generic_model_list"),
+            ["local-model", "llama-3.1-8b-instruct", "qwen2.5-7b-instruct"],
+        )
+        selected_model = (model_name or get_config("generic_model") or configured_models[0]).strip()
+        return ChatOpenAI(model=selected_model, api_key=key, base_url=base_url)
     elif model_type == "openrouter":
         key = api_key or get_config("openrouter_api_key")
         if not key:
             raise ValueError("OpenRouter API key is required")
-        model_name = get_config("openrouter_model") or "meta-llama/llama-3-8b-instruct:free"
-        return ChatOpenAI(model=model_name, api_key=key, base_url="https://openrouter.ai/api/v1")
+        configured_models = _parse_model_list(
+            get_config("openrouter_model_list"),
+            [
+                "meta-llama/llama-3.3-8b-instruct:free",
+                "qwen/qwen3-4b:free",
+                "deepseek/deepseek-r1-0528:free",
+            ],
+        )
+        selected_model = (model_name or get_config("openrouter_model") or configured_models[0]).strip()
+        return ChatOpenAI(model=selected_model, api_key=key, base_url="https://openrouter.ai/api/v1")
     elif model_type == "anythingllm":
         base_url = get_config("anythingllm_base_url")
         key = api_key or get_config("anythingllm_api_key") or "not-needed"
-        workspace = get_config("anythingllm_workspace") or "my-workspace"
+        workspace = model_name or get_config("anythingllm_workspace") or "my-workspace"
         if not base_url:
             raise ValueError("AnythingLLM Base URL is required")
         return ChatOpenAI(model=workspace, api_key=key, base_url=base_url)
@@ -98,10 +124,19 @@ def get_llm(model_type: str, api_key: str = None):
         raise ValueError(f"Unsupported model type: {model_type}")
 
 
-def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", api_key: str = None, memory_mode: str = "full", use_web_search: bool = False, attachments: List[Dict] = None):
+def chat_with_agent(
+    session_id: str,
+    message: str,
+    model_type: str = "ollama",
+    api_key: str = None,
+    model_name: str = None,
+    memory_mode: str = "full",
+    use_web_search: bool = False,
+    attachments: List[Dict] = None,
+):
     if attachments is None:
         attachments = []
-    llm = get_llm(model_type, api_key)
+    llm = get_llm(model_type, api_key, model_name=model_name)
 
     core_mems = get_core_memories()
     core_facts_str = "\n".join([f"- {m['fact']}" for m in core_mems]) if core_mems else "None yet."
@@ -221,6 +256,11 @@ def chat_with_agent(session_id: str, message: str, model_type: str = "ollama", a
     if attachments:
         attachment_names = [a['filename'] for a in attachments]
         message_log = f"[Attachments: {', '.join(attachment_names)}]\n" + message
+
+    pii_redaction_enabled = str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    if pii_redaction_enabled:
+        message_log = redact_pii_text(message_log)
+        content = redact_pii_text(content)
 
     sql_history.add_user_message(message_log)
     sql_history.add_ai_message(content)
