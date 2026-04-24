@@ -57,12 +57,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const sendBtn = document.getElementById('send-btn');
     const chatForm = document.getElementById('chat-form');
     const modelSelect = document.getElementById('model-select');
+    const modelNameSelect = document.getElementById('model-name-select');
+    const modelNameLabel = document.getElementById('model-name-label');
     const apiKeyInput = document.getElementById('api-key');
     const apiKeyLabel = document.getElementById('api-key-label');
     const newChatBtn = document.getElementById('new-chat-btn');
     const sessionsList = document.getElementById('sessions-list');
     const sessionSearchInput = document.getElementById('session-search');
-    const showArchivedToggle = document.getElementById('show-archived-toggle');
+    const showArchivedToggle = document.getElementById('show-archived');
     const currentSessionTitle = document.getElementById('current-session-title');
     const currentSessionIdDisplay = document.getElementById('current-session-id');
     const sessionCategorySelect = document.getElementById('session-category');
@@ -72,8 +74,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const fileInput = document.getElementById('file-input');
     const attachmentPreview = document.getElementById('attachment-preview');
     const webSearchToggle = document.getElementById('web-search-toggle');
-    const sessionSearchInput = document.getElementById('session-search');
-    const showArchivedToggle = document.getElementById('show-archived');
     const pinSessionBtn = document.getElementById('pin-session-btn');
     const archiveSessionBtn = document.getElementById('archive-session-btn');
     const summarizeEmailBtn = document.getElementById('summarize-email-btn');
@@ -85,7 +85,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const sidebarChatBtn = document.getElementById('sidebar-chat-btn');
     const taskQuickAddInput = document.getElementById('task-quick-add-input');
     const taskQuickAddBtn = document.getElementById('task-quick-add-btn');
-    const summarizeEmailBtn = document.getElementById('summarize-email-btn');
 
     let currentSessionId = generateSessionId();
     let currentSessionCategory = "Uncategorized";
@@ -156,9 +155,36 @@ document.addEventListener('DOMContentLoaded', () => {
             if (agentDisplayName) {
                 agentDisplayName.textContent = globalConfigs.chat_agent_name || 'AI Agent';
             }
+            await loadProviderModelOptions();
             updateApiKeyVisibility();
         } catch (e) {
             console.error(e);
+        }
+    }
+
+    async function loadProviderModelOptions() {
+        if (!modelNameSelect || !modelNameLabel) return;
+        try {
+            const res = await apiFetch('/api/models/options');
+            if (!res.ok) return;
+            const data = await res.json();
+            const selectedProvider = modelSelect.value;
+            const options = (data.models && data.models[selectedProvider]) || [];
+            if (!options.length) {
+                modelNameLabel.style.display = 'none';
+                modelNameSelect.style.display = 'none';
+                modelNameSelect.innerHTML = '';
+                return;
+            }
+            modelNameLabel.style.display = 'block';
+            modelNameSelect.style.display = 'block';
+            const previous = modelNameSelect.value;
+            modelNameSelect.innerHTML = options.map((name) => `<option value="${name}">${name}</option>`).join('');
+            if (previous && options.includes(previous)) {
+                modelNameSelect.value = previous;
+            }
+        } catch (e) {
+            console.error('Failed loading model options', e);
         }
     }
 
@@ -181,13 +207,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Load existing sessions on startup
-    ensureAuth().then((ok) => {
+    ensureAuth().then(async (ok) => {
         if (!ok) return;
         loadSessions();
-        checkGlobalConfigs();
+        await checkGlobalConfigs();
         loadNotificationPreferences();
-    };
-    initializeApp();
+        initializeApp();
+    });
 
     if (sidebar) {
         const savedMinimized = localStorage.getItem('sidebar_minimized');
@@ -316,6 +342,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
                         session_id: currentSessionId,
                         model_type: modelSelect.value,
+                        model_name: modelNameSelect?.value || null,
                         api_key: apiKeyInput.value || null,
                     }),
                 });
@@ -369,6 +396,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     modelSelect.addEventListener('change', () => {
         sessionStorage.setItem('model_set', 'true');
+        loadProviderModelOptions();
         updateApiKeyVisibility();
     });
 
@@ -504,7 +532,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await apiFetch('/api/email/summary/today', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model_type: modelSelect.value, api_key: apiKeyInput.value || null })
+                body: JSON.stringify({ model_type: modelSelect.value, model_name: modelNameSelect?.value || null, api_key: apiKeyInput.value || null })
             });
             const data = await res.json();
             appendMessage('ai', data.summary || data.detail || 'No summary available');
@@ -583,6 +611,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     session_id: currentSessionId,
                     message: message || "Please review the attached files.",
                     model_type: modelSelect.value,
+                    model_name: modelNameSelect?.value || null,
                     api_key: apiKeyInput.value || null,
                     memory_mode: document.getElementById('memory-mode').value,
                     use_web_search: webSearchToggle ? webSearchToggle.checked : false,
