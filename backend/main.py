@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 import shutil
 import uuid
 import urllib.request
+import threading
+from queue import Queue, Empty
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -78,6 +80,11 @@ from database import (
     touch_session,
     touch_session_updated_at,
     update_task,
+    log_audit_event,
+    apply_retention_policy,
+    upsert_session_insight,
+    get_session_insight,
+    list_audit_events,
     get_effective_notification_preferences,
     upsert_user_notification_preferences,
     enqueue_pending_reply_notification,
@@ -114,6 +121,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 USER_TOKEN = os.getenv("AMPAI_USER_TOKEN", "ampai-user")
 ADMIN_TOKEN = os.getenv("AMPAI_ADMIN_TOKEN", "ampai-admin")
+INSIGHT_QUEUE: "Queue[str]" = Queue(maxsize=1000)
 
 
 class Attachment(BaseModel):
@@ -133,6 +141,7 @@ class ChatRequest(BaseModel):
     message: str
     model_type: str = "ollama"
     api_key: Optional[str] = None
+    model_name: Optional[str] = None
     memory_mode: str = "full"
     use_web_search: bool = False
     attachments: List[Attachment] = []
@@ -159,6 +168,16 @@ class ImportRequest(BaseModel):
 
 class ConfigUpdateRequest(BaseModel):
     configs: Dict[str, str]
+
+
+class MemoryExplorerQuery(BaseModel):
+    query: Optional[str] = ""
+    category: Optional[str] = ""
+    owner_scope: Optional[str] = "mine"  # mine|shared|all
+    date_from: Optional[str] = ""
+    date_to: Optional[str] = ""
+    limit: int = 50
+    offset: int = 0
 
 
 class AdminPasswordChangeRequest(BaseModel):
@@ -236,6 +255,11 @@ class BackupConnectionTestRequest(BaseModel):
     path: Optional[str] = "/"
     share: Optional[str] = ""
     domain: Optional[str] = ""
+
+
+class RetentionRunRequest(BaseModel):
+    max_age_days: int = 365
+    archive_only: bool = True
 
 
 class UserLoginResponse(BaseModel):
@@ -522,6 +546,8 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
 def startup_event():
     bootstrap_default_admin()
     start_scheduler()
+    worker = threading.Thread(target=_insight_worker, daemon=True, name="ampai-insight-worker")
+    worker.start()
 
 
 app.include_router(auth_router)
@@ -544,6 +570,44 @@ def _ensure_session_owner_for_user(session_id: str, current_user: UserContext) -
     set_session_owner(session_id=session_id, owner_username=current_user.username, visibility="private")
 
 
+def _build_lightweight_insight(session_id: str) -> None:
+    messages = list_chat_messages(session_id, dedupe=False)
+    if not messages:
+        return
+    last_ai = ""
+    user_words: List[str] = []
+    for msg in messages[-50:]:
+        content = (msg.get("content") or "").strip()
+        if msg.get("type") == "ai" and content:
+            last_ai = content
+        elif msg.get("type") == "human":
+            user_words.extend([w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", content)])
+
+    stop_words = {"the", "and", "for", "with", "that", "this", "from", "have", "about", "your", "you", "are"}
+    freq: Dict[str, int] = {}
+    for word in user_words:
+        if word in stop_words:
+            continue
+        freq[word] = freq.get(word, 0) + 1
+    top_tags = [k for k, _ in sorted(freq.items(), key=lambda kv: kv[1], reverse=True)[:8]]
+    summary = (last_ai or "No AI summary yet.")[:500]
+    upsert_session_insight(session_id=session_id, summary=summary, tags=top_tags)
+
+
+def _insight_worker() -> None:
+    while True:
+        try:
+            session_id = INSIGHT_QUEUE.get(timeout=2)
+        except Empty:
+            continue
+        try:
+            _build_lightweight_insight(session_id)
+        except Exception:
+            logger.exception("Insight worker failed for %s", session_id)
+        finally:
+            INSIGHT_QUEUE.task_done()
+
+
 @app.post("/api/chat")
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
@@ -553,12 +617,18 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             message=request.message,
             model_type=request.model_type,
             api_key=request.api_key,
+            model_name=request.model_name,
             memory_mode=request.memory_mode,
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
         )
         ensure_session_owner(request.session_id, user.username)
         touch_session(request.session_id)
+        log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={request.model_type}")
+        try:
+            INSIGHT_QUEUE.put_nowait(request.session_id)
+        except Exception:
+            pass
         return result
     except Exception as e:
         logger.exception("chat failed")
@@ -789,6 +859,8 @@ def get_sessions(
     query: Optional[str] = Query(default=None),
     category: Optional[str] = Query(default=None),
     archived: Optional[bool] = Query(default=None),
+    limit: int = Query(default=40, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     current_user: UserContext = Depends(require_authenticated_user),
 ):
     sessions = get_all_sessions(query=query, category=category, archived=archived)
@@ -799,7 +871,128 @@ def get_sessions(
         for session in sessions:
             if session["session_id"] in shared_ids:
                 session["shared_via_group"] = True
-    return {"sessions": sessions}
+    category_counts: Dict[str, int] = {}
+    for session in sessions:
+        cat = session.get("category") or "Uncategorized"
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+
+    total = len(sessions)
+    paged_sessions = sessions[offset: offset + limit]
+    for sess in paged_sessions:
+        sess["tier"] = _classify_tier(sess.get("updated_at"))
+    return {
+        "sessions": paged_sessions,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": (offset + limit) < total,
+        "categories": category_counts,
+    }
+
+
+def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+
+
+def _classify_tier(updated_at_raw: Optional[str]) -> str:
+    dt = _parse_iso_dt(updated_at_raw)
+    if not dt:
+        return "warm"
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age_days = (now - dt).days
+    hot_days = int(get_config("tier_hot_days", "30") or "30")
+    warm_days = int(get_config("tier_warm_days", "180") or "180")
+    if age_days <= hot_days:
+        return "hot"
+    if age_days <= warm_days:
+        return "warm"
+    return "cold"
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+@app.post("/api/memory/explorer")
+def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = Depends(require_authenticated_user)):
+    query = (request.query or "").strip()
+    category = (request.category or "").strip() or None
+    owner_scope = (request.owner_scope or "mine").strip().lower()
+    limit = max(1, min(int(request.limit), 200))
+    offset = max(0, int(request.offset))
+    date_from = _parse_iso_dt(request.date_from)
+    date_to = _parse_iso_dt(request.date_to)
+
+    if owner_scope not in {"mine", "shared", "all"}:
+        raise HTTPException(status_code=400, detail="owner_scope must be mine, shared, or all")
+    if owner_scope == "all" and current_user.role != "admin":
+        owner_scope = "mine"
+
+    sessions = get_all_sessions(query=query, category=category, archived=False)
+    shared_ids = set(list_shared_sessions_for_user(current_user.username))
+    accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=current_user.role == "admin"))
+
+    filtered = []
+    for session in sessions:
+        session_id = session.get("session_id")
+        if not session_id or session_id not in accessible_ids:
+            continue
+        owner = get_session_owner(session_id) or "unknown"
+        is_owned = owner == current_user.username
+        is_shared = session_id in shared_ids
+
+        if owner_scope == "mine" and not is_owned:
+            continue
+        if owner_scope == "shared" and not is_shared:
+            continue
+
+        updated_at_raw = session.get("updated_at") or ""
+        updated_dt = _parse_iso_dt(updated_at_raw)
+        if date_from and updated_dt and updated_dt < date_from:
+            continue
+        if date_to and updated_dt and updated_dt > date_to:
+            continue
+
+        filtered.append(
+            {
+                "session_id": session_id,
+                "category": session.get("category") or "Uncategorized",
+                "updated_at": updated_at_raw,
+                "pinned": bool(session.get("pinned")),
+                "owner": owner,
+                "shared_via_group": is_shared,
+                "visibility": "shared" if is_shared else ("mine" if is_owned else "other"),
+                "tier": _classify_tier(updated_at_raw),
+                "insight": get_session_insight(session_id),
+            }
+        )
+
+    total = len(filtered)
+    page = filtered[offset: offset + limit]
+    category_counts: Dict[str, int] = {}
+    for item in filtered:
+        cat = item.get("category") or "Uncategorized"
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+
+    log_audit_event(
+        username=current_user.username,
+        action="memory.read.explorer",
+        details=f"scope={owner_scope};query={query};category={category or 'all'};count={total}",
+    )
+    return {
+        "sessions": page,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": (offset + limit) < total,
+        "categories": category_counts,
+    }
 
 
 @app.get("/api/history/{session_id}")
@@ -809,6 +1002,7 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
     try:
         _enforce_session_access_or_403(session_id, user)
         messages = list_chat_messages(session_id, dedupe=True)
+        log_audit_event(username=user.username, action="memory.read.history", session_id=session_id, details=f"count={len(messages)}")
         return {"messages": messages}
     except Exception as e:
         return {"messages": [], "error": str(e)}
@@ -821,6 +1015,7 @@ def update_category(session_id: str, request: CategoryRequest, user=Depends(requ
     success = set_session_category(session_id, request.category)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to update category")
+    log_audit_event(username=user.username, action="memory.update.category", session_id=session_id, category=request.category)
     return {"status": "success"}
 
 
@@ -833,6 +1028,7 @@ def delete_session(session_id: str, user=Depends(require_authenticated_user)):
         delete_session_metadata(session_id)
         SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL).clear()
         get_redis_history(session_id).clear()
+        log_audit_event(username=user.username, action="memory.delete.session", session_id=session_id)
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1189,6 +1385,22 @@ def migrate_admin_configs():
     result = migrate_app_config_encryption()
     return {"status": "success", **result}
 
+
+@app.post("/api/admin/retention/run")
+def run_retention_now(request: RetentionRunRequest, current_user: UserContext = Depends(require_admin_user)):
+    result = apply_retention_policy(max_age_days=request.max_age_days, archive_only=bool(request.archive_only))
+    log_audit_event(
+        username=current_user.username,
+        action="governance.retention.run",
+        details=f"max_age_days={request.max_age_days};archive_only={request.archive_only};result={result}",
+    )
+    return {"status": "success", **result}
+
+
+@app.get("/api/admin/audit/events")
+def admin_audit_events(limit: int = 200, _: UserContext = Depends(require_admin_user)):
+    return {"events": list_audit_events(limit=limit)}
+
 @app.get("/api/configs/status")
 def get_configs_status(user=Depends(require_authenticated_user)):
     configs = get_all_configs()
@@ -1207,6 +1419,52 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "notification_default_minimum_notify_interval_seconds": configs.get("notification_default_minimum_notify_interval_seconds", "300"),
         "notification_default_digest_mode": configs.get("notification_default_digest_mode", "immediate"),
         "notification_default_digest_interval_minutes": configs.get("notification_default_digest_interval_minutes", "30"),
+    }
+
+
+def _parse_config_list(raw_value: Optional[str], defaults: List[str]) -> List[str]:
+    if not raw_value:
+        return defaults
+    values = [item.strip() for item in str(raw_value).replace(",", "\n").splitlines()]
+    cleaned = [value for value in values if value]
+    return cleaned or defaults
+
+
+@app.get("/api/models/options")
+def get_model_options(_: UserContext = Depends(require_authenticated_user)):
+    configs = get_all_configs()
+    return {
+        "providers": [
+            {"value": "ollama", "label": "Ollama (Local)"},
+            {"value": "generic", "label": "LM Studio / OpenAI-Compatible (Local)"},
+            {"value": "anythingllm", "label": "AnythingLLM (Local Workspace)"},
+            {"value": "openrouter", "label": "OpenRouter (Free Models)"},
+            {"value": "openai", "label": "OpenAI"},
+            {"value": "gemini", "label": "Google Gemini"},
+            {"value": "anthropic", "label": "Anthropic"},
+        ],
+        "models": {
+            "ollama": _parse_config_list(
+                configs.get("ollama_model_list"),
+                ["llama3.2", "gemma", "mistral", "qwen2.5"],
+            ),
+            "generic": _parse_config_list(
+                configs.get("generic_model_list"),
+                ["local-model", "llama-3.1-8b-instruct", "qwen2.5-7b-instruct"],
+            ),
+            "anythingllm": _parse_config_list(
+                configs.get("anythingllm_workspace_list"),
+                ["my-workspace"],
+            ),
+            "openrouter": _parse_config_list(
+                configs.get("openrouter_model_list"),
+                [
+                    "meta-llama/llama-3.3-8b-instruct:free",
+                    "qwen/qwen3-4b:free",
+                    "deepseek/deepseek-r1-0528:free",
+                ],
+            ),
+        },
     }
 
 
