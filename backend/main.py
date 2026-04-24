@@ -162,6 +162,16 @@ class ConfigUpdateRequest(BaseModel):
     configs: Dict[str, str]
 
 
+class MemoryExplorerQuery(BaseModel):
+    query: Optional[str] = ""
+    category: Optional[str] = ""
+    owner_scope: Optional[str] = "mine"  # mine|shared|all
+    date_from: Optional[str] = ""
+    date_to: Optional[str] = ""
+    limit: int = 50
+    offset: int = 0
+
+
 class AdminPasswordChangeRequest(BaseModel):
     current_password: str
     new_password: str
@@ -815,6 +825,87 @@ def get_sessions(
         "total": total,
         "limit": limit,
         "offset": offset,
+        "has_more": (offset + limit) < total,
+        "categories": category_counts,
+    }
+
+
+def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+@app.post("/api/memory/explorer")
+def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = Depends(require_authenticated_user)):
+    query = (request.query or "").strip()
+    category = (request.category or "").strip() or None
+    owner_scope = (request.owner_scope or "mine").strip().lower()
+    limit = max(1, min(int(request.limit), 200))
+    offset = max(0, int(request.offset))
+    date_from = _parse_iso_dt(request.date_from)
+    date_to = _parse_iso_dt(request.date_to)
+
+    if owner_scope not in {"mine", "shared", "all"}:
+        raise HTTPException(status_code=400, detail="owner_scope must be mine, shared, or all")
+    if owner_scope == "all" and current_user.role != "admin":
+        owner_scope = "mine"
+
+    sessions = get_all_sessions(query=query, category=category, archived=False)
+    shared_ids = set(list_shared_sessions_for_user(current_user.username))
+    accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=current_user.role == "admin"))
+
+    filtered = []
+    for session in sessions:
+        session_id = session.get("session_id")
+        if not session_id or session_id not in accessible_ids:
+            continue
+        owner = get_session_owner(session_id) or "unknown"
+        is_owned = owner == current_user.username
+        is_shared = session_id in shared_ids
+
+        if owner_scope == "mine" and not is_owned:
+            continue
+        if owner_scope == "shared" and not is_shared:
+            continue
+
+        updated_at_raw = session.get("updated_at") or ""
+        updated_dt = _parse_iso_dt(updated_at_raw)
+        if date_from and updated_dt and updated_dt < date_from:
+            continue
+        if date_to and updated_dt and updated_dt > date_to:
+            continue
+
+        filtered.append(
+            {
+                "session_id": session_id,
+                "category": session.get("category") or "Uncategorized",
+                "updated_at": updated_at_raw,
+                "pinned": bool(session.get("pinned")),
+                "owner": owner,
+                "shared_via_group": is_shared,
+                "visibility": "shared" if is_shared else ("mine" if is_owned else "other"),
+            }
+        )
+
+    total = len(filtered)
+    page = filtered[offset: offset + limit]
+    category_counts: Dict[str, int] = {}
+    for item in filtered:
+        cat = item.get("category") or "Uncategorized"
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+
+    return {
+        "sessions": page,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
         "has_more": (offset + limit) < total,
         "categories": category_counts,
     }
