@@ -97,6 +97,9 @@
                     <option value="openrouter">OpenRouter (Free Models)</option>
                     <option value="anythingllm">AnythingLLM Workspace</option>
                 </select>
+
+                <label for="model-name-select" id="model-name-label" style="display:none;">Model / Workspace</label>
+                <select id="model-name-select" class="modern-input" style="display:none;"></select>
                 
                 <label for="api-key" id="api-key-label" style="display:none;">API Key</label>
                 <input type="password" id="api-key" class="modern-input" placeholder="Enter API Key" style="display:none;">
@@ -105,9 +108,20 @@
             <div class="sessions-container">
                 <h3>Memories</h3>
                 <input id="session-search" class="modern-input" placeholder="Search sessions" style="margin:6px 0 8px 0; font-size:0.8rem;">
+                <div style="display:flex; gap:6px; margin-bottom:6px;">
+                    <select id="memory-category-filter" class="modern-input" style="font-size:0.78rem; padding:6px;">
+                        <option value="">All categories</option>
+                    </select>
+                    <button id="memory-reset-filter-btn" class="btn" style="width:auto; padding:6px 8px; font-size:0.75rem;">Reset</button>
+                </div>
                 <label style="font-size:0.75rem; color:var(--text-secondary); display:flex; gap:6px; align-items:center; margin-bottom:6px;">
                     <input type="checkbox" id="show-archived"> Show archived
                 </label>
+                <div style="display:flex; gap:6px; margin-bottom:6px;">
+                    <button id="memory-prev-page-btn" class="btn" style="width:auto; padding:4px 8px; font-size:0.75rem;">◀ Prev</button>
+                    <button id="memory-next-page-btn" class="btn" style="width:auto; padding:4px 8px; font-size:0.75rem;">Next ▶</button>
+                    <span id="memory-page-status" style="font-size:0.72rem; color:var(--text-secondary); align-self:center;"></span>
+                </div>
                 <ul id="sessions-list">
                     <!-- Sessions will be loaded here -->
                 </ul>

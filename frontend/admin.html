@@ -228,6 +228,8 @@
                     
                     <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">OpenRouter Model Name</label>
                     <input type="text" id="config-openrouter-model" class="modern-input" placeholder="meta-llama/llama-3-8b-instruct:free" style="margin-bottom: 16px;">
+                    <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">OpenRouter Free Model Dropdown Options (one per line)</label>
+                    <textarea id="config-openrouter-model-list" class="modern-input" rows="4" placeholder="meta-llama/llama-3.3-8b-instruct:free&#10;qwen/qwen3-4b:free&#10;deepseek/deepseek-r1-0528:free" style="margin-bottom: 16px;"></textarea>
                 </div>
 
                     <h3 style="font-size: 1rem; margin-bottom: 12px; color: var(--accent-color);">Email Integration (IMAP)</h3>
@@ -248,6 +250,9 @@
 
                     <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">Workspace Name (Slug)</label>
                     <input type="text" id="config-anythingllm-workspace" class="modern-input" placeholder="my-workspace" style="margin-bottom: 16px;">
+
+                    <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px;">AnythingLLM Workspace Dropdown Options (one per line)</label>
+                    <textarea id="config-anythingllm-workspace-list" class="modern-input" rows="3" placeholder="my-workspace&#10;team-assistant" style="margin-bottom: 16px;"></textarea>
                 </div>
             </div>
 
@@ -267,6 +272,10 @@
                 <input type="text" id="config-chat-agent-name" class="modern-input" placeholder="AI Agent" style="max-width: 320px;">
                 <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin: 10px 0 6px;">Agent Avatar URL</label>
                 <input type="text" id="config-chat-agent-avatar-url" class="modern-input" placeholder="https://.../avatar.png" style="max-width: 520px;">
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin: 10px 0 6px;">Ollama Model Dropdown Options (one per line)</label>
+                <textarea id="config-ollama-model-list" class="modern-input" rows="3" placeholder="llama3.2&#10;gemma&#10;mistral" style="max-width: 520px;"></textarea>
+                <label style="display: block; font-size: 0.85rem; color: var(--text-secondary); margin: 10px 0 6px;">LM Studio / Generic Model Dropdown Options (one per line)</label>
+                <textarea id="config-generic-model-list" class="modern-input" rows="3" placeholder="local-model&#10;llama-3.1-8b-instruct&#10;qwen2.5-7b-instruct" style="max-width: 520px;"></textarea>
             </div>
 
             <div style="margin-bottom: 20px;">
