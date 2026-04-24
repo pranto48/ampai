@@ -791,6 +791,8 @@ def get_sessions(
     query: Optional[str] = Query(default=None),
     category: Optional[str] = Query(default=None),
     archived: Optional[bool] = Query(default=None),
+    limit: int = Query(default=40, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     current_user: UserContext = Depends(require_authenticated_user),
 ):
     sessions = get_all_sessions(query=query, category=category, archived=archived)
@@ -801,7 +803,21 @@ def get_sessions(
         for session in sessions:
             if session["session_id"] in shared_ids:
                 session["shared_via_group"] = True
-    return {"sessions": sessions}
+    category_counts: Dict[str, int] = {}
+    for session in sessions:
+        cat = session.get("category") or "Uncategorized"
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+
+    total = len(sessions)
+    paged_sessions = sessions[offset: offset + limit]
+    return {
+        "sessions": paged_sessions,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": (offset + limit) < total,
+        "categories": category_counts,
+    }
 
 
 @app.get("/api/history/{session_id}")

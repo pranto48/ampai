@@ -65,6 +65,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const sessionsList = document.getElementById('sessions-list');
     const sessionSearchInput = document.getElementById('session-search');
     const showArchivedToggle = document.getElementById('show-archived');
+    const memoryCategoryFilter = document.getElementById('memory-category-filter');
+    const memoryResetFilterBtn = document.getElementById('memory-reset-filter-btn');
+    const memoryPrevPageBtn = document.getElementById('memory-prev-page-btn');
+    const memoryNextPageBtn = document.getElementById('memory-next-page-btn');
+    const memoryPageStatus = document.getElementById('memory-page-status');
     const currentSessionTitle = document.getElementById('current-session-title');
     const currentSessionIdDisplay = document.getElementById('current-session-id');
     const sessionCategorySelect = document.getElementById('session-category');
@@ -91,6 +96,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentView = 'chat';
     let taskFilter = 'today';
     let sessionFilters = { query: '', archived: false };
+    let sessionPaging = { limit: 40, offset: 0, total: 0, selectedCategory: '' };
     let sessionsById = {};
     currentSessionIdDisplay.textContent = currentSessionId;
 
@@ -501,10 +507,45 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
     if (sessionSearchInput) {
-        sessionSearchInput.addEventListener('input', () => loadSessions());
+        sessionSearchInput.addEventListener('input', () => {
+            sessionPaging.offset = 0;
+            loadSessions();
+        });
     }
     if (showArchivedToggle) {
-        showArchivedToggle.addEventListener('change', () => loadSessions());
+        showArchivedToggle.addEventListener('change', () => {
+            sessionPaging.offset = 0;
+            loadSessions();
+        });
+    }
+    if (memoryCategoryFilter) {
+        memoryCategoryFilter.addEventListener('change', () => {
+            sessionPaging.selectedCategory = memoryCategoryFilter.value || '';
+            sessionPaging.offset = 0;
+            loadSessions();
+        });
+    }
+    if (memoryResetFilterBtn) {
+        memoryResetFilterBtn.addEventListener('click', () => {
+            sessionPaging.selectedCategory = '';
+            sessionPaging.offset = 0;
+            if (memoryCategoryFilter) memoryCategoryFilter.value = '';
+            if (sessionSearchInput) sessionSearchInput.value = '';
+            loadSessions();
+        });
+    }
+    if (memoryPrevPageBtn) {
+        memoryPrevPageBtn.addEventListener('click', () => {
+            sessionPaging.offset = Math.max(0, sessionPaging.offset - sessionPaging.limit);
+            loadSessions();
+        });
+    }
+    if (memoryNextPageBtn) {
+        memoryNextPageBtn.addEventListener('click', () => {
+            if ((sessionPaging.offset + sessionPaging.limit) >= sessionPaging.total) return;
+            sessionPaging.offset += sessionPaging.limit;
+            loadSessions();
+        });
     }
     if (pinSessionBtn) {
         pinSessionBtn.addEventListener('click', async () => {
@@ -766,8 +807,10 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const query = encodeURIComponent(sessionSearchInput ? sessionSearchInput.value.trim() : '');
             const archived = showArchivedToggle && showArchivedToggle.checked ? 'true' : 'false';
-            const response = await apiFetch(`/api/sessions?query=${query}&archived=${archived}`);
+            const category = encodeURIComponent(sessionPaging.selectedCategory || '');
+            const response = await apiFetch(`/api/sessions?query=${query}&archived=${archived}&category=${category}&limit=${sessionPaging.limit}&offset=${sessionPaging.offset}`);
             const data = await response.json();
+            sessionPaging.total = Number(data.total || 0);
 
             sessionsList.innerHTML = '';
             if (data.sessions && data.sessions.length > 0) {
@@ -783,6 +826,21 @@ document.addEventListener('DOMContentLoaded', () => {
                     groups[s.category].push(s);
                 });
 
+                if (memoryCategoryFilter) {
+                    const existingCategories = Object.keys(data.categories || {}).sort((a, b) => a.localeCompare(b));
+                    memoryCategoryFilter.innerHTML = '<option value="">All categories</option>' +
+                        existingCategories.map((cat) => `<option value="${cat}">${cat} (${data.categories[cat]})</option>`).join('');
+                    memoryCategoryFilter.value = sessionPaging.selectedCategory || '';
+                }
+
+                if (memoryPageStatus) {
+                    const start = sessionPaging.total ? (sessionPaging.offset + 1) : 0;
+                    const end = Math.min(sessionPaging.offset + sessionPaging.limit, sessionPaging.total);
+                    memoryPageStatus.textContent = `${start}-${end} of ${sessionPaging.total}`;
+                }
+                if (memoryPrevPageBtn) memoryPrevPageBtn.disabled = sessionPaging.offset <= 0;
+                if (memoryNextPageBtn) memoryNextPageBtn.disabled = !data.has_more;
+
                 for (const [category, ids] of Object.entries(groups)) {
                     const header = document.createElement('div');
                     header.className = 'category-header';
@@ -792,10 +850,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     header.style.marginBottom = '6px';
                     header.style.textTransform = 'uppercase';
                     header.style.fontWeight = 'bold';
-                    header.textContent = category;
+                    const totalInCategory = (data.categories && data.categories[category]) || ids.length;
+                    header.textContent = `${category} (${totalInCategory})`;
                     sessionsList.appendChild(header);
 
-                    ids.forEach((session) => {
+                    const compactMode = !sessionPaging.selectedCategory;
+                    const renderSessions = compactMode ? ids.slice(0, 8) : ids;
+
+                    renderSessions.forEach((session) => {
                         const sessionId = session.session_id;
                         const li = document.createElement('li');
                         li.className = 'session-item';
@@ -861,9 +923,29 @@ document.addEventListener('DOMContentLoaded', () => {
                         li.appendChild(controls);
                         sessionsList.appendChild(li);
                     });
+
+                    if (compactMode && ids.length > 8) {
+                        const exploreBtn = document.createElement('button');
+                        exploreBtn.className = 'btn';
+                        exploreBtn.style.width = 'auto';
+                        exploreBtn.style.padding = '4px 8px';
+                        exploreBtn.style.fontSize = '0.75rem';
+                        exploreBtn.style.marginBottom = '8px';
+                        exploreBtn.textContent = `View all "${category}" memories`;
+                        exploreBtn.onclick = () => {
+                            sessionPaging.selectedCategory = category;
+                            sessionPaging.offset = 0;
+                            if (memoryCategoryFilter) memoryCategoryFilter.value = category;
+                            loadSessions();
+                        };
+                        sessionsList.appendChild(exploreBtn);
+                    }
                 }
             } else {
                 sessionsList.innerHTML = '<li class="session-item">No memories yet</li>';
+                if (memoryPageStatus) memoryPageStatus.textContent = '0-0 of 0';
+                if (memoryPrevPageBtn) memoryPrevPageBtn.disabled = true;
+                if (memoryNextPageBtn) memoryNextPageBtn.disabled = true;
             }
         } catch (error) {
             console.error('Failed to load sessions', error);
