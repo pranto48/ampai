@@ -10,12 +10,16 @@ from datetime import datetime, timedelta, timezone
 import shutil
 import uuid
 import urllib.request
+import time
+import re
 import threading
 from queue import Queue, Empty
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import Response
+from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -88,6 +92,7 @@ from database import (
     get_effective_notification_preferences,
     upsert_user_notification_preferences,
     enqueue_pending_reply_notification,
+    engine,
 )
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
@@ -122,6 +127,10 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 USER_TOKEN = os.getenv("AMPAI_USER_TOKEN", "ampai-user")
 ADMIN_TOKEN = os.getenv("AMPAI_ADMIN_TOKEN", "ampai-admin")
 INSIGHT_QUEUE: "Queue[str]" = Queue(maxsize=1000)
+JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class Attachment(BaseModel):
@@ -242,6 +251,16 @@ class EmailSummaryRequest(BaseModel):
     session_id: str = "system_email_reports"
 
 
+class EmailSummaryTodayRequest(BaseModel):
+    provider: str = "outlook"
+    timezone: str = "UTC"
+    max_results: int = 50
+    model_type: str = "ollama"
+    model_name: Optional[str] = None
+    api_key: Optional[str] = None
+    session_id: str = "system_email_reports"
+
+
 class BackupRestoreRequest(BaseModel):
     backup_json: str
     dry_run: bool = True
@@ -294,9 +313,6 @@ def _bootstrap_default_users() -> None:
             },
         ]
     )
-
-
-_bootstrap_default_users()
 
 
 def _load_integration_credentials(provider: str) -> Dict[str, str]:
@@ -544,6 +560,10 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 @app.on_event("startup")
 def startup_event():
+    try:
+        _bootstrap_default_users()
+    except Exception as exc:
+        logger.warning("Skipping default-user bootstrap due to startup error: %s", exc)
     bootstrap_default_admin()
     start_scheduler()
     worker = threading.Thread(target=_insight_worker, daemon=True, name="ampai-insight-worker")
