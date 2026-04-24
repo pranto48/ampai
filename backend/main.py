@@ -133,6 +133,7 @@ class ChatRequest(BaseModel):
     message: str
     model_type: str = "ollama"
     api_key: Optional[str] = None
+    model_name: Optional[str] = None
     memory_mode: str = "full"
     use_web_search: bool = False
     attachments: List[Attachment] = []
@@ -553,6 +554,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             message=request.message,
             model_type=request.model_type,
             api_key=request.api_key,
+            model_name=request.model_name,
             memory_mode=request.memory_mode,
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
@@ -1207,6 +1209,52 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "notification_default_minimum_notify_interval_seconds": configs.get("notification_default_minimum_notify_interval_seconds", "300"),
         "notification_default_digest_mode": configs.get("notification_default_digest_mode", "immediate"),
         "notification_default_digest_interval_minutes": configs.get("notification_default_digest_interval_minutes", "30"),
+    }
+
+
+def _parse_config_list(raw_value: Optional[str], defaults: List[str]) -> List[str]:
+    if not raw_value:
+        return defaults
+    values = [item.strip() for item in str(raw_value).replace(",", "\n").splitlines()]
+    cleaned = [value for value in values if value]
+    return cleaned or defaults
+
+
+@app.get("/api/models/options")
+def get_model_options(_: UserContext = Depends(require_authenticated_user)):
+    configs = get_all_configs()
+    return {
+        "providers": [
+            {"value": "ollama", "label": "Ollama (Local)"},
+            {"value": "generic", "label": "LM Studio / OpenAI-Compatible (Local)"},
+            {"value": "anythingllm", "label": "AnythingLLM (Local Workspace)"},
+            {"value": "openrouter", "label": "OpenRouter (Free Models)"},
+            {"value": "openai", "label": "OpenAI"},
+            {"value": "gemini", "label": "Google Gemini"},
+            {"value": "anthropic", "label": "Anthropic"},
+        ],
+        "models": {
+            "ollama": _parse_config_list(
+                configs.get("ollama_model_list"),
+                ["llama3.2", "gemma", "mistral", "qwen2.5"],
+            ),
+            "generic": _parse_config_list(
+                configs.get("generic_model_list"),
+                ["local-model", "llama-3.1-8b-instruct", "qwen2.5-7b-instruct"],
+            ),
+            "anythingllm": _parse_config_list(
+                configs.get("anythingllm_workspace_list"),
+                ["my-workspace"],
+            ),
+            "openrouter": _parse_config_list(
+                configs.get("openrouter_model_list"),
+                [
+                    "meta-llama/llama-3.3-8b-instruct:free",
+                    "qwen/qwen3-4b:free",
+                    "deepseek/deepseek-r1-0528:free",
+                ],
+            ),
+        },
     }
 
 
