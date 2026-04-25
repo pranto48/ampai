@@ -1,247 +1,288 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Agent | Infinite Memory</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AmpAI SPA (React)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/react-router-dom@6.30.1/dist/umd/react-router-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.7/babel.min.js"></script>
 </head>
-<body>
-    <div class="app-container">
-        <div class="user-menu-container">
-            <span id="auth-user" class="badge"></span>
-            <span id="auth-role" class="badge"></span>
-            <button class="btn user-menu-trigger" type="button" data-user-menu-btn>Menu ▾</button>
-            <div class="user-menu-panel" data-user-menu-panel>
-                <a href="admin.html" class="user-menu-item">Admin Panel</a>
-                <a href="memory-explorer.html" class="user-menu-item">Memory Explorer</a>
-                <button class="user-menu-item" data-notification-settings-btn type="button">Notification Settings</button>
-                <button class="user-menu-item" data-logout-btn type="button">Logout</button>
+<body class="min-h-screen bg-slate-950 text-slate-100">
+  <div id="fallback-app" style="min-height:100vh; display:flex; align-items:center; justify-content:center; padding:16px;">
+    <form id="fallback-login-form" style="width:100%; max-width:420px; background:#0f172a; border:1px solid #334155; border-radius:14px; padding:18px; box-shadow:0 15px 30px rgba(0,0,0,.35);">
+      <h1 style="margin:0 0 8px 0; font-size:1.4rem;">AmpAI Login</h1>
+      <p style="margin:0 0 14px 0; color:#94a3b8; font-size:.9rem;">Fallback login is active while React loads.</p>
+      <label style="display:block; margin-bottom:4px; font-size:.85rem; color:#cbd5e1;">Username</label>
+      <input id="fallback-username" required style="width:100%; margin-bottom:10px; padding:10px; border-radius:8px; border:1px solid #334155; background:#020617; color:#fff;" />
+      <label style="display:block; margin-bottom:4px; font-size:.85rem; color:#cbd5e1;">Password</label>
+      <input id="fallback-password" type="password" required style="width:100%; margin-bottom:14px; padding:10px; border-radius:8px; border:1px solid #334155; background:#020617; color:#fff;" />
+      <div style="display:flex; gap:8px;">
+        <button type="submit" style="flex:1; padding:10px; border:none; border-radius:8px; background:#4f46e5; color:#fff; cursor:pointer;">Login</button>
+        <button type="button" id="fallback-register-btn" style="flex:1; padding:10px; border:none; border-radius:8px; background:#059669; color:#fff; cursor:pointer;">Register</button>
+      </div>
+      <div id="fallback-error" style="margin-top:10px; color:#fca5a5; font-size:.9rem;"></div>
+    </form>
+  </div>
+  <div id="root" style="display:none;"></div>
+
+  <script>
+    async function fallbackAuth(mode) {
+      const username = document.getElementById('fallback-username').value.trim();
+      const password = document.getElementById('fallback-password').value;
+      const errorEl = document.getElementById('fallback-error');
+      errorEl.textContent = '';
+      if (!username || !password) {
+        errorEl.textContent = 'Username and password are required.';
+        return;
+      }
+      try {
+        if (mode === 'register') {
+          const reg = await fetch('/api/auth/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+          });
+          if (!reg.ok) {
+            const txt = await reg.text();
+            throw new Error(txt || 'Registration failed');
+          }
+        }
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const txt = await res.text();
+        let data = {};
+        try { data = JSON.parse(txt); } catch { data = { detail: txt }; }
+        if (!res.ok) throw new Error(data.detail || 'Login failed');
+        localStorage.setItem('ampai_token', data.token || '');
+        localStorage.setItem('ampai_role', data.role || 'user');
+        localStorage.setItem('ampai_username', data.username || username);
+        window.location.href = '/index.html#/chat';
+      } catch (e) {
+        errorEl.textContent = e.message || 'Authentication failed';
+      }
+    }
+    document.getElementById('fallback-login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      await fallbackAuth('login');
+    });
+    document.getElementById('fallback-register-btn').addEventListener('click', async () => fallbackAuth('register'));
+  </script>
+
+  <script type="text/babel" data-presets="react">
+    try {
+    if (!window.React || !window.ReactDOM || !window.ReactRouterDOM) {
+      const root = document.getElementById('root');
+      if (root) {
+        root.innerHTML = '<div style="padding:24px;color:#fca5a5;font-family:sans-serif;">Failed to load React dependencies from CDN. Please check internet/CDN access and refresh.</div>';
+      }
+      console.error('Missing React CDN dependencies');
+    }
+
+    const rr = window.ReactRouterDOM || {};
+    const { HashRouter, Routes, Route, Link, Navigate, useNavigate, useLocation } = rr;
+    if (!HashRouter || !Routes || !Route || !Link || !Navigate || !useNavigate || !useLocation) {
+      const err = 'React Router failed to initialize from CDN (missing exports).';
+      console.error(err, rr);
+      const fallback = document.getElementById('fallback-app');
+      const root = document.getElementById('root');
+      if (fallback) fallback.style.display = 'flex';
+      if (root) {
+        root.style.display = 'none';
+        root.innerHTML = '<div style="padding:24px;color:#fca5a5;font-family:sans-serif;">' + err + ' Use the fallback login form below or refresh after CDN is reachable.</div>';
+      }
+      throw new Error(err);
+    }
+
+    const fallback = document.getElementById('fallback-app');
+    const root = document.getElementById('root');
+    if (fallback) fallback.style.display = 'none';
+    if (root) root.style.display = 'block';
+
+    const AuthContext = React.createContext(null);
+
+    function useAuth() {
+      const ctx = React.useContext(AuthContext);
+      if (!ctx) throw new Error('useAuth must be used inside provider');
+      return ctx;
+    }
+
+    async function apiFetch(path, options = {}) {
+      const token = localStorage.getItem('ampai_token');
+      const headers = { ...(options.headers || {}) };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      return fetch(path, { ...options, headers });
+    }
+
+    function Layout({ children }) {
+      const { user, logout } = useAuth();
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-900">
+          <header className="sticky top-0 z-20 border-b border-slate-800 bg-slate-900/80 backdrop-blur">
+            <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
+              <div className="font-semibold tracking-wide">AmpAI React UI</div>
+              <nav className="flex flex-wrap gap-2 text-sm">
+                <Link className="rounded px-3 py-1 hover:bg-slate-800" to="/chat">Chat</Link>
+                <Link className="rounded px-3 py-1 hover:bg-slate-800" to="/settings">Settings</Link>
+                <Link className="rounded px-3 py-1 hover:bg-slate-800" to="/memory">Memory</Link>
+                <Link className="rounded px-3 py-1 hover:bg-slate-800" to="/models">Models/API</Link>
+                {user?.role === 'admin' && <Link className="rounded px-3 py-1 hover:bg-slate-800" to="/admin">Admin</Link>}
+                <button className="rounded bg-slate-800 px-3 py-1 hover:bg-slate-700" onClick={logout}>Logout</button>
+              </nav>
             </div>
+          </header>
+          <main className="mx-auto max-w-6xl p-4">{children}</main>
         </div>
-        <div id="notification-settings-modal" class="modal">
-            <div class="modal-content" style="max-width: 520px;">
-                <h3 style="margin-bottom: 12px;">Notification Preferences</h3>
-                <div style="display:flex; flex-direction:column; gap:10px;">
-                    <label><input type="checkbox" id="pref-browser-away"> Browser notify on away replies</label>
-                    <label><input type="checkbox" id="pref-email-away"> Email notify on away replies</label>
-                    <label>Minimum notify interval (seconds)
-                        <input type="number" id="pref-min-interval" min="0" class="modern-input" value="300">
-                    </label>
-                    <label>Digest mode
-                        <select id="pref-digest-mode" class="modern-input">
-                            <option value="immediate">Immediate</option>
-                            <option value="periodic">Periodic</option>
-                        </select>
-                    </label>
-                    <label>Digest interval (minutes)
-                        <input type="number" id="pref-digest-interval" min="1" class="modern-input" value="30">
-                    </label>
-                </div>
-                <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
-                    <button id="pref-cancel-btn" class="btn" type="button">Cancel</button>
-                    <button id="pref-save-btn" class="btn primary-btn" type="button">Save</button>
-                </div>
-            </div>
+      );
+    }
+
+    function LoginPage() {
+      const { login, register } = useAuth();
+      const [username, setUsername] = React.useState('');
+      const [password, setPassword] = React.useState('');
+      const [error, setError] = React.useState('');
+
+      const run = async (mode) => {
+        setError('');
+        try {
+          if (mode === 'register') await register(username, password);
+          await login(username, password);
+        } catch (e) {
+          setError(e.message || 'Authentication failed');
+        }
+      };
+
+      return (
+        <div className="mx-auto mt-10 max-w-md rounded-2xl border border-indigo-400/20 bg-slate-900/70 p-6 shadow-2xl backdrop-blur">
+          <h1 className="mb-2 text-2xl font-bold">Welcome to AmpAI</h1>
+          <p className="mb-6 text-sm text-slate-400">React + Router + Tailwind foundation with route guards and shared auth state.</p>
+          <label className="mb-1 block text-sm">Username</label>
+          <input value={username} onChange={(e) => setUsername(e.target.value)} className="mb-3 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2" />
+          <label className="mb-1 block text-sm">Password</label>
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="mb-4 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2" />
+          <div className="flex gap-2">
+            <button onClick={() => run('login')} className="flex-1 rounded bg-indigo-600 px-3 py-2 font-medium hover:bg-indigo-500">Login</button>
+            <button onClick={() => run('register')} className="flex-1 rounded bg-emerald-600 px-3 py-2 font-medium hover:bg-emerald-500">Register</button>
+          </div>
+          {error && <p className="mt-3 text-sm text-rose-400">{error}</p>}
         </div>
-        <!-- Update Banner -->
-        <div id="update-banner" class="update-banner" style="display: none;">
-            <span>Ampai update available! A file has been changed.</span>
-            <button id="sync-code-btn" class="btn primary-btn small-btn">Sync Code</button>
+      );
+    }
+
+    function Page({ title, description, children }) {
+      return (
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-xl">
+          <h2 className="text-xl font-semibold">{title}</h2>
+          <p className="mt-1 text-sm text-slate-400">{description}</p>
+          <div className="mt-4">{children}</div>
         </div>
+      );
+    }
 
-        <!-- Sync Modal -->
-        <div id="sync-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center; flex-direction: column;">
-            <div style="background: var(--bg-secondary); padding: 30px; border-radius: 12px; border: 1px solid var(--border-color); width: 450px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
-                <h3 style="margin-top: 0; display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
-                    <div style="width: 20px; height: 20px; border: 3px solid rgba(255,255,255,0.1); border-top-color: var(--primary-color); border-radius: 50%; animation: spin 1s linear infinite;"></div>
-                    Syncing Architecture
-                </h3>
-                <p style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 20px; line-height: 1.4;">The backend is restarting. Please wait while the system safely recovers.</p>
-                <div id="sync-logs" style="background: #0f172a; padding: 15px; border-radius: 8px; font-family: monospace; font-size: 0.8rem; color: #10b981; height: 150px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px;">
-                </div>
-            </div>
-        </div>
-        <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+    const ChatPage = () => <Page title="Chat" description="Future React chat workspace"><a className="rounded bg-indigo-600 px-3 py-2" href="/chat.html">Open current chat.html</a></Page>;
+    const SettingsPage = () => <Page title="Settings" description="User preferences" />;
+    const MemoryPage = () => <Page title="Memory" description="Search and browse memories"><a className="rounded bg-indigo-600 px-3 py-2" href="/memory-explorer.html">Open current memory page</a></Page>;
+    const ModelsPage = () => <Page title="AI Model/API Connection" description="Provider keys and defaults" />;
+    const AdminPage = () => <Page title="Admin" description="Admin-only tools"><a className="rounded bg-indigo-600 px-3 py-2" href="/admin.html">Open current admin page</a></Page>;
 
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="sidebar-header">
-                <h2 id="agent-display-name">AI Agent</h2>
-                <div style="display:flex; align-items:center; gap:6px;">
-                    <span class="badge">Memory Active</span>
-                    <button id="sidebar-minimize-btn" class="btn icon-btn" type="button" title="Toggle sidebar" style="width:auto; padding:4px 8px;">⇔</button>
-                </div>
-            </div>
-            
-            <button id="new-chat-btn" class="btn primary-btn">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                New Session
-            </button>
-            <div class="settings-section" style="margin-top: 10px;">
-                <label>Workspace</label>
-                <div style="display:flex; gap:8px;">
-                    <button id="sidebar-chat-btn" class="btn" style="width:auto; padding:6px 10px;">Chat</button>
-                    <button id="tasks-view-btn" class="btn" style="width:auto; padding:6px 10px;">Tasks</button>
-                </div>
-            </div>
-            
-            <div class="settings-section">
-                <label for="model-select">Model Provider</label>
-                <select id="model-select" class="modern-input">
-                    <option value="ollama">Ollama (Local - Gemma)</option>
-                    <option value="generic">Generic Local (LM Studio)</option>
-                    <option value="openai">OpenAI (GPT-4/3.5)</option>
-                    <option value="gemini">Google Gemini</option>
-                    <option value="anthropic">Anthropic Claude</option>
-                    <option value="openrouter">OpenRouter (Free Models)</option>
-                    <option value="anythingllm">AnythingLLM Workspace</option>
-                </select>
+    function ProtectedRoute({ children, roles }) {
+      const { user, ready } = useAuth();
+      const location = useLocation();
+      if (!ready) return <div className="p-6 text-slate-400">Loading...</div>;
+      if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+      if (roles && !roles.includes(user.role)) return <Navigate to="/chat" replace />;
+      return children;
+    }
 
-                <label for="model-name-select" id="model-name-label" style="display:none;">Model / Workspace</label>
-                <select id="model-name-select" class="modern-input" style="display:none;"></select>
-                
-                <label for="api-key" id="api-key-label" style="display:none;">API Key</label>
-                <input type="password" id="api-key" class="modern-input" placeholder="Enter API Key" style="display:none;">
-            </div>
+    function AuthProvider({ children }) {
+      const [user, setUser] = React.useState(null);
+      const [ready, setReady] = React.useState(false);
+      const navigate = useNavigate();
 
-            <div class="sessions-container">
-                <h3>Memories</h3>
-                <input id="session-search" class="modern-input" placeholder="Search sessions" style="margin:6px 0 8px 0; font-size:0.8rem;">
-                <div style="display:flex; gap:6px; margin-bottom:6px;">
-                    <select id="memory-category-filter" class="modern-input" style="font-size:0.78rem; padding:6px;">
-                        <option value="">All categories</option>
-                    </select>
-                    <button id="memory-reset-filter-btn" class="btn" style="width:auto; padding:6px 8px; font-size:0.75rem;">Reset</button>
-                </div>
-                <label style="font-size:0.75rem; color:var(--text-secondary); display:flex; gap:6px; align-items:center; margin-bottom:6px;">
-                    <input type="checkbox" id="show-archived"> Show archived
-                </label>
-                <div style="display:flex; gap:6px; margin-bottom:6px;">
-                    <button id="memory-prev-page-btn" class="btn" style="width:auto; padding:4px 8px; font-size:0.75rem;">◀ Prev</button>
-                    <button id="memory-next-page-btn" class="btn" style="width:auto; padding:4px 8px; font-size:0.75rem;">Next ▶</button>
-                    <span id="memory-page-status" style="font-size:0.72rem; color:var(--text-secondary); align-self:center;"></span>
-                </div>
-                <ul id="sessions-list">
-                    <!-- Sessions will be loaded here -->
-                </ul>
-            </div>
+      React.useEffect(() => {
+        (async () => {
+          try {
+            const res = await apiFetch('/api/auth/whoami');
+            if (res.ok) setUser(await res.json());
+          } finally {
+            setReady(true);
+          }
+        })();
+      }, []);
 
+      const login = async (username, password) => {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const raw = await res.text();
+        let data = {};
+        try { data = JSON.parse(raw); } catch { data = { detail: raw }; }
+        if (!res.ok) throw new Error(data.detail || 'Login failed');
+        localStorage.setItem('ampai_token', data.token || '');
+        localStorage.setItem('ampai_role', data.role || 'user');
+        localStorage.setItem('ampai_username', data.username || username);
+        setUser({ username: data.username || username, role: data.role || 'user' });
+        navigate('/chat', { replace: true });
+      };
 
-            <div class="sessions-container" style="margin-top: 16px;">
-                <h3>Report Search</h3>
-                <input id="report-q" class="modern-input" placeholder="Keyword">
-                <input id="report-session-id" class="modern-input" placeholder="Session ID (optional)" style="margin-top:6px;">
-                <select id="report-category" class="modern-input" style="margin-top:6px;">
-                    <option value="">All categories</option>
-                    <option value="Work">Work</option>
-                    <option value="Personal">Personal</option>
-                    <option value="Ideas">Ideas</option>
-                    <option value="Code">Code</option>
-                    <option value="Uncategorized">Uncategorized</option>
-                </select>
-                <div style="display:flex; gap:6px; margin-top:6px;">
-                    <input id="report-date-from" class="modern-input" type="date">
-                    <input id="report-date-to" class="modern-input" type="date">
-                </div>
-                <label style="font-size:0.75rem; color:var(--text-secondary); display:flex; gap:6px; align-items:center; margin:6px 0;">
-                    <input type="checkbox" id="report-shared-only"> Shared only
-                </label>
-                <div style="display:flex; gap:6px;">
-                    <button id="report-search-btn" class="btn" style="width:auto;">Search</button>
-                    <button id="report-export-json-btn" class="btn" style="width:auto;">JSON</button>
-                    <button id="report-export-csv-btn" class="btn" style="width:auto;">CSV</button>
-                </div>
-                <div id="report-search-status" style="font-size:0.8rem; margin-top:6px; color:var(--text-secondary);"></div>
-            </div>
-            <div class="sessions-container" style="margin-top: 16px;">
-                <h3>Tasks</h3>
-                <div id="task-quick-add" style="display: flex; gap: 6px;">
-                    <input id="task-quick-add-input" class="modern-input" placeholder="Quick add task from chat..." style="font-size: 0.8rem; padding: 8px;" />
-                    <button id="task-quick-add-btn" class="btn icon-btn" title="Add Task">+</button>
-                </div>
-            </div>
-        </aside>
+      const register = async (username, password) => {
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const raw = await res.text();
+        let data = {};
+        try { data = JSON.parse(raw); } catch { data = { detail: raw }; }
+        if (!res.ok) throw new Error(data.detail || 'Registration failed');
+      };
 
-        <main class="chat-area">
-            <header class="chat-header">
-                <div class="header-info" style="display: flex; justify-content: space-between; align-items: center; width: 100%; flex-wrap: wrap; gap: 10px;">
-                    <div style="display: flex; align-items: center; gap: 10px;">
-                        <button id="mobile-menu-btn" class="btn icon-btn" style="display: none; padding: 0;">
-                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
-                        </button>
-                        <div>
-                            <h1 id="current-session-title">New Session</h1>
-                            <span id="current-session-id" class="session-id-display"></span>
-                        </div>
-                    </div>
-                    <div class="header-controls" style="display: flex; align-items: center; flex-wrap: wrap; gap: 10px;">
-                        <div class="memory-mode-toggle" style="display: flex; align-items: center; gap: 8px;">
-                            <span style="font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase;">Memory</span>
-                            <select id="memory-mode" class="modern-input" style="padding: 6px 10px; width: 110px; font-size: 0.8rem; background-color: rgba(255,255,255,0.05); border-color: rgba(16, 185, 129, 0.4);">
-                                <option value="full">Full History</option>
-                                <option value="indexed">Fast Indexed</option>
-                            </select>
-                        </div>
-                        <div class="category-selector">
-                            <select id="session-category" class="modern-input" style="padding: 6px 10px; width: 110px; font-size: 0.8rem; background-color: rgba(255,255,255,0.05);">
-                                <option value="Uncategorized">Uncategorized</option>
-                                <option value="Work">Work</option>
-                                <option value="Personal">Personal</option>
-                                <option value="Ideas">Ideas</option>
-                                <option value="Code">Code</option>
-                            </select>
-                        </div>
-                        <button id="summarize-email-btn" class="btn" style="width:auto; padding:6px 10px; font-size:0.8rem;">📧 Today Mail</button>
-                        <button id="pin-session-btn" class="btn" style="width:auto; padding:6px 10px; font-size:0.8rem;">📌 Pin</button>
-                        <button id="archive-session-btn" class="btn" style="width:auto; padding:6px 10px; font-size:0.8rem;">🗄️ Archive</button>
-                        <button id="delete-session-btn" class="btn icon-btn" title="Delete Session" style="background-color: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); padding: 6px;">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-                        </button>
-                        <button id="fullscreen-chat-btn" class="btn icon-btn" title="Toggle Fullscreen Chat" style="padding:6px;">⛶</button>
-                        <button id="summarize-email-btn" class="btn" title="Summarize today's inbox" style="width:auto; padding:6px 10px; border:1px solid rgba(16,185,129,0.4); background:rgba(16,185,129,0.15); color:#10b981;">
-                            Summarize today’s email
-                        </button>
-                    </div>
-                </div>
-            </header>
+      const logout = async () => {
+        await fetch('/api/auth/logout', { method: 'POST' });
+        localStorage.removeItem('ampai_token');
+        localStorage.removeItem('ampai_role');
+        localStorage.removeItem('ampai_username');
+        setUser(null);
+        navigate('/login', { replace: true });
+      };
 
-            <div class="chat-messages" id="chat-messages">
-                <div class="message ai-message welcome-message">
-                    <div class="avatar">AI</div>
-                    <div class="bubble">
-                        <p>Hello! I am your AI agent with persistent memory. How can I help you today?</p>
-                    </div>
-                </div>
-                <!-- Chat messages will be appended here -->
-            </div>
+      return <AuthContext.Provider value={{ user, ready, login, register, logout }}>{children}</AuthContext.Provider>;
+    }
 
-            <div class="chat-input-container">
-                <div id="attachment-preview" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;"></div>
-                <form id="chat-form">
-                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-                        <label class="toggle-switch" style="display: flex; align-items: center; cursor: pointer; font-size: 0.8rem; color: var(--text-secondary);">
-                            <input type="checkbox" id="web-search-toggle" style="margin-right: 6px;">
-                            <span style="font-weight: 500;">🌐 Web Search</span>
-                        </label>
-                    </div>
-                    <div class="input-wrapper" style="display: flex; align-items: flex-end; gap: 8px;">
-                        <input type="file" id="file-input" style="display: none;" multiple accept=".pdf,.txt,.csv,.json,.md,.png,.jpg,.jpeg">
-                        <button type="button" id="attach-btn" class="btn icon-btn" title="Attach File" style="background: transparent; border: none; padding: 8px; color: var(--text-secondary);">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                        </button>
-                        <textarea id="message-input" placeholder="Message your AI..." rows="1" autofocus style="flex: 1;"></textarea>
-                        <button type="submit" id="send-btn" class="btn icon-btn" disabled>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-                        </button>
-                    </div>
-                </form>
-            </div>
-        </main>
-    </div>
+    function App() {
+      return (
+        <HashRouter>
+          <AuthProvider>
+            <Routes>
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/" element={<Navigate to="/chat" replace />} />
+              <Route path="/chat" element={<ProtectedRoute><Layout><ChatPage /></Layout></ProtectedRoute>} />
+              <Route path="/settings" element={<ProtectedRoute><Layout><SettingsPage /></Layout></ProtectedRoute>} />
+              <Route path="/memory" element={<ProtectedRoute><Layout><MemoryPage /></Layout></ProtectedRoute>} />
+              <Route path="/models" element={<ProtectedRoute><Layout><ModelsPage /></Layout></ProtectedRoute>} />
+              <Route path="/admin" element={<ProtectedRoute roles={['admin']}><Layout><AdminPage /></Layout></ProtectedRoute>} />
+              <Route path="*" element={<Navigate to="/chat" replace />} />
+            </Routes>
+          </AuthProvider>
+        </HashRouter>
+      );
+    }
 
-    <script src="auth.js"></script>
-    <script src="app.js"></script>
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    } catch (bootstrapError) {
+      console.error('SPA bootstrap failed; fallback login remains available.', bootstrapError);
+      const fallback = document.getElementById('fallback-app');
+      const root = document.getElementById('root');
+      if (fallback) fallback.style.display = 'flex';
+      if (root) root.style.display = 'none';
+    }
+  </script>
 </body>
 </html>
