@@ -1,23 +1,20 @@
 FROM python:3.11-slim
 
+# Set working directory
 WORKDIR /app
 
-# Copy dependencies
-COPY backend/requirements.txt .
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependenciesCOPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
+# Copy backend and frontend code
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 
-# Set working directory to backend to run main.py
-WORKDIR /app/backend
-
-# Create a data directory for sqlite
-RUN mkdir -p /app/data
-
-# Expose port
-EXPOSE 8000
-
-# Run FastAPI app
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Expose port (Dyad will set PORT env var)
+EXPOSE 8000# Run the application
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
