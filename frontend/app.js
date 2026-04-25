@@ -61,6 +61,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const modelNameLabel = document.getElementById('model-name-label');
     const apiKeyInput = document.getElementById('api-key');
     const apiKeyLabel = document.getElementById('api-key-label');
+    const saveProviderBtn = document.getElementById('save-provider-btn');
     const newChatBtn = document.getElementById('new-chat-btn');
     const sessionsList = document.getElementById('sessions-list');
     const sessionSearchInput = document.getElementById('session-search');
@@ -142,12 +143,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!sidebar) return;
         sidebar.classList.toggle('minimized', !!minimized);
         localStorage.setItem('sidebar_minimized', minimized ? '1' : '0');
-    }
-
-    function setSidebarMinimized(minimized) {
-        if (!sidebar) return;
-        sidebar.classList.toggle('minimized', !!minimized);
-        localStorage.setItem('sidebar_minimized', minimized ? '1' : '0');
+        if (sidebarMinimizeBtn) {
+            sidebarMinimizeBtn.textContent = minimized ? '⇥' : '⇔';
+            sidebarMinimizeBtn.title = minimized ? 'Expand sidebar' : 'Minimize sidebar';
+        }
     }
 
     async function checkGlobalConfigs() {
@@ -212,11 +211,31 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function loadSavedProviderPreferences() {
+        try {
+            const savedProvider = localStorage.getItem('ampai_model_provider');
+            const savedModelName = localStorage.getItem('ampai_model_name');
+            const savedApiKey = localStorage.getItem('ampai_provider_api_key');
+            if (savedProvider) modelSelect.value = savedProvider;
+            if (savedApiKey) apiKeyInput.value = savedApiKey;
+            if (savedModelName && modelNameSelect) {
+                setTimeout(() => {
+                    if ([...modelNameSelect.options].some((o) => o.value === savedModelName)) {
+                        modelNameSelect.value = savedModelName;
+                    }
+                }, 150);
+            }
+        } catch (e) {
+            console.warn('Could not load provider preferences', e);
+        }
+    }
+
     // Load existing sessions on startup
     ensureAuth().then(async (ok) => {
         if (!ok) return;
         loadSessions();
         await checkGlobalConfigs();
+        loadSavedProviderPreferences();
         loadNotificationPreferences();
         initializeApp();
     });
@@ -235,6 +254,36 @@ document.addEventListener('DOMContentLoaded', () => {
     if (sidebarMinimizeBtn) {
         sidebarMinimizeBtn.addEventListener('click', () => {
             setSidebarMinimized(!sidebar.classList.contains('minimized'));
+        });
+    }
+
+    if (saveProviderBtn) {
+        saveProviderBtn.addEventListener('click', async () => {
+            const provider = modelSelect.value;
+            const modelName = modelNameSelect ? modelNameSelect.value : '';
+            const apiKey = apiKeyInput.value || '';
+            localStorage.setItem('ampai_model_provider', provider);
+            localStorage.setItem('ampai_model_name', modelName);
+            localStorage.setItem('ampai_provider_api_key', apiKey);
+
+            // Best-effort admin persist to global configs.
+            const role = localStorage.getItem('ampai_role');
+            if (role === 'admin') {
+                try {
+                    await apiFetch('/api/admin/configs', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            configs: {
+                                default_model: provider,
+                            }
+                        })
+                    });
+                } catch (e) {
+                    console.warn('Could not persist global model provider config', e);
+                }
+            }
+            alert('Provider settings saved.');
         });
     }
 
