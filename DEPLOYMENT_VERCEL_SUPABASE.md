@@ -49,7 +49,12 @@ Set these in Dyad project environment variables:
 
 > Use `DATABASE_URL` for Postgres. `SUPABASE_URL` is not a Postgres DSN.
 
-> Use `DATABASE_URL` for Postgres. `SUPABASE_URL` is not a Postgres DSN.
+Set these in Dyad project environment variables:
+- `DATABASE_URL` (Supabase Postgres pooling URL)
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY` (or keep compatibility while migrating to publishable key usage)
+- `REDIS_URL` (Upstash/Redis Cloud)
+- `JWT_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `USER_USERNAME`, `USER_PASSWORD`
 
 ## 3) Publish frontend on Vercel
 
@@ -124,6 +129,9 @@ If logs show errors like:
 then your checked-out `backend/main.py` is corrupted.
 Use the latest repo version (this branch restores a valid `main.py`) and rebuild:
 
+Also ensure the container starts with `uvicorn main:app` from `/app/backend`.
+Using `uvicorn backend.main:app` can break imports like `from auth import ...` in this codebase.
+
 ```bash
 git pull
 docker compose down
@@ -146,3 +154,15 @@ You can set the password in `.env`:
 REDIS_PASSWORD=your-strong-local-password
 ```
 
+
+### D) Browser shows `chrome-error://chromewebdata` and page is blank
+
+That browser message usually means the app URL is not reachable (container crashed or not listening), not a frontend code error.
+Check:
+
+```bash
+docker compose ps
+docker compose logs -f agent-web-app
+```
+
+If logs show import failures, rebuild with the fixed Dockerfile/compose in this repo.

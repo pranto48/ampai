@@ -14,6 +14,9 @@ COPY frontend/ /app/frontend/
 # Runtime data dir used by the app
 RUN mkdir -p /app/data
 
+# Run from backend directory so legacy absolute imports like `from auth import ...` work
+WORKDIR /app/backend
+
 # Application listens on 8000 inside container
 EXPOSE 8000
 

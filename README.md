@@ -37,3 +37,11 @@ If you hit Docker build errors, check `DEPLOYMENT_VERCEL_SUPABASE.md` section **
 
 
 If the page is blank or backend exits with `SyntaxError`, pull latest code and rebuild containers (see Docker troubleshooting in `DEPLOYMENT_VERCEL_SUPABASE.md`).
+
+
+Quick check if browser shows blank page:
+
+```bash
+docker compose ps
+docker compose logs -f agent-web-app
+```
