@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AmpAI | Settings</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-container" style="padding:24px; display:block;">
+    <h1>Settings Page</h1>
+    <p style="color:var(--text-secondary); margin-bottom:16px;">Manage account and application settings.</p>
+
+    <div class="card" style="padding:16px; margin-bottom:16px;">
+      <h3 style="margin-bottom:10px;">Quick Navigation</h3>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <a href="chat.html" class="btn" style="width:auto;">Chat</a>
+        <a href="memory-explorer.html" class="btn" style="width:auto;">Memory</a>
+        <a href="ai-models.html" class="btn" style="width:auto;">AI Model/API Connection</a>
+        <a href="spa.html#/settings" class="btn" style="width:auto;">React SPA</a>
+        <a href="admin.html" class="btn" style="width:auto;" data-admin-link>Admin</a>
+      </div>
+    </div>
+
+    <div class="card" style="padding:16px;">
+      <h3 style="margin-bottom:10px;">Account</h3>
+      <p style="color:var(--text-secondary); margin-bottom:10px;">Use the top-right menu in Chat/Admin for notification and logout actions.</p>
+      <a href="index.html" class="btn" style="width:auto;">Back to Login</a>
+    </div>
+  </div>
+  <script src="auth.js"></script>
+  <script>
+    enforceAuth();
+  </script>
+</body>
+</html>

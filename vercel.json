@@ -8,13 +8,23 @@
   ],
   "routes": [
     {
-      "handle": "filesystem",
-      "src": "/(.*)",
-      "dest": "/frontend/$1"
+      "handle": "filesystem"
+    },
+    {
+      "src": "^/$",
+      "dest": "/frontend/index.html"
+    },
+    {
+      "src": "^/(index|login|chat|settings|admin|memory-explorer|ai-models|spa)\\.html$",
+      "dest": "/frontend/$1.html"
+    },
+    {
+      "src": "^/(app|auth|admin|memory-explorer|spa)\\.js$",
+      "dest": "/frontend/$1.js"
+    },
+    {
+      "src": "^/style\\.css$",
+      "dest": "/frontend/style.css"
     }
-  ],
-  "env": {
-    "SUPABASE_URL": "https://<YOUR-PROJECT>.supabase.co",
-    "SUPABASE_ANON_KEY": "public-anon-key"
-  }
+  ]
 }

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AmpAI | AI Model/API Connection</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-container" style="padding:24px; display:block;">
+    <h1>AI Model API Connection Page</h1>
+    <p style="color:var(--text-secondary); margin-bottom:16px;">Connect OpenAI, Gemini, Anthropic, OpenRouter, local model servers, and workspace tools.</p>
+
+    <div class="card" style="padding:16px; margin-bottom:16px;">
+      <h3 style="margin-bottom:10px;">Where to configure</h3>
+      <p style="color:var(--text-secondary); margin-bottom:8px;">Global model/API settings are managed in Admin Dashboard under <strong>Model Connections</strong>.</p>
+      <a href="admin.html" class="btn primary-btn" style="width:auto;" data-admin-link>Open Admin Model Connections</a>
+    </div>
+
+    <div class="card" style="padding:16px;">
+      <h3 style="margin-bottom:10px;">Navigation</h3>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <a href="chat.html" class="btn" style="width:auto;">Chat</a>
+        <a href="settings.html" class="btn" style="width:auto;">Settings</a>
+        <a href="memory-explorer.html" class="btn" style="width:auto;">Memory</a>
+        <a href="spa.html#/models" class="btn" style="width:auto;">React SPA</a>
+        <a href="index.html" class="btn" style="width:auto;">Login</a>
+      </div>
+    </div>
+  </div>
+  <script src="auth.js"></script>
+  <script>
+    enforceAuth();
+  </script>
+</body>
+</html>
