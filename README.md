@@ -53,3 +53,6 @@ If browser shows **"Unsafe attempt to load URL ... chrome-error://chromewebdata"
 docker compose ps
 docker compose logs --tail=200 agent-web-app
 ```
+
+
+Container health check endpoint: `GET /healthz` (public).

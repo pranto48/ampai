@@ -1615,6 +1615,11 @@ def summarize_today_email(request: EmailSummaryRequest, user=Depends(require_aut
     return {"summary": result.get("response") if isinstance(result, dict) else result, "email_count": len(items)}
 
 
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+
+
 @app.get("/api/health")
 def health(user=Depends(require_admin_user)):
     configs = get_all_configs()
