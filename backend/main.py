@@ -19,7 +19,6 @@ from typing import Dict, List, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response
-from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -28,7 +27,7 @@ from redis import Redis
 from sqlalchemy import text
 from zoneinfo import ZoneInfo
 
-from auth import UserContext, auth_context_middleware, require_admin_user, require_authenticated_user, router as auth_router
+from auth import bootstrap_default_admin
 from agent import chat_with_agent, get_llm, get_redis_history
 from database import (
     add_network_target,
@@ -109,13 +108,10 @@ from backup_helpers import (
     write_backup_smb,
 )
 from langchain_community.chat_message_histories import SQLChatMessageHistory
-from auth import (
-    router as auth_router,
-    admin_router as admin_users_router,
-    require_authenticated_user,
-    require_admin_user,
-    bootstrap_default_admin,
-)
+# NOTE:
+# This file provides the active auth endpoints used by the frontend app.
+# We intentionally do not include auth.py routers to avoid duplicate/conflicting
+# /api/auth and /api/admin/users route registrations.
 
 app = FastAPI()
 logger = logging.getLogger("ampai")
@@ -284,6 +280,17 @@ class RetentionRunRequest(BaseModel):
 class UserLoginResponse(BaseModel):
     username: str
     role: str
+    token: str
+
+
+class UserRegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+class UserLoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 class UserContext(BaseModel):
@@ -526,7 +533,12 @@ def _get_current_user(access_token: Optional[str] = None) -> UserContext:
 
 
 def get_current_user_from_cookie(request: Request):
-    token = request.cookies.get("access_token")
+    auth_header = request.headers.get("Authorization", "")
+    token = None
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        token = request.cookies.get("access_token")
     return _get_current_user(token)
 
 
@@ -541,13 +553,14 @@ def require_admin_user(current_user: UserContext = Depends(get_current_user_from
 
 
 @app.post("/api/auth/login", response_model=UserLoginResponse)
-def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = get_user(form_data.username)
-    if not user or not pwd_context.verify(form_data.password, user["password_hash"]):
+def login(payload: UserLoginRequest):
+    user = get_user(payload.username)
+    if not user or not pwd_context.verify(payload.password, user["password_hash"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     token = _create_access_token({"sub": user["username"], "role": user["role"]})
-    response = Response(content=UserLoginResponse(username=form_data.username, role=user["role"]).model_dump_json(), media_type="application/json")
+    body = UserLoginResponse(username=user["username"], role=user["role"], token=token)
+    response = Response(content=body.model_dump_json(), media_type="application/json")
     response.set_cookie(
         key="access_token",
         value=token,
@@ -556,6 +569,31 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
         secure=False,
         max_age=JWT_EXPIRY_MINUTES * 60,
     )
+    return response
+
+
+@app.post("/api/auth/register")
+def register(payload: UserRegisterRequest):
+    ok, reason = db_create_user(payload.username, payload.password, role="user")
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
+    return {"status": "success"}
+
+
+@app.get("/api/auth/whoami")
+def whoami(current_user: UserContext = Depends(require_authenticated_user)):
+    return {"username": current_user.username, "role": current_user.role}
+
+
+@app.get("/api/auth/me")
+def me(current_user: UserContext = Depends(require_authenticated_user)):
+    return {"username": current_user.username, "role": current_user.role}
+
+
+@app.post("/api/auth/logout")
+def logout():
+    response = JSONResponse({"status": "success"})
+    response.delete_cookie("access_token")
     return response
 
 @app.on_event("startup")
@@ -568,10 +606,6 @@ def startup_event():
     start_scheduler()
     worker = threading.Thread(target=_insight_worker, daemon=True, name="ampai-insight-worker")
     worker.start()
-
-
-app.include_router(auth_router)
-app.include_router(admin_users_router)
 
 
 def _enforce_session_access_or_403(session_id: str, current_user: UserContext) -> None:
