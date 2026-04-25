@@ -1,12 +1,12 @@
 # AmpAI
 
-Single codebase deployment for:
+Single codebase for:
 
 - **Docker local development** (local Postgres + Redis)
-- **Dyad preview** (Supabase Postgres)
-- **Vercel frontend publish** (backend hosted separately)
+- **Dyad preview** (Supabase Postgres + cloud Redis)
+- **Vercel web publish** (frontend + `/api/*` rewrite to backend)
 
-## Quick start (Docker local)
+## Quick start (local)
 
 ```bash
 cp .env.example .env
@@ -15,13 +15,19 @@ docker compose up -d --build
 
 Open: `http://localhost:8001`
 
-## Deployment guide
+## Deployment + domains
 
-For Dyad + Vercel + domain setup, see:
+Follow the full guide:
 
 - `DEPLOYMENT_VERCEL_SUPABASE.md`
 
 ## Environment templates
 
-- `.env.example` → local Docker defaults
-- `.env.dyad.example` → Dyad/Supabase template
+- `.env.example` (local Docker)
+- `.env.dyad.example` (Dyad + Supabase)
+- `.env.vercel.example` (Vercel template)
+
+## Security
+
+- Do not commit real API keys or DB passwords.
+- Use publishable keys in browsers; keep secret/service-role keys server-only.
