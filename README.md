@@ -31,3 +31,6 @@ Follow the full guide:
 
 - Do not commit real API keys or DB passwords.
 - Use publishable keys in browsers; keep secret/service-role keys server-only.
+
+
+If you hit Docker build errors, check `DEPLOYMENT_VERCEL_SUPABASE.md` section **Docker troubleshooting**.

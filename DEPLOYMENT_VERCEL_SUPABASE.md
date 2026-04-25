@@ -49,7 +49,7 @@ Set these in Dyad project environment variables:
 
 > Use `DATABASE_URL` for Postgres. `SUPABASE_URL` is not a Postgres DSN.
 
-3. Publish Dyad preview from the same branch.
+> Use `DATABASE_URL` for Postgres. `SUPABASE_URL` is not a Postgres DSN.
 
 ## 3) Publish frontend on Vercel
 
@@ -107,3 +107,25 @@ Set backend env vars:
 Outcome:
 - Local Docker keeps local DB.
 - Cloud uses Supabase DB.
+
+---
+
+
+## 7) Docker troubleshooting
+
+If `docker compose up --build` fails with:
+
+- `failed to solve: invalid containerPort: 8000#`
+
+then your `Dockerfile` is malformed (the `EXPOSE 8000` line got merged with a comment).
+Use the Dockerfile in this repo where these are separate lines:
+
+- `EXPOSE 8000`
+- `CMD ["uvicorn", "backend.main:app", ...]`
+
+Also, this repo does not require a compose profile for normal startup, so use:
+
+```bash
+docker compose up --build -d
+```
+
