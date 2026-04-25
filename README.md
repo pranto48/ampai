@@ -34,3 +34,6 @@ Follow the full guide:
 
 
 If you hit Docker build errors, check `DEPLOYMENT_VERCEL_SUPABASE.md` section **Docker troubleshooting**.
+
+
+If the page is blank or backend exits with `SyntaxError`, pull latest code and rebuild containers (see Docker troubleshooting in `DEPLOYMENT_VERCEL_SUPABASE.md`).

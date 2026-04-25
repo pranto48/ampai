@@ -110,22 +110,39 @@ Outcome:
 
 ---
 
+---
 
 ## 7) Docker troubleshooting
 
-If `docker compose up --build` fails with:
+### A) Backend crash with `SyntaxError` in `/app/backend/main.py`
 
-- `failed to solve: invalid containerPort: 8000#`
+If logs show errors like:
 
-then your `Dockerfile` is malformed (the `EXPOSE 8000` line got merged with a comment).
-Use the Dockerfile in this repo where these are separate lines:
+- `SyntaxError: invalid syntax`
+- broken import line such as `import refrom datetime ...`
 
-- `EXPOSE 8000`
-- `CMD ["uvicorn", "backend.main:app", ...]`
-
-Also, this repo does not require a compose profile for normal startup, so use:
+then your checked-out `backend/main.py` is corrupted.
+Use the latest repo version (this branch restores a valid `main.py`) and rebuild:
 
 ```bash
+git pull
+docker compose down
 docker compose up --build -d
+```
+
+### B) Build failure `invalid containerPort: 8000#`
+
+This means the Dockerfile had a malformed line where `EXPOSE 8000` merged with text.
+Use the fixed Dockerfile from this repo and rebuild.
+
+### C) Redis warnings in logs
+
+- `vm.overcommit_memory = 1` warning is host-kernel tuning advice and usually non-fatal for local dev.
+- Redis "no authentication" warning is addressed by this compose setup using `--requirepass` and a passworded `REDIS_URL`.
+
+You can set the password in `.env`:
+
+```bash
+REDIS_PASSWORD=your-strong-local-password
 ```
 
