@@ -75,19 +75,35 @@
   </script>
 
   <script type="text/babel" data-presets="react">
+    try {
     if (!window.React || !window.ReactDOM || !window.ReactRouterDOM) {
       const root = document.getElementById('root');
       if (root) {
         root.innerHTML = '<div style="padding:24px;color:#fca5a5;font-family:sans-serif;">Failed to load React dependencies from CDN. Please check internet/CDN access and refresh.</div>';
       }
-      throw new Error('Missing React CDN dependencies');
+      console.error('Missing React CDN dependencies');
     }
+
+    const rr = window.ReactRouterDOM || {};
+    const { HashRouter, Routes, Route, Link, Navigate, useNavigate, useLocation } = rr;
+    if (!HashRouter || !Routes || !Route || !Link || !Navigate || !useNavigate || !useLocation) {
+      const err = 'React Router failed to initialize from CDN (missing exports).';
+      console.error(err, rr);
+      const fallback = document.getElementById('fallback-app');
+      const root = document.getElementById('root');
+      if (fallback) fallback.style.display = 'flex';
+      if (root) {
+        root.style.display = 'none';
+        root.innerHTML = '<div style="padding:24px;color:#fca5a5;font-family:sans-serif;">' + err + ' Use the fallback login form below or refresh after CDN is reachable.</div>';
+      }
+      throw new Error(err);
+    }
+
     const fallback = document.getElementById('fallback-app');
     const root = document.getElementById('root');
     if (fallback) fallback.style.display = 'none';
     if (root) root.style.display = 'block';
 
-    const { HashRouter, Routes, Route, Link, Navigate, useNavigate, useLocation } = ReactRouterDOM;
     const AuthContext = React.createContext(null);
 
     function useAuth() {
@@ -260,6 +276,13 @@
     }
 
     ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    } catch (bootstrapError) {
+      console.error('SPA bootstrap failed; fallback login remains available.', bootstrapError);
+      const fallback = document.getElementById('fallback-app');
+      const root = document.getElementById('root');
+      if (fallback) fallback.style.display = 'flex';
+      if (root) root.style.display = 'none';
+    }
   </script>
 </body>
 </html>
