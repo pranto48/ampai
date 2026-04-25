@@ -58,14 +58,11 @@ docker compose logs --tail=200 agent-web-app
 Container health check endpoint: `GET /healthz` (public).
 
 
-## React SPA preview
+## React UI
 
-A framework-based UI foundation is now available at `frontend/spa.html` (React + React Router + Tailwind CDN).
+Home page (`/index.html`) now runs React + React Router + Tailwind (HashRouter) as the primary UI.
 
-- Login route: `/spa.html#/login` (router handles `/login` inside SPA)
-- Protected routes: chat/settings/memory/models/admin
-- Legacy pages remain available (`chat.html`, `admin.html`, etc.) during migration.
-
+Legacy page URLs (`chat.html`, `settings.html`, `memory-explorer.html`, `ai-models.html`, `admin.html`, `login.html`) now redirect to React hash routes.
 
 ## SPA migration next steps
 

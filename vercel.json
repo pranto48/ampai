@@ -15,11 +15,11 @@
       "dest": "/frontend/index.html"
     },
     {
-      "src": "^/(index|login|chat|settings|admin|memory-explorer|ai-models|spa)\\.html$",
+      "src": "^/(index|login|chat|settings|admin|memory-explorer|ai-models)\\.html$",
       "dest": "/frontend/$1.html"
     },
     {
-      "src": "^/(app|auth|admin|memory-explorer|spa)\\.js$",
+      "src": "^/(app|auth|admin|memory-explorer)\\.js$",
       "dest": "/frontend/$1.js"
     },
     {
