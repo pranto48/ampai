@@ -1,115 +1,110 @@
-# AmpAI deployment plan (Docker local + Vercel web + Supabase DB)
+# AmpAI deployment: same codebase for Docker (local DB) + Vercel (Supabase DB)
 
-This gives you one codebase with two runtime modes:
+This setup gives you exactly what you asked for:
 
-- **Docker (local/private):** Postgres + Redis in Docker (as now)
-- **Web (public):** Frontend on **Vercel**, backend on a container host (Railway/Render/Fly), DB on **Supabase Postgres**
-
-> Recommended: Use Vercel only for frontend hosting. Keep backend as a normal container service.
-> Running this full backend as Vercel serverless is not ideal (LangChain, Redis, background jobs, scheduler).
-
----
-
-## 1) Architecture (recommended)
-
-- `frontend/*` -> deploy on **Vercel**
-- `backend/*` -> deploy on **Railway/Render/Fly.io** (Dockerfile)
-- Database for cloud -> **Supabase Postgres** (`DATABASE_URL`)
-- Redis for cloud -> Upstash Redis or Redis Cloud (`REDIS_URL`)
-
-This keeps **same code** for Docker and cloud; only env vars differ.
+- **Local Docker** uses its **own local Postgres + Redis**.
+- **Dyad preview** uses **Supabase Postgres** (and cloud Redis).
+- **Vercel** publishes the **web view** from the same repo.
+- You can attach a **custom domain** in Vercel.
 
 ---
 
-## 2) Local Docker (unchanged)
+## 1) Local Docker (local DB)
 
-Use your current compose for local:
+1. Copy local env values:
+
+```bash
+cp .env.example .env
+```
+
+2. Start services:
 
 ```bash
 docker compose up -d --build
 ```
 
-Local env:
+3. App endpoints (default ports):
+- App: `http://localhost:8001`
+- Postgres: `localhost:5433`
+- Redis: `localhost:6380`
+
+Docker service uses this local DB by default:
 - `DATABASE_URL=postgresql://ampai:ampai@db:5432/ampai`
-- `REDIS_URL=redis://redis:6379/0`
 
 ---
 
-## 3) Cloud backend (container)
+## 2) Dyad preview (Supabase DB)
 
-Deploy this repo (or backend folder) to Railway/Render/Fly with Docker.
+1. Copy Dyad env template:
 
-Set env vars on backend service:
+```bash
+cp .env.dyad.example .env.dyad
+```
 
-- `DATABASE_URL` = Supabase pooling URL (Postgres)
-- `REDIS_URL` = Upstash/Redis Cloud URL
-- `JWT_SECRET` = long random secret
-- `ADMIN_USERNAME`, `ADMIN_PASSWORD`
-- optional model/API env vars (OpenRouter/OpenAI/etc)
+2. Fill these values in Dyad environment variables:
+- `DATABASE_URL` = Supabase Postgres **pooling** connection string
+- `SUPABASE_URL` and `SUPABASE_ANON_KEY`
+- `REDIS_URL` = Upstash / Redis Cloud URL
+- `JWT_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `USER_USERNAME`, `USER_PASSWORD`
 
-Backend must expose HTTP (example: `https://api.yourdomain.com`).
+3. Publish Dyad preview from the same branch.
+
+> Important: Dyad must use `DATABASE_URL` for Supabase Postgres. Do not use `SUPABASE_URL` as a DB connection string.
 
 ---
 
-## 4) Vercel frontend deploy
+## 3) Publish web app on Vercel
 
-### Option A (quick): static + API rewrite
-
-Use `vercel.json` in repo root (template included), set destination backend URL.
-
-Then:
+1. Push this repo to GitHub.
+2. In Vercel: **New Project → Import Git Repository**.
+3. Keep repo root as project root (uses `vercel.json`).
+4. Edit `vercel.json` and replace:
+   - `https://YOUR_BACKEND_URL` with your backend public URL (Railway/Render/Fly).
+5. Deploy:
 
 ```bash
 vercel
 vercel --prod
 ```
 
-### Option B: Dyad flow
-
-If you manage frontend in Dyad:
-1. Import repo in Dyad
-2. Point project root to this repo
-3. Publish connected project to Vercel
-4. Ensure rewrite `/api/*` points to your backend URL
+Your Vercel frontend will call backend APIs through `/api/*` rewrite.
 
 ---
 
-## 5) Domain setup
+## 4) Backend hosting for Vercel API target
 
-### Vercel (frontend domain)
-- Add custom domain in Vercel project -> `app.yourdomain.com`
-- Update DNS records as Vercel suggests (A/CNAME)
+Because this app is FastAPI + long-running features, host backend as a container service (Railway/Render/Fly), not Vercel serverless.
 
-### Backend domain
-- Add backend custom domain in Railway/Render/Fly -> `api.yourdomain.com`
-- Update DNS CNAME/A record
-
----
-
-## 6) Supabase database notes
-
-- Create project in Supabase
-- Copy **connection string** (prefer pooling URL)
-- Put it in backend `DATABASE_URL`
-- Run any startup migrations by app boot (or add explicit migration script if needed)
+Set backend environment variables:
+- `DATABASE_URL` = Supabase Postgres URL
+- `REDIS_URL` = cloud Redis
+- `JWT_SECRET`, admin/user credentials
+- Any model provider keys you use
 
 ---
 
-## 7) Keep Docker + Vercel in sync
+## 5) Add custom domain
 
-Use branch flow:
-1. Develop/test in Docker locally
-2. Push same branch to git
-3. Vercel auto-deploy frontend
-4. Backend host auto-deploy container
+### Frontend domain (Vercel)
+1. Vercel project → **Settings → Domains**.
+2. Add your domain (example: `app.yourdomain.com`).
+3. Add DNS records exactly as Vercel shows.
+4. Wait for SSL provisioning.
 
-This gives same code with different env/runtime.
+### Backend domain (hosting provider)
+1. In Railway/Render/Fly service, add domain (example: `api.yourdomain.com`).
+2. Add provider DNS records.
+3. Update `vercel.json` rewrite destination to your backend domain.
 
 ---
 
-## 8) Better long-term plan (recommended)
+## 6) One-codebase workflow
 
-- Split frontend and backend folders into separate deploy pipelines
-- Add Alembic migrations for schema safety
-- Add health endpoint checks in Vercel rewrite target validation
-- Add CI to run syntax checks + smoke tests before deploy
+1. Make UI/backend code changes once in this repo.
+2. Test locally with Docker.
+3. Push to Git.
+4. Dyad/Vercel deploy from same commit.
+
+Result:
+- Docker keeps local DB for local development.
+- Cloud environments use Supabase DB.
