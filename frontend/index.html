@@ -14,8 +14,9 @@
             <span id="auth-role" class="badge"></span>
             <button class="btn user-menu-trigger" type="button" data-user-menu-btn>Menu ▾</button>
             <div class="user-menu-panel" data-user-menu-panel>
-                <a href="admin.html" class="user-menu-item">Admin Panel</a>
+                <a href="admin.html" class="user-menu-item" data-admin-link>Admin Panel</a>
                 <a href="memory-explorer.html" class="user-menu-item">Memory Explorer</a>
+                <div class="user-menu-separator"></div>
                 <button class="user-menu-item" data-notification-settings-btn type="button">Notification Settings</button>
                 <button class="user-menu-item" data-logout-btn type="button">Logout</button>
             </div>
@@ -104,9 +105,10 @@
                 
                 <label for="api-key" id="api-key-label" style="display:none;">API Key</label>
                 <input type="password" id="api-key" class="modern-input" placeholder="Enter API Key" style="display:none;">
+                <button id="save-provider-btn" class="btn" type="button" style="margin-top:10px; width:100%;">Save Provider Settings</button>
             </div>
 
-            <div class="sessions-container">
+            <div class="sessions-container memories-panel">
                 <h3>Memories</h3>
                 <input id="session-search" class="modern-input" placeholder="Search sessions" style="margin:6px 0 8px 0; font-size:0.8rem;">
                 <div style="display:flex; gap:6px; margin-bottom:6px;">
@@ -129,7 +131,7 @@
             </div>
 
 
-            <div class="sessions-container" style="margin-top: 16px;">
+            <div class="sessions-container compact-panel" style="margin-top: 16px;">
                 <h3>Report Search</h3>
                 <input id="report-q" class="modern-input" placeholder="Keyword">
                 <input id="report-session-id" class="modern-input" placeholder="Session ID (optional)" style="margin-top:6px;">
@@ -155,7 +157,7 @@
                 </div>
                 <div id="report-search-status" style="font-size:0.8rem; margin-top:6px; color:var(--text-secondary);"></div>
             </div>
-            <div class="sessions-container" style="margin-top: 16px;">
+            <div class="sessions-container compact-panel" style="margin-top: 16px;">
                 <h3>Tasks</h3>
                 <div id="task-quick-add" style="display: flex; gap: 6px;">
                     <input id="task-quick-add-input" class="modern-input" placeholder="Quick add task from chat..." style="font-size: 0.8rem; padding: 8px;" />
@@ -200,9 +202,6 @@
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                         </button>
                         <button id="fullscreen-chat-btn" class="btn icon-btn" title="Toggle Fullscreen Chat" style="padding:6px;">⛶</button>
-                        <button id="summarize-email-btn" class="btn" title="Summarize today's inbox" style="width:auto; padding:6px 10px; border:1px solid rgba(16,185,129,0.4); background:rgba(16,185,129,0.15); color:#10b981;">
-                            Summarize today’s email
-                        </button>
                     </div>
                 </div>
             </header>
