@@ -574,7 +574,11 @@ def login(payload: UserLoginRequest):
 
 @app.post("/api/auth/register")
 def register(payload: UserRegisterRequest):
-    ok, reason = db_create_user(payload.username, payload.password, role="user")
+    result = db_create_user(payload.username, payload.password, role="user")
+    if isinstance(result, tuple):
+        ok, reason = result
+    else:
+        ok, reason = bool(result), "create_failed"
     if not ok:
         raise HTTPException(status_code=400, detail=reason)
     return {"status": "success"}

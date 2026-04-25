@@ -133,11 +133,6 @@ body {
     background: var(--border-color);
     margin: 4px 2px;
 }
-.user-menu-separator {
-    height: 1px;
-    background: var(--border-color);
-    margin: 4px 2px;
-}
 
 .user-menu-panel.open {
     display: flex;
@@ -304,11 +299,13 @@ body {
     align-items: center;
     justify-content: center;
     padding: 16px;
+    position: relative;
 }
 
 .login-card {
     position: relative;
     overflow: hidden;
+    backdrop-filter: blur(8px);
 }
 
 .login-card::before {
@@ -319,6 +316,35 @@ body {
     z-index: -1;
     filter: blur(18px);
     animation: auroraShift 8s ease infinite;
+}
+
+.login-glow {
+    position: absolute;
+    width: 280px;
+    height: 280px;
+    border-radius: 50%;
+    filter: blur(45px);
+    opacity: 0.35;
+    pointer-events: none;
+    animation: floatGlow 9s ease-in-out infinite;
+}
+
+.login-glow-a {
+    background: #6366f1;
+    top: 8%;
+    left: 12%;
+}
+
+.login-glow-b {
+    background: #10b981;
+    right: 12%;
+    bottom: 8%;
+    animation-delay: 1.5s;
+}
+
+@keyframes floatGlow {
+    0%, 100% { transform: translateY(0px) scale(1); }
+    50% { transform: translateY(-18px) scale(1.06); }
 }
 
 .chat-header h1 {

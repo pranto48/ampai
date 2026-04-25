@@ -8,14 +8,19 @@
 </head>
 <body>
     <div class="login-page-shell">
+        <div class="login-glow login-glow-a"></div>
+        <div class="login-glow login-glow-b"></div>
         <form id="login-form" class="card login-card" style="width: 100%; max-width: 460px;">
-            <h1 style="margin-bottom: 8px;">Welcome to AmpAI</h1>
-            <p style="color: var(--text-secondary); margin-bottom: 16px;">Login to continue to chat, settings, memory explorer, and AI model/API connections.</p>
+            <h1 style="margin-bottom: 8px;">Welcome to AmpAI ✨</h1>
+            <p id="login-subtitle" style="color: var(--text-secondary); margin-bottom: 16px;">Login to continue to chat, settings, memory explorer, and AI model/API connections.</p>
 
             <label>Username</label>
             <input id="username" class="modern-input" type="text" required style="margin-bottom: 12px;" />
             <label>Password</label>
-            <input id="password" class="modern-input" type="password" required style="margin-bottom: 16px;" />
+            <div style="position:relative; margin-bottom: 16px;">
+                <input id="password" class="modern-input" type="password" required style="padding-right: 80px;" />
+                <button type="button" id="toggle-password-btn" class="btn" style="position:absolute; right:6px; top:6px; width:auto; padding:4px 8px; font-size:0.75rem;">Show</button>
+            </div>
 
             <div class="login-actions" style="display:flex; gap:10px;">
                 <button type="submit" class="btn primary-btn" style="width:100%;">Login</button>
@@ -101,6 +106,29 @@
         document.getElementById('register-btn').addEventListener('click', async () => {
             await doAuth('register');
         });
+
+        const toggleBtn = document.getElementById('toggle-password-btn');
+        const passwordInput = document.getElementById('password');
+        if (toggleBtn && passwordInput) {
+            toggleBtn.addEventListener('click', () => {
+                const show = passwordInput.type === 'password';
+                passwordInput.type = show ? 'text' : 'password';
+                toggleBtn.textContent = show ? 'Hide' : 'Show';
+            });
+        }
+
+        const subtitle = document.getElementById('login-subtitle');
+        const words = [
+            'Secure login for Chat, Settings, Memory, and AI connections.',
+            'Build, remember, and collaborate with AmpAI.',
+            'One account. Multi-page workspace. Smooth flow.'
+        ];
+        let idx = 0;
+        setInterval(() => {
+            if (!subtitle) return;
+            idx = (idx + 1) % words.length;
+            subtitle.textContent = words[idx];
+        }, 3000);
     </script>
 </body>
 </html>
