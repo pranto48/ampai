@@ -1,16 +1,17 @@
 import os
-import loggingimport hashlib
+import logging
+import hashlib
 import json
-import mathimport re
-from datetime import datetime, timezonefrom typing import Any, List, Optional, Dict, Tuple
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, Boolean, select, inspect, text
+import math
+import refrom datetime import datetime, timezone
+from typing import Any, List, Optional, Dict, Tuplefrom sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, Boolean, select, inspect, text
 from cryptography.fernet import Fernet, InvalidToken
-from langchain_community.chat_message_histories import SQLChatMessageHistoryfrom fastapi import FastAPI, HTTPException, DeprecationWarning, Request, Form, UploadFile, File, BackgroundTasks, Query
+from langchain_community.chat_message_histories import SQLChatMessageHistory
+from fastapi import FastAPI, HTTPException, DeprecationWarning, Request, Form, UploadFile, File, BackgroundTasks, Query
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-import sys
+import uvicornimport sys
 import os
 import json
 import logging
@@ -24,18 +25,16 @@ import subprocess
 import threading
 import time
 import atexit
-import shutil
-import tempfile
-import warningsimport importlib
+import shutilimport tempfile
+import warnings
+import importlib
 import sqlite3
 from contextlib import asynccontextmanager
 from typing import Any, List, Optional, Dict, Tuple
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, Boolean, select, inspect, text
 from cryptography.fernet import Fernet, InvalidToken
 from langchain_community.chat_message_histories import SQLChatMessageHistory
-from logging_utils import get_logger
-
-# ----------------------------------------------------------------------
+from logging_utils import get_logger# ----------------------------------------------------------------------
 # Database URL: prefer explicit DATABASE_URL (Docker), otherwise fall back to
 # SUPABASE_URL (used by Dyad preview).  If neither is set, use a safe default
 # for local development.
@@ -50,7 +49,22 @@ if not os.path.exists(STATIC_DIR):
     STATIC_DIR = os.path.join(os.path.dirname(__file__), ".")
 
 app = FastAPI()
-app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+# Serve static files from the frontend directory
+if os.path.exists(STATIC_DIR):
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+
+# Catch-all route to serve index.html for SPA navigation (e.g., /dashboard, /settings)
+@app.get("/{path:path}")
+async def serve_spa(path: str):
+    # Block access to API routes
+    if path.startswith("api/"):
+        raise HTTPException(status_code=404)
+    # Serve the main index.html file
+    if os.path.exists(os.path.join(STATIC_DIR, "index.html")):
+        return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    else:
+        return HTMLResponse(content="<h1>Index file not found</h1>", status_code=500)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,13 +73,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Fallback route to serve index.html for any unmatched path (SPA support)
-@app.get("/{path:path}")
-async def serve_spa(path: str):
-    # Skip API routes
-    if path.startswith("api/"):
-        raise HTTPException(status_code=404)
-    # Serve the main index.html for any other path
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+engine = None
+metadata = MetaData()
+ENCRYPTED_PREFIX = "enc::"
+logger = get_logger(__name__)
 
 # The rest of the file remains unchanged...
