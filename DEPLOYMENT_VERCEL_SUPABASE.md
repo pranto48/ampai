@@ -1,169 +1,111 @@
-# AmpAI deployment: Docker local + Dyad preview + Vercel publish + custom domain
+# AmpAI deployment: same codebase for Docker (local DB) + Vercel (Supabase DB)
 
-This repository supports one codebase across environments:
+This setup gives you exactly what you asked for:
 
-- **Docker local** → local Postgres + local Redis
-- **Dyad preview** → Supabase Postgres + cloud Redis
-- **Vercel** → frontend publish with `/api/*` rewrite to your backend domain
-
----
-
-## 0) Security first (important)
-
-- Use **Supabase publishable key** in browser/frontend contexts.
-- Never commit **secret/service-role** keys into git.
-- Keep server-only secrets in provider dashboards (Dyad, Railway/Render/Fly, Vercel env vars).
-- If a secret key was ever pasted/shared, rotate it in Supabase immediately.
+- **Local Docker** uses its **own local Postgres + Redis**.
+- **Dyad preview** uses **Supabase Postgres** (and cloud Redis).
+- **Vercel** publishes the **web view** from the same repo.
+- You can attach a **custom domain** in Vercel.
 
 ---
 
 ## 1) Local Docker (local DB)
+
+1. Copy local env values:
+
+```bash
+cp .env.example .env
+```
+
+2. Start services:
 
 ```bash
 cp .env.example .env
 docker compose up -d --build
 ```
 
-Default local endpoints:
+3. App endpoints (default ports):
 - App: `http://localhost:8001`
 - Postgres: `localhost:5433`
 - Redis: `localhost:6380`
 
-Docker app uses local DB by default via compose:
+Docker service uses this local DB by default:
 - `DATABASE_URL=postgresql://ampai:ampai@db:5432/ampai`
 
 ---
 
 ## 2) Dyad preview (Supabase DB)
 
+1. Copy Dyad env template:
+
 ```bash
 cp .env.dyad.example .env.dyad
 ```
 
-Set these in Dyad project environment variables:
-- `DATABASE_URL` (Supabase Postgres pooling URL)
-- `SUPABASE_URL`
-- `SUPABASE_ANON_KEY` (or keep compatibility while migrating to publishable key usage)
-- `REDIS_URL` (Upstash/Redis Cloud)
+2. Fill these values in Dyad environment variables:
+- `DATABASE_URL` = Supabase Postgres **pooling** connection string
+- `SUPABASE_URL` and `SUPABASE_ANON_KEY`
+- `REDIS_URL` = Upstash / Redis Cloud URL
 - `JWT_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `USER_USERNAME`, `USER_PASSWORD`
 
-> Use `DATABASE_URL` for Postgres. `SUPABASE_URL` is not a Postgres DSN.
+3. Publish Dyad preview from the same branch.
 
-Set these in Dyad project environment variables:
-- `DATABASE_URL` (Supabase Postgres pooling URL)
-- `SUPABASE_URL`
-- `SUPABASE_ANON_KEY` (or keep compatibility while migrating to publishable key usage)
-- `REDIS_URL` (Upstash/Redis Cloud)
-- `JWT_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `USER_USERNAME`, `USER_PASSWORD`
+> Important: Dyad must use `DATABASE_URL` for Supabase Postgres. Do not use `SUPABASE_URL` as a DB connection string.
 
-## 3) Publish frontend on Vercel
+---
 
-1. Import this repo in Vercel.
-2. Keep root as project root so `vercel.json` is used.
-3. Replace `https://YOUR_BACKEND_URL` in `vercel.json` with your backend API URL.
-4. Deploy:
+## 3) Publish web app on Vercel
+
+1. Push this repo to GitHub.
+2. In Vercel: **New Project → Import Git Repository**.
+3. Keep repo root as project root (uses `vercel.json`).
+4. Edit `vercel.json` and replace:
+   - `https://YOUR_BACKEND_URL` with your backend public URL (Railway/Render/Fly).
+5. Deploy:
 
 ```bash
 vercel
 vercel --prod
 ```
 
-Optional local template for Vercel env values:
-
-```bash
-cp .env.vercel.example .env.vercel.local
-```
+Your Vercel frontend will call backend APIs through `/api/*` rewrite.
 
 ---
 
-## 4) Backend hosting for API
+## 4) Backend hosting for Vercel API target
 
-Host FastAPI backend as a container (Railway/Render/Fly preferred).
+Because this app is FastAPI + long-running features, host backend as a container service (Railway/Render/Fly), not Vercel serverless.
 
-Set backend env vars:
+Set backend environment variables:
 - `DATABASE_URL` = Supabase Postgres URL
-- `REDIS_URL` = cloud Redis URL
+- `REDIS_URL` = cloud Redis
 - `JWT_SECRET`, admin/user credentials
-- model/provider keys as needed
+- Any model provider keys you use
 
 ---
 
-## 5) Add custom domains
+## 5) Add custom domain
 
-### Vercel (frontend)
-1. Project → **Settings → Domains**
-2. Add domain like `app.yourdomain.com`
-3. Apply DNS records shown by Vercel
-4. Wait for SSL issuance
+### Frontend domain (Vercel)
+1. Vercel project → **Settings → Domains**.
+2. Add your domain (example: `app.yourdomain.com`).
+3. Add DNS records exactly as Vercel shows.
+4. Wait for SSL provisioning.
 
-### Backend host
-1. Add domain like `api.yourdomain.com`
-2. Apply DNS records from host provider
-3. Update `vercel.json` rewrite destination to this backend domain
-
----
-
-## 6) Day-to-day workflow
-
-1. Build and test locally in Docker.
-2. Push same commit/branch.
-3. Dyad and Vercel deploy from same source.
-
-Outcome:
-- Local Docker keeps local DB.
-- Cloud uses Supabase DB.
+### Backend domain (hosting provider)
+1. In Railway/Render/Fly service, add domain (example: `api.yourdomain.com`).
+2. Add provider DNS records.
+3. Update `vercel.json` rewrite destination to your backend domain.
 
 ---
 
----
+## 6) One-codebase workflow
 
-## 7) Docker troubleshooting
+1. Make UI/backend code changes once in this repo.
+2. Test locally with Docker.
+3. Push to Git.
+4. Dyad/Vercel deploy from same commit.
 
-### A) Backend crash with `SyntaxError` in `/app/backend/main.py`
-
-If logs show errors like:
-
-- `SyntaxError: invalid syntax`
-- broken import line such as `import refrom datetime ...`
-
-then your checked-out `backend/main.py` is corrupted.
-Use the latest repo version (this branch restores a valid `main.py`) and rebuild:
-
-Also ensure the container starts with `uvicorn main:app` from `/app/backend`.
-Using `uvicorn backend.main:app` can break imports like `from auth import ...` in this codebase.
-For Docker stability, run without `--reload` in compose.
-
-```bash
-git pull
-docker compose down
-docker compose up --build -d
-```
-
-### B) Build failure `invalid containerPort: 8000#`
-
-This means the Dockerfile had a malformed line where `EXPOSE 8000` merged with text.
-Use the fixed Dockerfile from this repo and rebuild.
-
-### C) Redis warnings in logs
-
-- `vm.overcommit_memory = 1` warning is host-kernel tuning advice and usually non-fatal for local dev.
-- Redis "no authentication" warning is addressed by this compose setup using `--requirepass` and a passworded `REDIS_URL`.
-
-You can set the password in `.env`:
-
-```bash
-REDIS_PASSWORD=your-strong-local-password
-```
-
-
-### D) Browser shows `chrome-error://chromewebdata` and page is blank
-
-That browser message usually means the app URL is not reachable (container crashed or not listening), not a frontend code error.
-Check:
-
-```bash
-docker compose ps
-docker compose logs -f agent-web-app
-```
-
-If logs show import failures, rebuild with the fixed Dockerfile/compose in this repo.
+Result:
+- Docker keeps local DB for local development.
+- Cloud environments use Supabase DB.
