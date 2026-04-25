@@ -133,6 +133,11 @@ body {
     background: var(--border-color);
     margin: 4px 2px;
 }
+.user-menu-separator {
+    height: 1px;
+    background: var(--border-color);
+    margin: 4px 2px;
+}
 
 .user-menu-panel.open {
     display: flex;
