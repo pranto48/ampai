@@ -8,10 +8,10 @@ async function fetchCurrentUser() {
 
 async function logoutAndRedirect() {
     await fetch('/api/auth/logout', { method: 'POST' });
-    window.location.href = '/login.html';
+    window.location.href = '/index.html';
 }
 
-async function enforceAuth({ requiredRole = null, redirectTo = '/login.html' } = {}) {
+async function enforceAuth({ requiredRole = null, redirectTo = '/index.html' } = {}) {
     const user = await fetchCurrentUser();
     if (!user) {
         window.location.href = redirectTo;
