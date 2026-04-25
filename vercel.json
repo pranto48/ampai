@@ -15,7 +15,7 @@
       "dest": "/frontend/index.html"
     },
     {
-      "src": "^/(index|login|admin|memory-explorer)\\.html$",
+      "src": "^/(index|login|chat|settings|admin|memory-explorer|ai-models)\\.html$",
       "dest": "/frontend/$1.html"
     },
     {

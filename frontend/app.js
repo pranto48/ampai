@@ -1,47 +1,19 @@
 document.addEventListener('DOMContentLoaded', () => {
     async function ensureAuth() {
         const existing = localStorage.getItem('ampai_token');
-        if (existing) {
+        if (!existing) {
+            window.location.href = '/index.html';
+            return false;
+        }
+        try {
             const who = await fetch('/api/auth/whoami', { headers: { Authorization: `Bearer ${existing}` } });
             if (who.ok) return true;
             localStorage.removeItem('ampai_token');
-        }
-
-        const doRegister = confirm('No active login. Press OK to Register new user, Cancel to Login.');
-        const username = prompt(doRegister ? 'Create username:' : 'Username:') || '';
-        const password = prompt(doRegister ? 'Create password:' : 'Password:') || '';
-        if (!username || !password) return false;
-
-        try {
-            if (doRegister) {
-                const reg = await fetch('/api/auth/register', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ username, password })
-                });
-                if (!reg.ok) {
-                    const err = await reg.json();
-                    throw new Error(err.detail || 'Registration failed');
-                }
-            }
-
-            const loginRes = await fetch('/api/auth/login', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ username, password })
-            });
-            if (!loginRes.ok) {
-                const err = await loginRes.json();
-                throw new Error(err.detail || 'Login failed');
-            }
-            const data = await loginRes.json();
-            localStorage.setItem('ampai_token', data.token);
-            localStorage.setItem('ampai_role', data.role);
-            localStorage.setItem('ampai_username', data.username || username);
-            return true;
+            window.location.href = '/index.html';
+            return false;
         } catch (e) {
-            alert('Authentication failed: ' + e.message);
             localStorage.removeItem('ampai_token');
+            window.location.href = '/index.html';
             return false;
         }
     }
