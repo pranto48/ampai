@@ -13,7 +13,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Open: `http://localhost:8001`
+Open: `http://localhost:8001` (or `http://<your-server-ip>:8001` from another device on your LAN)
 
 ## Deployment + domains
 
@@ -44,4 +44,12 @@ Quick check if browser shows blank page:
 ```bash
 docker compose ps
 docker compose logs -f agent-web-app
+```
+
+
+If browser shows **"Unsafe attempt to load URL ... chrome-error://chromewebdata"**, the app endpoint is unreachable. Verify container health and logs, then refresh:
+
+```bash
+docker compose ps
+docker compose logs --tail=200 agent-web-app
 ```

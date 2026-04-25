@@ -131,6 +131,7 @@ Use the latest repo version (this branch restores a valid `main.py`) and rebuild
 
 Also ensure the container starts with `uvicorn main:app` from `/app/backend`.
 Using `uvicorn backend.main:app` can break imports like `from auth import ...` in this codebase.
+For Docker stability, run without `--reload` in compose.
 
 ```bash
 git pull
