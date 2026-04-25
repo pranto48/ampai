@@ -7,8 +7,8 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px;">
-        <form id="login-form" class="card" style="width: 100%; max-width: 460px;">
+    <div class="login-page-shell">
+        <form id="login-form" class="card login-card" style="width: 100%; max-width: 460px;">
             <h1 style="margin-bottom: 8px;">Welcome to AmpAI</h1>
             <p style="color: var(--text-secondary); margin-bottom: 16px;">Login to continue to chat, settings, memory explorer, and AI model/API connections.</p>
 
@@ -17,14 +17,14 @@
             <label>Password</label>
             <input id="password" class="modern-input" type="password" required style="margin-bottom: 16px;" />
 
-            <div style="display:flex; gap:10px;">
+            <div class="login-actions" style="display:flex; gap:10px;">
                 <button type="submit" class="btn primary-btn" style="width:100%;">Login</button>
                 <button type="button" id="register-btn" class="btn" style="width:100%;">Register</button>
             </div>
 
             <div id="login-error" style="margin-top: 12px; color: #ef4444;"></div>
 
-            <div style="margin-top: 16px; display:flex; gap:8px; flex-wrap:wrap;">
+            <div class="quick-nav-links" style="margin-top: 16px; display:flex; gap:8px; flex-wrap:wrap;">
                 <a href="chat.html" class="btn" style="width:auto;">Chat Page</a>
                 <a href="settings.html" class="btn" style="width:auto;">Settings Page</a>
                 <a href="memory-explorer.html" class="btn" style="width:auto;">Memory Page</a>
@@ -53,8 +53,15 @@
                         body: JSON.stringify({ username, password })
                     });
                     if (!reg.ok) {
-                        const err = await reg.json();
-                        throw new Error(err.detail || 'Registration failed');
+                        const errText = await reg.text();
+                        let detail = 'Registration failed';
+                        try {
+                            const parsed = JSON.parse(errText);
+                            detail = parsed.detail || detail;
+                        } catch (_) {
+                            detail = errText || detail;
+                        }
+                        throw new Error(detail);
                     }
                 }
 
@@ -65,8 +72,15 @@
                 });
 
                 if (!response.ok) {
-                    const err = await response.json();
-                    throw new Error(err.detail || 'Invalid username or password.');
+                    const errText = await response.text();
+                    let detail = 'Invalid username or password.';
+                    try {
+                        const parsed = JSON.parse(errText);
+                        detail = parsed.detail || detail;
+                    } catch (_) {
+                        if (errText) detail = errText;
+                    }
+                    throw new Error(detail);
                 }
 
                 const user = await response.json();
