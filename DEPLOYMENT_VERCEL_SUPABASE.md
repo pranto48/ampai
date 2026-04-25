@@ -49,7 +49,7 @@ Set these in Dyad project environment variables:
 
 > Use `DATABASE_URL` for Postgres. `SUPABASE_URL` is not a Postgres DSN.
 
----
+> Use `DATABASE_URL` for Postgres. `SUPABASE_URL` is not a Postgres DSN.
 
 ## 3) Publish frontend on Vercel
 
