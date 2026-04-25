@@ -2105,3 +2105,92 @@ def migrate_app_config_encryption() -> Dict[str, Any]:
 
 
 ensure_enterprise_tables()
+
+# ---------------------------------------------------------------------------
+# Compatibility wrappers
+# ---------------------------------------------------------------------------
+
+def create_user(
+    username: str,
+    password: Optional[str] = None,
+    role: str = "user",
+    password_hash: Optional[str] = None,
+):
+    """
+    Backward-compatible create_user.
+
+    Supports both call styles used across this codebase:
+    1) create_user(username, password, role="user") -> (ok: bool, reason: str)
+    2) create_user(username=..., role=..., password_hash=...) -> bool
+    """
+    if not engine:
+        return (False, "db_unavailable") if password_hash is None else False
+
+    username = (username or "").strip()
+    if not username:
+        return (False, "username_required") if password_hash is None else False
+
+    tuple_mode = password_hash is None
+    if password_hash is None:
+        if not password:
+            return False, "username_password_required"
+        if len(password) < 4:
+            return False, "password_too_short"
+        password_hash = _hash_password(password)
+
+    role = (role or "user").strip().lower()
+    if role not in {"admin", "user"}:
+        role = "user"
+
+    try:
+        with engine.connect() as conn:
+            existing = conn.execute(
+                text("SELECT 1 FROM users WHERE username = :username LIMIT 1"),
+                {"username": username},
+            ).first()
+            if existing:
+                return (False, "username_exists") if tuple_mode else False
+
+            conn.execute(
+                text(
+                    "INSERT INTO users (username, role, password_hash, created_at, updated_at) "
+                    "VALUES (:username, :role, :password_hash, NOW(), NOW())"
+                ),
+                {"username": username, "role": role, "password_hash": password_hash},
+            )
+            conn.commit()
+        return (True, "created") if tuple_mode else True
+    except Exception as e:
+        logger.exception("Error creating user", extra={"username": username}, exc_info=e)
+        return (False, "create_failed") if tuple_mode else False
+
+
+def ensure_default_admin(username: str, password: str):
+    # idempotent startup helper for auth.bootstrap_default_admin
+    result = create_user(username=username, password=password, role="admin")
+    if isinstance(result, tuple):
+        return result[0]
+    return bool(result)
+
+
+def delete_user(user_identifier):
+    """
+    Backward-compatible delete_user.
+    Accepts either numeric user id or username.
+    """
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            if isinstance(user_identifier, int):
+                result = conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_identifier})
+            else:
+                result = conn.execute(
+                    text("DELETE FROM users WHERE username = :username"),
+                    {"username": str(user_identifier)},
+                )
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.exception("Error deleting user", exc_info=e)
+        return False
