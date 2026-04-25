@@ -20,10 +20,17 @@
 
 body {
     font-family: 'Inter', sans-serif;
-    background-color: var(--bg-dark);
+    background: linear-gradient(120deg, #0f172a, #111827, #1e1b4b, #0f172a);
+    background-size: 250% 250%;
+    animation: auroraShift 18s ease infinite;
     color: var(--text-primary);
     height: 100vh;
     overflow: hidden;
+}
+@keyframes auroraShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
 }
 
 .app-container {
@@ -48,6 +55,9 @@ body {
     display: flex;
     flex-direction: column;
     padding: 20px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    gap: 10px;
     transition: all 0.3s ease;
 }
 
@@ -91,7 +101,7 @@ body {
     position: fixed;
     top: 12px;
     right: 12px;
-    z-index: 10000;
+    z-index: 30000;
     display: flex;
     gap: 8px;
     align-items: center;
@@ -106,14 +116,22 @@ body {
     top: calc(100% + 6px);
     right: 0;
     min-width: 180px;
-    background: var(--bg-sidebar);
-    border: 1px solid var(--border-color);
+    background: rgba(15, 23, 42, 0.96);
+    border: 1px solid rgba(148, 163, 184, 0.35);
     border-radius: 8px;
-    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
     padding: 6px;
     display: none;
     flex-direction: column;
     gap: 4px;
+    z-index: 30001;
+    max-height: 70vh;
+    overflow-y: auto;
+}
+.user-menu-separator {
+    height: 1px;
+    background: var(--border-color);
+    margin: 4px 2px;
 }
 
 .user-menu-panel.open {
@@ -126,7 +144,7 @@ body {
     text-align: left;
     padding: 8px 10px;
     border-radius: 6px;
-    color: var(--text-primary);
+    color: #e2e8f0;
     background: transparent;
     border: none;
     text-decoration: none;
@@ -135,7 +153,8 @@ body {
 }
 
 .user-menu-item:hover {
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(99, 102, 241, 0.22);
+    color: #ffffff;
 }
 
 .btn {
@@ -195,8 +214,18 @@ body {
 
 .sessions-container {
     margin-top: 24px;
-    flex: 1;
     overflow-y: auto;
+    min-height: 120px;
+}
+
+.memories-panel {
+    flex: 1;
+    min-height: 220px;
+}
+
+.compact-panel {
+    flex: 0 0 auto;
+    max-height: 240px;
 }
 
 .sessions-container h3 {
@@ -248,6 +277,74 @@ body {
     background: var(--glass-bg);
     backdrop-filter: blur(10px);
     z-index: 10;
+    overflow: visible;
+}
+
+.card {
+    background: rgba(15, 23, 42, 0.75);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 14px;
+    box-shadow: 0 15px 35px rgba(0,0,0,0.3);
+    animation: cardFloatIn 500ms ease;
+}
+
+@keyframes cardFloatIn {
+    from { transform: translateY(6px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+
+.login-page-shell {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    position: relative;
+}
+
+.login-card {
+    position: relative;
+    overflow: hidden;
+    backdrop-filter: blur(8px);
+}
+
+.login-card::before {
+    content: "";
+    position: absolute;
+    inset: -2px;
+    background: linear-gradient(90deg, rgba(99,102,241,0.45), rgba(16,185,129,0.35), rgba(168,85,247,0.45));
+    z-index: -1;
+    filter: blur(18px);
+    animation: auroraShift 8s ease infinite;
+}
+
+.login-glow {
+    position: absolute;
+    width: 280px;
+    height: 280px;
+    border-radius: 50%;
+    filter: blur(45px);
+    opacity: 0.35;
+    pointer-events: none;
+    animation: floatGlow 9s ease-in-out infinite;
+}
+
+.login-glow-a {
+    background: #6366f1;
+    top: 8%;
+    left: 12%;
+}
+
+.login-glow-b {
+    background: #10b981;
+    right: 12%;
+    bottom: 8%;
+    animation-delay: 1.5s;
+}
+
+@keyframes floatGlow {
+    0%, 100% { transform: translateY(0px) scale(1); }
+    50% { transform: translateY(-18px) scale(1.06); }
 }
 
 .chat-header h1 {
@@ -513,6 +610,7 @@ body {
         width: 80%;
         max-width: 320px;
         box-shadow: 5px 0 25px rgba(0,0,0,0.5);
+        overflow-y: auto;
     }
     .sidebar.open {
         left: 0;
