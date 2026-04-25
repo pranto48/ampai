@@ -1,5 +1,7 @@
 async function fetchCurrentUser() {
-    const response = await fetch('/api/auth/me');
+    const token = localStorage.getItem('ampai_token') || '';
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const response = await fetch('/api/auth/me', { headers });
     if (!response.ok) {
         return null;
     }
@@ -7,7 +9,12 @@ async function fetchCurrentUser() {
 }
 
 async function logoutAndRedirect() {
-    await fetch('/api/auth/logout', { method: 'POST' });
+    const token = localStorage.getItem('ampai_token') || '';
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    await fetch('/api/auth/logout', { method: 'POST', headers });
+    localStorage.removeItem('ampai_token');
+    localStorage.removeItem('ampai_role');
+    localStorage.removeItem('ampai_username');
     window.location.href = '/index.html';
 }
 

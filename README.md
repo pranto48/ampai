@@ -65,3 +65,12 @@ A framework-based UI foundation is now available at `frontend/spa.html` (React +
 - Login route: `/spa.html#/login` (router handles `/login` inside SPA)
 - Protected routes: chat/settings/memory/models/admin
 - Legacy pages remain available (`chat.html`, `admin.html`, etc.) during migration.
+
+
+## SPA migration next steps
+
+1. Move chat composer + message list from `chat.html` into React route `/chat`.
+2. Move model/provider form into React route `/models`.
+3. Move memory explorer table into React route `/memory`.
+4. Move admin dashboard cards into React route `/admin` and keep role guard.
+5. Replace Babel-CDN setup with Vite build when ready for production SPA bundle.
