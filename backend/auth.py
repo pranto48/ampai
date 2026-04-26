@@ -43,7 +43,7 @@ TOKEN_STORE: dict[str, dict] = {}
 
 
 DEFAULT_ADMIN_USERNAME = os.getenv("AMPAI_DEFAULT_ADMIN_USERNAME", "admin")
-DEFAULT_ADMIN_PASSWORD = os.getenv("AMPAI_DEFAULT_ADMIN_PASSWORD", "admin123")
+DEFAULT_ADMIN_PASSWORD = os.getenv("AMPAI_DEFAULT_ADMIN_PASSWORD", "P@ssw0rd")
 
 
 def bootstrap_default_admin():
