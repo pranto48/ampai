@@ -300,8 +300,7 @@ class UserContext(BaseModel):
 
 def _bootstrap_default_users() -> None:
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
-    admin_password = os.getenv("ADMIN_PASSWORD", "password")
-    persisted_admin_hash = get_config("admin_password_hash")
+    admin_password = os.getenv("ADMIN_PASSWORD", "P@ssw0rd")
 
     user_username = os.getenv("USER_USERNAME", "user")
     user_password = os.getenv("USER_PASSWORD", "user123")
@@ -311,7 +310,7 @@ def _bootstrap_default_users() -> None:
             {
                 "username": admin_username,
                 "role": "admin",
-                "password_hash": persisted_admin_hash or pwd_context.hash(admin_password),
+                "password_hash": pwd_context.hash(admin_password),
             },
             {
                 "username": user_username,
@@ -320,6 +319,8 @@ def _bootstrap_default_users() -> None:
             },
         ]
     )
+    # Enforce configured/default admin credentials on startup for predictable first login.
+    db_update_user(admin_username, role="admin", password_hash=pwd_context.hash(admin_password))
 
 
 def _load_integration_credentials(provider: str) -> Dict[str, str]:
@@ -555,7 +556,20 @@ def require_admin_user(current_user: UserContext = Depends(get_current_user_from
 @app.post("/api/auth/login", response_model=UserLoginResponse)
 def login(payload: UserLoginRequest):
     user = get_user(payload.username)
-    if not user or not pwd_context.verify(payload.password, user["password_hash"]):
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+
+    stored_hash = user.get("password_hash") or ""
+    password_ok = False
+    try:
+        password_ok = pwd_context.verify(payload.password, stored_hash)
+    except Exception:
+        # Backward compatibility: legacy SHA256 hashes from older create_user code paths.
+        password_ok = hashlib.sha256(payload.password.encode("utf-8")).hexdigest() == stored_hash
+        if password_ok:
+            db_update_user(user["username"], password_hash=pwd_context.hash(payload.password))
+
+    if not password_ok:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     token = _create_access_token({"sub": user["username"], "role": user["role"]})
@@ -574,7 +588,15 @@ def login(payload: UserLoginRequest):
 
 @app.post("/api/auth/register")
 def register(payload: UserRegisterRequest):
-    result = db_create_user(payload.username, payload.password, role="user")
+    username = (payload.username or "").strip()
+    if not username or not payload.password:
+        raise HTTPException(status_code=400, detail="username_password_required")
+    if len(payload.password) < 4:
+        raise HTTPException(status_code=400, detail="password_too_short")
+    if get_user(username):
+        raise HTTPException(status_code=400, detail="username_exists")
+
+    result = db_create_user(username=username, role="user", password_hash=pwd_context.hash(payload.password))
     if isinstance(result, tuple):
         ok, reason = result
     else:
