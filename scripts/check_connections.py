@@ -90,6 +90,14 @@ def check_page_artifacts() -> list[str]:
     return errors
 
 
+def check_legacy_html_entries() -> list[str]:
+    """Ensure page entrypoints have been converted away from HTML files."""
+    errors: list[str] = []
+    for html_file in sorted((ROOT / "frontend").glob("*.html")):
+        errors.append(f"legacy HTML page still present: frontend/{html_file.name}")
+    return errors
+
+
 def main() -> int:
     frontend_endpoints = extract_frontend_endpoints()
     backend_routes = extract_backend_routes()
@@ -112,6 +120,7 @@ def main() -> int:
 
     env_errors = check_env_examples()
     page_errors = check_page_artifacts()
+    html_errors = check_legacy_html_entries()
     if env_errors:
         print("\nEnvironment example issues:")
         for error in env_errors:
@@ -122,7 +131,12 @@ def main() -> int:
         for error in page_errors:
             print(f"  - {error}")
 
-    if missing or env_errors or page_errors:
+    if html_errors:
+        print("\nLegacy HTML entry issues:")
+        for error in html_errors:
+            print(f"  - {error}")
+
+    if missing or env_errors or page_errors or html_errors:
         return 1
 
     print("\nAll static connection checks passed.")
