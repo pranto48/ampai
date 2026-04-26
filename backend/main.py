@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -1684,6 +1684,19 @@ def summarize_today_email(request: EmailSummaryRequest, user=Depends(require_aut
     )
     return {"summary": result.get("response") if isinstance(result, dict) else result, "email_count": len(items)}
 
+
+
+
+@app.get("/", include_in_schema=False)
+def root_page():
+    return HTMLResponse(
+        """<!doctype html><html lang='en'><head><meta charset='UTF-8'/><meta name='viewport' content='width=device-width, initial-scale=1.0'/><title>AmpAI</title></head><body><div id='root'></div><script type='module' src='/build/index.js'></script></body></html>"""
+    )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
 
 @app.get("/healthz")
 def healthz():
