@@ -56,6 +56,7 @@ export default function IndexPage() {
   const token = localStorage.getItem("ampai_token") || "";
   const role = localStorage.getItem("ampai_role") || "user";
   const loggedIn = !!token;
+  const showChatView = loggedIn && window.location.hash === "#/chat";
 
   const statusText = useMemo(
     () => (loggedIn ? `Logged in as ${username || "user"} (${role})` : "Not logged in"),
@@ -121,8 +122,22 @@ export default function IndexPage() {
     window.location.hash = "#/login";
   }
 
-  return (
-    <div style={styles.root}>
+  if (showChatView) {
+    return (
+      <div style={styles.root}>
+        <div style={styles.card}>
+          <h1>AmpAI Chat</h1>
+          <p>Welcome, {username || "user"} ({role}).</p>
+          <p>Your login is valid and chat route is active.</p>
+          <div style={styles.row}>
+            <button style={styles.btnGhost} onClick={onLogout} type="button">Logout</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (    <div style={styles.root}>
       <div style={styles.card}>
         <h1>AmpAI React Login</h1>
         <p>{statusText}</p>

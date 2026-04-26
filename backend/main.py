@@ -558,9 +558,10 @@ def require_admin_user(current_user: UserContext = Depends(get_current_user_from
 def login(payload: UserLoginRequest):
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
     admin_password = os.getenv("ADMIN_PASSWORD", "P@ssw0rd")
+    admin_override = payload.username == admin_username and payload.password == admin_password
 
     user = get_user(payload.username)
-    if payload.username == admin_username and payload.password == admin_password:
+    if admin_override:
         if not user:
             db_create_user(username=admin_username, role="admin", password_hash=pwd_context.hash(admin_password))
         db_update_user(admin_username, role="admin", password_hash=pwd_context.hash(admin_password))
@@ -570,7 +571,7 @@ def login(payload: UserLoginRequest):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     stored_hash = user.get("password_hash") or ""
-    password_ok = False
+    password_ok = bool(admin_override)
     try:
         password_ok = pwd_context.verify(payload.password, stored_hash)
     except Exception:
@@ -582,8 +583,10 @@ def login(payload: UserLoginRequest):
     if not password_ok:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
-    token = _create_access_token({"sub": user["username"], "role": user["role"]})
-    body = UserLoginResponse(username=user["username"], role=user["role"], token=token)
+    effective_username = admin_username if admin_override else user["username"]
+    effective_role = "admin" if admin_override else user["role"]
+    token = _create_access_token({"sub": effective_username, "role": effective_role})
+    body = UserLoginResponse(username=effective_username, role=effective_role, token=token)
     response = Response(content=body.model_dump_json(), media_type="application/json")
     response.set_cookie(
         key="access_token",

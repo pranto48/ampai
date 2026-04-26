@@ -22,6 +22,7 @@ function App() {
   const token = localStorage.getItem('ampai_token') || '';
   const role = localStorage.getItem('ampai_role') || 'user';
   const loggedIn = !!token;
+  const showChatView = loggedIn && window.location.hash === '#/chat';
   const statusText = useMemo(() => loggedIn ? `Logged in as ${username || 'user'} (${role})` : 'Not logged in', [loggedIn, role, username]);
 
   async function callAuth(path, body) {
@@ -61,6 +62,20 @@ function App() {
     localStorage.removeItem('ampai_role');
     localStorage.removeItem('ampai_username');
     setOk('Logged out.'); setError(''); window.location.hash = '#/login';
+  }
+
+
+  if (showChatView) {
+    return React.createElement('div', { style: styles.root },
+      React.createElement('div', { style: styles.card },
+        React.createElement('h1', null, 'AmpAI Chat'),
+        React.createElement('p', null, `Welcome, ${username || 'user'} (${role}).`),
+        React.createElement('p', null, 'Your login is valid and chat route is active.'),
+        React.createElement('div', { style: styles.row },
+          React.createElement('button', { style: styles.btnGhost, onClick: onLogout, type: 'button' }, 'Logout')
+        )
+      )
+    );
   }
 
   return React.createElement('div', { style: styles.root },
