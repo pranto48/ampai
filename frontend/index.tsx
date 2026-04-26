@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { createRoot } from "react-dom/client";
 
 type AuthResponse = {
   token?: string;
@@ -158,4 +159,10 @@ export default function IndexPage() {
       </div>
     </div>
   );
+}
+
+
+const rootEl = document.getElementById("root");
+if (rootEl) {
+  createRoot(rootEl).render(<IndexPage />);
 }
