@@ -66,6 +66,30 @@ def check_env_examples() -> list[str]:
     return errors
 
 
+def check_page_artifacts() -> list[str]:
+    """Verify TSX pages and built page modules are paired."""
+    errors: list[str] = []
+    page_names = [
+        "index",
+        "login",
+        "chat",
+        "admin",
+        "memory-explorer",
+        "settings",
+        "ai-models",
+    ]
+
+    for name in page_names:
+        tsx = ROOT / "frontend" / f"{name}.tsx"
+        built = ROOT / "frontend" / "build" / f"{name}.js"
+        if not tsx.exists():
+            errors.append(f"missing TSX page: frontend/{name}.tsx")
+        if not built.exists():
+            errors.append(f"missing built module: frontend/build/{name}.js")
+
+    return errors
+
+
 def main() -> int:
     frontend_endpoints = extract_frontend_endpoints()
     backend_routes = extract_backend_routes()
@@ -87,12 +111,18 @@ def main() -> int:
             print(f"  - {endpoint}")
 
     env_errors = check_env_examples()
+    page_errors = check_page_artifacts()
     if env_errors:
         print("\nEnvironment example issues:")
         for error in env_errors:
             print(f"  - {error}")
 
-    if missing or env_errors:
+    if page_errors:
+        print("\nPage artifact issues:")
+        for error in page_errors:
+            print(f"  - {error}")
+
+    if missing or env_errors or page_errors:
         return 1
 
     print("\nAll static connection checks passed.")

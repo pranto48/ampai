@@ -90,7 +90,7 @@ export default function IndexPage() {
       localStorage.setItem("ampai_username", data.username || username.trim());
       setOk("Login successful.");
       setPassword("");
-      window.location.hash = "#/chat";
+      window.location.hash = '#/chat';
     } catch (e) {
       setError(e instanceof Error ? e.message : "Login failed");
     } finally {
