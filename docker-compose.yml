@@ -22,6 +22,7 @@ services:
     image: redis:alpine
     container_name: agent_redis
     restart: always
+    command: sh -c "redis-server --requirepass ${REDIS_PASSWORD:-ampairedis}"
     ports:
       - "${REDIS_HOST_PORT:-6380}:6379"
     volumes:
@@ -43,19 +44,24 @@ services:
       - ./frontend:/app/frontend
     environment:
       - DATABASE_URL=postgresql://ampai:ampai@db:5432/ampai
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-ampairedis}@redis:6379/0
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       # Auth / RBAC configuration
       - JWT_SECRET=change-this-in-production
       - JWT_EXPIRY_MINUTES=60
       - ADMIN_USERNAME=admin
-      - ADMIN_PASSWORD=admin123
+      - ADMIN_PASSWORD=password
       - USER_USERNAME=user
       - USER_PASSWORD=user123
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/healthz\", timeout=3)'"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
 
 volumes:
   pgdata:
