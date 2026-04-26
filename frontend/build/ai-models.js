@@ -7,6 +7,6 @@ if (rootEl) {
   createRoot(rootEl).render(renderPageShell({
     title: 'AmpAI AI Models',
     description: 'Model page rendered from frontend/build/ai-models.js',
-    spaRoute: '/index.html#/models'
+    spaRoute: '/#/models'
   }));
 }

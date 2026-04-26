@@ -20,7 +20,7 @@ export function renderPageShell({ title, description, spaRoute }) {
         React.createElement('p', null, 'Current user: ', React.createElement('code', { style: styles.code }, username), ` (${role})`),
         React.createElement('div', { style: styles.row },
           React.createElement('a', { href: spaRoute, style: styles.link }, 'Open SPA Route'),
-          React.createElement('a', { href: '/index.html', style: { ...styles.link, background: '#334155' } }, 'Open React Login')
+          React.createElement('a', { href: '/#/login', style: { ...styles.link, background: '#334155' } }, 'Open React Login')
         )
       )
     )

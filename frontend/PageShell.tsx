@@ -70,7 +70,7 @@ export function PageShell({ title, description, spaRoute }: PageShellProps) {
           </p>
           <div style={styles.row}>
             <a href={spaRoute} style={styles.link}>Open SPA Route</a>
-            <a href="/index.html" style={{ ...styles.link, ...styles.altLink }}>Open React Login</a>
+            <a href="/#/login" style={{ ...styles.link, ...styles.altLink }}>Open React Login</a>
           </div>
         </div>
       </div>

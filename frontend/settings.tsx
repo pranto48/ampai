@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { PageShell } from "./PageShell";
 
 export default function SettingsPage() {
-  return <PageShell title="AmpAI Settings" description="Settings page rendered in TSX." spaRoute="/index.html#/settings" />;
+  return <PageShell title="AmpAI Settings" description="Settings page rendered in TSX." spaRoute="/#/settings" />;
 }
 
 

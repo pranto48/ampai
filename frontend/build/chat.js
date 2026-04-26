@@ -7,6 +7,6 @@ if (rootEl) {
   createRoot(rootEl).render(renderPageShell({
     title: 'AmpAI Chat',
     description: 'Chat page rendered from frontend/build/chat.js',
-    spaRoute: '/index.html#/chat'
+    spaRoute: '/#/chat'
   }));
 }

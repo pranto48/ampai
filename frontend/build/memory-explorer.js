@@ -7,6 +7,6 @@ if (rootEl) {
   createRoot(rootEl).render(renderPageShell({
     title: 'AmpAI Memory Explorer',
     description: 'Memory page rendered from frontend/build/memory-explorer.js',
-    spaRoute: '/index.html#/memory'
+    spaRoute: '/#/memory'
   }));
 }

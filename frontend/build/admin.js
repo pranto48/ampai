@@ -7,6 +7,6 @@ if (rootEl) {
   createRoot(rootEl).render(renderPageShell({
     title: 'AmpAI Admin',
     description: 'Admin page rendered from frontend/build/admin.js',
-    spaRoute: '/index.html#/admin'
+    spaRoute: '/#/admin'
   }));
 }

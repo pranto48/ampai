@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { PageShell } from "./PageShell";
 
 export default function AIModelsPage() {
-  return <PageShell title="AmpAI AI Models" description="AI models page rendered in TSX." spaRoute="/index.html#/models" />;
+  return <PageShell title="AmpAI AI Models" description="AI models page rendered in TSX." spaRoute="/#/models" />;
 }
 
 

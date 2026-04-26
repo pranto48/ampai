@@ -7,6 +7,6 @@ if (rootEl) {
   createRoot(rootEl).render(renderPageShell({
     title: 'AmpAI Settings',
     description: 'Settings page rendered from frontend/build/settings.js',
-    spaRoute: '/index.html#/settings'
+    spaRoute: '/#/settings'
   }));
 }

@@ -7,6 +7,6 @@ if (rootEl) {
   createRoot(rootEl).render(renderPageShell({
     title: 'AmpAI Login',
     description: 'Login page rendered from frontend/build/login.js',
-    spaRoute: '/index.html#/login'
+    spaRoute: '/#/login'
   }));
 }
