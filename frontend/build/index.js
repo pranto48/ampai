@@ -40,7 +40,7 @@ function App() {
       localStorage.setItem('ampai_token', data.token || '');
       localStorage.setItem('ampai_role', data.role || 'user');
       localStorage.setItem('ampai_username', data.username || username.trim());
-      setOk('Login successful.'); setPassword(''); window.location.href = '/chat.html';
+      setOk('Login successful.'); setPassword(''); window.location.hash = '#/chat';
     } catch (e) {
       setError(e.message || 'Login failed');
     } finally { setBusy(false); }

@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import logging
+import hashlib
 import json
 import os
 import json

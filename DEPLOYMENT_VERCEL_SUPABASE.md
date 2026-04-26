@@ -49,12 +49,7 @@ Set these in Dyad project environment variables:
 
 > Use `DATABASE_URL` for Postgres. `SUPABASE_URL` is not a Postgres DSN.
 
-Set these in Dyad project environment variables:
-- `DATABASE_URL` (Supabase Postgres pooling URL)
-- `SUPABASE_URL`
-- `SUPABASE_ANON_KEY` (or keep compatibility while migrating to publishable key usage)
-- `REDIS_URL` (Upstash/Redis Cloud)
-- `JWT_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `USER_USERNAME`, `USER_PASSWORD`
+---
 
 ## 3) Publish frontend on Vercel
 
