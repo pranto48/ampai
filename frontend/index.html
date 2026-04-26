@@ -3,286 +3,196 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AmpAI SPA (React)</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
-  <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
-  <script crossorigin src="https://cdn.jsdelivr.net/npm/react-router-dom@6.30.1/dist/umd/react-router-dom.production.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.7/babel.min.js"></script>
+  <title>AmpAI Login</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(circle at top, #1e1b4b 0%, #020617 55%);
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+    .shell {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+    }
+    .card {
+      width: 100%;
+      max-width: 460px;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+    }
+    h1 { margin: 0 0 8px 0; font-size: 1.35rem; }
+    p { margin: 0 0 14px 0; color: #94a3b8; }
+    label { display: block; font-size: .9rem; margin: 10px 0 6px; }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #020617;
+      color: #f8fafc;
+    }
+    .row { display: flex; gap: 10px; margin-top: 14px; }
+    button {
+      flex: 1;
+      padding: 10px;
+      border: 0;
+      border-radius: 8px;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-primary { background: #4f46e5; }
+    .btn-secondary { background: #059669; }
+    .btn-ghost { background: #334155; }
+    .error { margin-top: 12px; color: #fda4af; }
+    .ok { margin-top: 12px; color: #86efac; }
+    code { background: #0f172a; padding: 2px 6px; border-radius: 6px; }
+  </style>
 </head>
-<body class="min-h-screen bg-slate-950 text-slate-100">
-  <div id="fallback-app" style="min-height:100vh; display:flex; align-items:center; justify-content:center; padding:16px;">
-    <form id="fallback-login-form" style="width:100%; max-width:420px; background:#0f172a; border:1px solid #334155; border-radius:14px; padding:18px; box-shadow:0 15px 30px rgba(0,0,0,.35);">
-      <h1 style="margin:0 0 8px 0; font-size:1.4rem;">AmpAI Login</h1>
-      <p style="margin:0 0 14px 0; color:#94a3b8; font-size:.9rem;">Fallback login is active while React loads.</p>
-      <label style="display:block; margin-bottom:4px; font-size:.85rem; color:#cbd5e1;">Username</label>
-      <input id="fallback-username" required style="width:100%; margin-bottom:10px; padding:10px; border-radius:8px; border:1px solid #334155; background:#020617; color:#fff;" />
-      <label style="display:block; margin-bottom:4px; font-size:.85rem; color:#cbd5e1;">Password</label>
-      <input id="fallback-password" type="password" required style="width:100%; margin-bottom:14px; padding:10px; border-radius:8px; border:1px solid #334155; background:#020617; color:#fff;" />
-      <div style="display:flex; gap:8px;">
-        <button type="submit" style="flex:1; padding:10px; border:none; border-radius:8px; background:#4f46e5; color:#fff; cursor:pointer;">Login</button>
-        <button type="button" id="fallback-register-btn" style="flex:1; padding:10px; border:none; border-radius:8px; background:#059669; color:#fff; cursor:pointer;">Register</button>
-      </div>
-      <div id="fallback-error" style="margin-top:10px; color:#fca5a5; font-size:.9rem;"></div>
-    </form>
-  </div>
-  <div id="root" style="display:none;"></div>
+<body>
+  <div id="root"></div>
 
-  <script>
-    async function fallbackAuth(mode) {
-      const username = document.getElementById('fallback-username').value.trim();
-      const password = document.getElementById('fallback-password').value;
-      const errorEl = document.getElementById('fallback-error');
-      errorEl.textContent = '';
-      if (!username || !password) {
-        errorEl.textContent = 'Username and password are required.';
-        return;
-      }
-      try {
-        if (mode === 'register') {
-          const reg = await fetch('/api/auth/register', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password }),
-          });
-          if (!reg.ok) {
-            const txt = await reg.text();
-            throw new Error(txt || 'Registration failed');
-          }
-        }
-        const res = await fetch('/api/auth/login', {
+  <script type="module">
+    import React, { useMemo, useState } from 'https://esm.sh/react@18.3.1';
+    import { createRoot } from 'https://esm.sh/react-dom@18.3.1/client';
+
+    function App() {
+      const [username, setUsername] = useState(localStorage.getItem('ampai_username') || '');
+      const [password, setPassword] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState('');
+      const [ok, setOk] = useState('');
+
+      const token = localStorage.getItem('ampai_token') || '';
+      const role = localStorage.getItem('ampai_role') || 'user';
+      const loggedIn = !!token;
+
+      const statusText = useMemo(() => {
+        if (!loggedIn) return 'Not logged in';
+        return `Logged in as ${username || 'user'} (${role})`;
+      }, [loggedIn, username, role]);
+
+      async function callAuth(path, body) {
+        const res = await fetch(path, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
+          body: JSON.stringify(body),
         });
-        const txt = await res.text();
+        const raw = await res.text();
         let data = {};
-        try { data = JSON.parse(txt); } catch { data = { detail: txt }; }
-        if (!res.ok) throw new Error(data.detail || 'Login failed');
-        localStorage.setItem('ampai_token', data.token || '');
-        localStorage.setItem('ampai_role', data.role || 'user');
-        localStorage.setItem('ampai_username', data.username || username);
-        window.location.href = '/index.html#/chat';
-      } catch (e) {
-        errorEl.textContent = e.message || 'Authentication failed';
+        try { data = JSON.parse(raw); } catch { data = { detail: raw }; }
+        if (!res.ok) {
+          throw new Error(data.detail || `Request failed (${res.status})`);
+        }
+        return data;
       }
-    }
-    document.getElementById('fallback-login-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      await fallbackAuth('login');
-    });
-    document.getElementById('fallback-register-btn').addEventListener('click', async () => fallbackAuth('register'));
-  </script>
 
-  <script type="text/babel" data-presets="react">
-    try {
-    if (!window.React || !window.ReactDOM || !window.ReactRouterDOM) {
-      const root = document.getElementById('root');
-      if (root) {
-        root.innerHTML = '<div style="padding:24px;color:#fca5a5;font-family:sans-serif;">Failed to load React dependencies from CDN. Please check internet/CDN access and refresh.</div>';
-      }
-      console.error('Missing React CDN dependencies');
-    }
-
-    const rr = window.ReactRouterDOM || {};
-    const { HashRouter, Routes, Route, Link, Navigate, useNavigate, useLocation } = rr;
-    if (!HashRouter || !Routes || !Route || !Link || !Navigate || !useNavigate || !useLocation) {
-      const err = 'React Router failed to initialize from CDN (missing exports).';
-      console.error(err, rr);
-      const fallback = document.getElementById('fallback-app');
-      const root = document.getElementById('root');
-      if (fallback) fallback.style.display = 'flex';
-      if (root) {
-        root.style.display = 'none';
-        root.innerHTML = '<div style="padding:24px;color:#fca5a5;font-family:sans-serif;">' + err + ' Use the fallback login form below or refresh after CDN is reachable.</div>';
-      }
-      throw new Error(err);
-    }
-
-    const fallback = document.getElementById('fallback-app');
-    const root = document.getElementById('root');
-    if (fallback) fallback.style.display = 'none';
-    if (root) root.style.display = 'block';
-
-    const AuthContext = React.createContext(null);
-
-    function useAuth() {
-      const ctx = React.useContext(AuthContext);
-      if (!ctx) throw new Error('useAuth must be used inside provider');
-      return ctx;
-    }
-
-    async function apiFetch(path, options = {}) {
-      const token = localStorage.getItem('ampai_token');
-      const headers = { ...(options.headers || {}) };
-      if (token) headers.Authorization = `Bearer ${token}`;
-      return fetch(path, { ...options, headers });
-    }
-
-    function Layout({ children }) {
-      const { user, logout } = useAuth();
-      return (
-        <div className="min-h-screen bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-900">
-          <header className="sticky top-0 z-20 border-b border-slate-800 bg-slate-900/80 backdrop-blur">
-            <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-              <div className="font-semibold tracking-wide">AmpAI React UI</div>
-              <nav className="flex flex-wrap gap-2 text-sm">
-                <Link className="rounded px-3 py-1 hover:bg-slate-800" to="/chat">Chat</Link>
-                <Link className="rounded px-3 py-1 hover:bg-slate-800" to="/settings">Settings</Link>
-                <Link className="rounded px-3 py-1 hover:bg-slate-800" to="/memory">Memory</Link>
-                <Link className="rounded px-3 py-1 hover:bg-slate-800" to="/models">Models/API</Link>
-                {user?.role === 'admin' && <Link className="rounded px-3 py-1 hover:bg-slate-800" to="/admin">Admin</Link>}
-                <button className="rounded bg-slate-800 px-3 py-1 hover:bg-slate-700" onClick={logout}>Logout</button>
-              </nav>
-            </div>
-          </header>
-          <main className="mx-auto max-w-6xl p-4">{children}</main>
-        </div>
-      );
-    }
-
-    function LoginPage() {
-      const { login, register } = useAuth();
-      const [username, setUsername] = React.useState('');
-      const [password, setPassword] = React.useState('');
-      const [error, setError] = React.useState('');
-
-      const run = async (mode) => {
-        setError('');
+      async function onLogin() {
+        setBusy(true); setError(''); setOk('');
         try {
-          if (mode === 'register') await register(username, password);
-          await login(username, password);
+          const data = await callAuth('/api/auth/login', { username: username.trim(), password });
+          localStorage.setItem('ampai_token', data.token || '');
+          localStorage.setItem('ampai_role', data.role || 'user');
+          localStorage.setItem('ampai_username', data.username || username.trim());
+          setOk('Login successful.');
+          setPassword('');
+          window.location.hash = '#/chat';
         } catch (e) {
-          setError(e.message || 'Authentication failed');
+          setError(e.message || 'Login failed');
+        } finally {
+          setBusy(false);
         }
-      };
+      }
 
-      return (
-        <div className="mx-auto mt-10 max-w-md rounded-2xl border border-indigo-400/20 bg-slate-900/70 p-6 shadow-2xl backdrop-blur">
-          <h1 className="mb-2 text-2xl font-bold">Welcome to AmpAI</h1>
-          <p className="mb-6 text-sm text-slate-400">React + Router + Tailwind foundation with route guards and shared auth state.</p>
-          <label className="mb-1 block text-sm">Username</label>
-          <input value={username} onChange={(e) => setUsername(e.target.value)} className="mb-3 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2" />
-          <label className="mb-1 block text-sm">Password</label>
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="mb-4 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2" />
-          <div className="flex gap-2">
-            <button onClick={() => run('login')} className="flex-1 rounded bg-indigo-600 px-3 py-2 font-medium hover:bg-indigo-500">Login</button>
-            <button onClick={() => run('register')} className="flex-1 rounded bg-emerald-600 px-3 py-2 font-medium hover:bg-emerald-500">Register</button>
-          </div>
-          {error && <p className="mt-3 text-sm text-rose-400">{error}</p>}
-        </div>
-      );
-    }
+      async function onRegister() {
+        setBusy(true); setError(''); setOk('');
+        try {
+          await callAuth('/api/auth/register', { username: username.trim(), password });
+          setOk('Registration successful. You can log in now.');
+        } catch (e) {
+          setError(e.message || 'Registration failed');
+        } finally {
+          setBusy(false);
+        }
+      }
 
-    function Page({ title, description, children }) {
-      return (
-        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-xl">
-          <h2 className="text-xl font-semibold">{title}</h2>
-          <p className="mt-1 text-sm text-slate-400">{description}</p>
-          <div className="mt-4">{children}</div>
-        </div>
-      );
-    }
-
-    const ChatPage = () => <Page title="Chat" description="Future React chat workspace"><a className="rounded bg-indigo-600 px-3 py-2" href="/chat.html">Open current chat.html</a></Page>;
-    const SettingsPage = () => <Page title="Settings" description="User preferences" />;
-    const MemoryPage = () => <Page title="Memory" description="Search and browse memories"><a className="rounded bg-indigo-600 px-3 py-2" href="/memory-explorer.html">Open current memory page</a></Page>;
-    const ModelsPage = () => <Page title="AI Model/API Connection" description="Provider keys and defaults" />;
-    const AdminPage = () => <Page title="Admin" description="Admin-only tools"><a className="rounded bg-indigo-600 px-3 py-2" href="/admin.html">Open current admin page</a></Page>;
-
-    function ProtectedRoute({ children, roles }) {
-      const { user, ready } = useAuth();
-      const location = useLocation();
-      if (!ready) return <div className="p-6 text-slate-400">Loading...</div>;
-      if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
-      if (roles && !roles.includes(user.role)) return <Navigate to="/chat" replace />;
-      return children;
-    }
-
-    function AuthProvider({ children }) {
-      const [user, setUser] = React.useState(null);
-      const [ready, setReady] = React.useState(false);
-      const navigate = useNavigate();
-
-      React.useEffect(() => {
-        (async () => {
-          try {
-            const res = await apiFetch('/api/auth/whoami');
-            if (res.ok) setUser(await res.json());
-          } finally {
-            setReady(true);
-          }
-        })();
-      }, []);
-
-      const login = async (username, password) => {
-        const res = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
-        });
-        const raw = await res.text();
-        let data = {};
-        try { data = JSON.parse(raw); } catch { data = { detail: raw }; }
-        if (!res.ok) throw new Error(data.detail || 'Login failed');
-        localStorage.setItem('ampai_token', data.token || '');
-        localStorage.setItem('ampai_role', data.role || 'user');
-        localStorage.setItem('ampai_username', data.username || username);
-        setUser({ username: data.username || username, role: data.role || 'user' });
-        navigate('/chat', { replace: true });
-      };
-
-      const register = async (username, password) => {
-        const res = await fetch('/api/auth/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
-        });
-        const raw = await res.text();
-        let data = {};
-        try { data = JSON.parse(raw); } catch { data = { detail: raw }; }
-        if (!res.ok) throw new Error(data.detail || 'Registration failed');
-      };
-
-      const logout = async () => {
-        await fetch('/api/auth/logout', { method: 'POST' });
+      function onLogout() {
         localStorage.removeItem('ampai_token');
         localStorage.removeItem('ampai_role');
         localStorage.removeItem('ampai_username');
-        setUser(null);
-        navigate('/login', { replace: true });
-      };
+        setOk('Logged out.');
+        setError('');
+        window.location.hash = '#/login';
+      }
 
-      return <AuthContext.Provider value={{ user, ready, login, register, logout }}>{children}</AuthContext.Provider>;
-    }
-
-    function App() {
-      return (
-        <HashRouter>
-          <AuthProvider>
-            <Routes>
-              <Route path="/login" element={<LoginPage />} />
-              <Route path="/" element={<Navigate to="/chat" replace />} />
-              <Route path="/chat" element={<ProtectedRoute><Layout><ChatPage /></Layout></ProtectedRoute>} />
-              <Route path="/settings" element={<ProtectedRoute><Layout><SettingsPage /></Layout></ProtectedRoute>} />
-              <Route path="/memory" element={<ProtectedRoute><Layout><MemoryPage /></Layout></ProtectedRoute>} />
-              <Route path="/models" element={<ProtectedRoute><Layout><ModelsPage /></Layout></ProtectedRoute>} />
-              <Route path="/admin" element={<ProtectedRoute roles={['admin']}><Layout><AdminPage /></Layout></ProtectedRoute>} />
-              <Route path="*" element={<Navigate to="/chat" replace />} />
-            </Routes>
-          </AuthProvider>
-        </HashRouter>
+      return React.createElement(
+        'div',
+        { className: 'shell' },
+        React.createElement(
+          'div',
+          { className: 'card' },
+          React.createElement('h1', null, 'AmpAI React Login'),
+          React.createElement('p', null, statusText),
+          React.createElement('label', null, 'Username'),
+          React.createElement('input', {
+            value: username,
+            onChange: (e) => setUsername(e.target.value),
+            autoComplete: 'username',
+          }),
+          React.createElement('label', null, 'Password'),
+          React.createElement('input', {
+            type: 'password',
+            value: password,
+            onChange: (e) => setPassword(e.target.value),
+            autoComplete: loggedIn ? 'off' : 'current-password',
+          }),
+          React.createElement(
+            'div',
+            { className: 'row' },
+            React.createElement('button', {
+              className: 'btn-primary',
+              onClick: onLogin,
+              disabled: busy,
+              type: 'button',
+            }, busy ? 'Working...' : 'Login'),
+            React.createElement('button', {
+              className: 'btn-secondary',
+              onClick: onRegister,
+              disabled: busy,
+              type: 'button',
+            }, busy ? 'Working...' : 'Register')
+          ),
+          loggedIn && React.createElement(
+            'div',
+            { className: 'row' },
+            React.createElement('button', {
+              className: 'btn-ghost',
+              onClick: onLogout,
+              type: 'button',
+            }, 'Logout')
+          ),
+          error && React.createElement('div', { className: 'error' }, error),
+          ok && React.createElement('div', { className: 'ok' }, ok),
+          React.createElement('p', { style: { marginTop: '16px' } },
+            'Default admin: ',
+            React.createElement('code', null, 'admin'),
+            ' / ',
+            React.createElement('code', null, 'P@ssw0rd')
+          )
+        )
       );
     }
 
-    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
-    } catch (bootstrapError) {
-      console.error('SPA bootstrap failed; fallback login remains available.', bootstrapError);
-      const fallback = document.getElementById('fallback-app');
-      const root = document.getElementById('root');
-      if (fallback) fallback.style.display = 'flex';
-      if (root) root.style.display = 'none';
-    }
+    createRoot(document.getElementById('root')).render(React.createElement(App));
   </script>
 </body>
 </html>
