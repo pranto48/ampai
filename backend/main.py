@@ -301,7 +301,6 @@ class UserContext(BaseModel):
 def _bootstrap_default_users() -> None:
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
     admin_password = os.getenv("ADMIN_PASSWORD", "P@ssw0rd")
-    persisted_admin_hash = get_config("admin_password_hash")
 
     user_username = os.getenv("USER_USERNAME", "user")
     user_password = os.getenv("USER_PASSWORD", "user123")
@@ -311,7 +310,7 @@ def _bootstrap_default_users() -> None:
             {
                 "username": admin_username,
                 "role": "admin",
-                "password_hash": persisted_admin_hash or pwd_context.hash(admin_password),
+                "password_hash": pwd_context.hash(admin_password),
             },
             {
                 "username": user_username,
@@ -320,6 +319,8 @@ def _bootstrap_default_users() -> None:
             },
         ]
     )
+    # Enforce configured/default admin credentials on startup for predictable first login.
+    db_update_user(admin_username, role="admin", password_hash=pwd_context.hash(admin_password))
 
 
 def _load_integration_credentials(provider: str) -> Dict[str, str]:
@@ -587,7 +588,15 @@ def login(payload: UserLoginRequest):
 
 @app.post("/api/auth/register")
 def register(payload: UserRegisterRequest):
-    result = db_create_user(username=payload.username, role="user", password_hash=pwd_context.hash(payload.password))
+    username = (payload.username or "").strip()
+    if not username or not payload.password:
+        raise HTTPException(status_code=400, detail="username_password_required")
+    if len(payload.password) < 4:
+        raise HTTPException(status_code=400, detail="password_too_short")
+    if get_user(username):
+        raise HTTPException(status_code=400, detail="username_exists")
+
+    result = db_create_user(username=username, role="user", password_hash=pwd_context.hash(payload.password))
     if isinstance(result, tuple):
         ok, reason = result
     else:
