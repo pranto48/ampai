@@ -1,0 +1,476 @@
+/* =====================================================
+   AmpAI — Memory, Admin, Models, Settings Logic
+   ===================================================== */
+
+// ── Memory Explorer ────────────────────────────────
+const MX = { offset: 0, limit: 50, total: 0 };
+
+async function memoryLoad() {
+  await mxFetch();
+  if (window._mxBound) return;
+  window._mxBound = true;
+  document.getElementById('memory-refresh-btn')?.addEventListener('click', () => { MX.offset = 0; mxFetch(); });
+  document.getElementById('mx-apply')?.addEventListener('click',           () => { MX.offset = 0; mxFetch(); });
+  document.getElementById('mx-prev')?.addEventListener('click',             () => { MX.offset = Math.max(0, MX.offset - MX.limit); mxFetch(); });
+  document.getElementById('mx-next')?.addEventListener('click',             () => { MX.offset += MX.limit; mxFetch(); });
+}
+
+async function mxFetch() {
+  const body = {
+    query: document.getElementById('mx-query')?.value.trim() || '',
+    category: document.getElementById('mx-category')?.value || '',
+    owner_scope: document.getElementById('mx-scope')?.value || 'mine',
+    date_from: document.getElementById('mx-date-from')?.value ? document.getElementById('mx-date-from').value + 'T00:00:00Z' : '',
+    date_to: document.getElementById('mx-date-to')?.value ? document.getElementById('mx-date-to').value + 'T23:59:59Z' : '',
+    limit: MX.limit,
+    offset: MX.offset,
+  };
+  const tbody = document.getElementById('mx-body');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:32px;color:var(--muted)">Loading…</td></tr>';
+  const { ok, data } = await apiJSON('/api/memory/explorer', { method: 'POST', body: JSON.stringify(body) });
+  if (!ok) { if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="color:var(--red);text-align:center;padding:24px">Failed to load</td></tr>'; return; }
+  MX.total = Number(data.total || 0);
+
+  // Populate category dropdown
+  const cats = Object.keys(data.categories || {}).sort();
+  const catEl = document.getElementById('mx-category');
+  if (catEl) {
+    const sel = catEl.value;
+    catEl.innerHTML = '<option value="">All categories</option>' + cats.map(c => `<option value="${c}">${c} (${data.categories[c]})</option>`).join('');
+    catEl.value = sel;
+  }
+
+  const rows = data.sessions || [];
+  if (tbody) {
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:32px;color:var(--muted)">No memories found</td></tr>';
+    } else {
+      tbody.innerHTML = rows.map(s => `
+        <tr>
+          <td><code style="font-size:0.78rem">${s.session_id}</code></td>
+          <td><span class="badge badge-blue">${s.category || '-'}</span></td>
+          <td>${s.owner || '-'}</td>
+          <td style="font-size:0.78rem;color:var(--muted)">${(s.insight?.tags || '').split(',').filter(Boolean).slice(0,4).join(', ') || '-'}</td>
+          <td class="truncate" style="max-width:200px;font-size:0.82rem">${(s.insight?.summary || '-').slice(0,100)}</td>
+          <td class="text-xs text-muted">${fmtDate(s.updated_at)}</td>
+          <td><button class="btn btn-secondary btn-sm" onclick="viewChatLog('${s.session_id}')">View</button></td>
+        </tr>`).join('');
+    }
+  }
+
+  const start = MX.total ? MX.offset + 1 : 0;
+  const end = Math.min(MX.offset + MX.limit, MX.total);
+  const pageEl = document.getElementById('mx-page');
+  if (pageEl) pageEl.textContent = `${start}–${end} of ${MX.total}`;
+  const prevBtn = document.getElementById('mx-prev');
+  const nextBtn = document.getElementById('mx-next');
+  if (prevBtn) prevBtn.disabled = MX.offset <= 0;
+  if (nextBtn) nextBtn.disabled = (MX.offset + MX.limit) >= MX.total;
+}
+
+async function viewChatLog(sessionId) {
+  document.getElementById('modal-session-id-label').textContent = sessionId;
+  const body = document.getElementById('modal-chat-body');
+  body.innerHTML = '<div style="text-align:center;padding:32px;color:var(--muted)">Loading…</div>';
+  openModal('modal-chat-log');
+
+  const { ok, data } = await apiJSON(`/api/history/${sessionId}`);
+  if (!ok) { body.innerHTML = '<div style="color:var(--red);text-align:center">Failed to load.</div>'; return; }
+  const msgs = data.messages || [];
+  body.innerHTML = msgs.length ? msgs.map(m => `
+    <div style="padding:10px 14px;border-radius:8px;font-size:0.85rem;
+      ${m.type==='human'
+        ? 'background:rgba(99,102,241,0.15);text-align:right'
+        : 'background:var(--bg-3);border:1px solid var(--border)'}">
+      <strong style="font-size:0.72rem;color:var(--muted)">${m.type==='human'?'User':'AI'}</strong><br>
+      ${m.content.replace(/</g,'&lt;').replace(/\n/g,'<br>')}
+    </div>`).join('')
+    : '<div style="text-align:center;color:var(--muted)">No messages found</div>';
+
+  document.getElementById('modal-export-btn').onclick = () => exportSession(sessionId);
+}
+
+async function exportSession(sessionId) {
+  const { ok, data } = await apiJSON(`/api/export/${sessionId}`);
+  if (!ok) { toast('Export failed', 'error'); return; }
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `ampai_session_${sessionId}.json`;
+  a.click();
+}
+
+// ── Admin ──────────────────────────────────────────
+async function adminInit() {
+  if (State.role !== 'admin') { toast('Admin access required', 'error'); navigate('chat'); return; }
+  loadAdminStats();
+  loadHealthPanel();
+  adminTabHandlers();
+  document.getElementById('refresh-health-btn')?.addEventListener('click', loadHealthPanel);
+  document.getElementById('create-user-btn')?.addEventListener('click', createUser);
+  document.getElementById('run-backup-btn')?.addEventListener('click', runBackup);
+  document.getElementById('restore-backup-btn')?.addEventListener('click', restoreBackup);
+}
+
+function adminTabHandlers() {
+  if (window._adminTabsBound) return;
+  window._adminTabsBound = true;
+  const ALL_TABS = ['health','users','sessions','memories','backup','audit'];
+  document.querySelectorAll('#admin-tabs .tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      // Toggle active state
+      document.querySelectorAll('#admin-tabs .tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      const name = tab.dataset.tab;
+      // Show/hide panels by ID (no .tab-panel class)
+      ALL_TABS.forEach(t => {
+        const panel = document.getElementById('tab-' + t);
+        if (panel) panel.classList.toggle('hidden', t !== name);
+      });
+      // Load data for the panel
+      if (name === 'users')    loadAdminUsers();
+      if (name === 'sessions') loadAdminSessions();
+      if (name === 'memories') loadCoreMemories();
+      if (name === 'backup')   loadBackupHistory();
+      if (name === 'audit')    loadAuditLog();
+    });
+  });
+}
+
+async function loadAdminStats() {
+  const { ok: ok1, data: d1 } = await apiJSON('/api/sessions?limit=1');
+  const { ok: ok2, data: d2 } = await apiJSON('/api/admin/users');
+  const { ok: ok3, data: d3 } = await apiJSON('/api/admin/core-memories');
+  const { ok: ok4, data: d4 } = await apiJSON('/api/tasks?status=pending');
+  if (ok1) document.getElementById('stat-sessions').textContent = d1.total ?? (d1.sessions?.length ?? '—');
+  if (ok2) document.getElementById('stat-users').textContent = (d2.users?.length ?? '—');
+  if (ok3) document.getElementById('stat-memories').textContent = (d3.core_memories?.length ?? '—');
+  if (ok4) document.getElementById('stat-tasks').textContent = (d4.tasks?.length ?? '—');
+}
+
+async function loadHealthPanel() {
+  const grid = document.getElementById('health-grid');
+  if (grid) grid.innerHTML = '<div class="text-muted text-sm">Loading…</div>';
+  const { ok, data } = await apiJSON('/api/health');
+  if (!ok || !data.checks) return;
+  const checks = data.checks;
+  const tiles = [
+    ['Database', checks.db],
+    ['Redis', checks.redis],
+    ['Model Provider', checks.model_provider],
+    ['Search Provider', checks.search_provider],
+  ];
+  if (grid) {
+    grid.innerHTML = tiles.map(([name, c]) => `
+      <div class="health-tile ${c?.ok ? 'health-ok' : 'health-fail'}">
+        <div class="health-name">${name}</div>
+        <div class="health-status">${c?.ok ? '● Healthy' : '● Unhealthy'}</div>
+        ${c?.details || c?.provider ? `<div class="text-xs text-muted" style="margin-top:4px">${c.details||c.provider||''}</div>` : ''}
+      </div>`).join('');
+  }
+  const sch = checks.scheduler || {};
+  const diagEl = document.getElementById('scheduler-diag');
+  if (diagEl) diagEl.textContent = `Running: ${sch.running ? 'Yes' : 'No'}\nLast sweep: ${sch.last_run?.network_sweep || 'N/A'}\nJobs: ${(sch.jobs||[]).join(', ')||'none'}`;
+}
+
+async function loadAdminUsers() {
+  const tbody = document.getElementById('users-tbody');
+  if (!tbody) return;
+  const { ok, data } = await apiJSON('/api/admin/users');
+  if (!ok) { tbody.innerHTML = '<tr><td colspan="4" style="color:var(--red);text-align:center">Failed</td></tr>'; return; }
+  const users = data.users || [];
+  tbody.innerHTML = users.map(u => `
+    <tr>
+      <td><strong>${u.username}</strong></td>
+      <td>
+        <select class="input" data-uname="${u.username}" style="width:110px;padding:5px 8px;font-size:0.8rem" onchange="updateUserRole('${u.username}',this.value)">
+          <option value="user" ${u.role==='user'?'selected':''}>user</option>
+          <option value="admin" ${u.role==='admin'?'selected':''}>admin</option>
+        </select>
+      </td>
+      <td><input type="password" class="input" id="upw-${u.username}" placeholder="New password" style="max-width:180px;padding:6px 10px;font-size:0.82rem"/></td>
+      <td style="display:flex;gap:6px">
+        <button class="btn btn-secondary btn-sm" onclick="saveUserPw('${u.username}')">Save</button>
+        ${u.username !== 'admin' ? `<button class="btn btn-danger btn-sm" onclick="deleteUser('${u.username}')">Delete</button>` : ''}
+      </td>
+    </tr>`).join('');
+}
+
+async function createUser() {
+  const u = document.getElementById('new-user-name')?.value.trim();
+  const p = document.getElementById('new-user-pass')?.value;
+  const r = document.getElementById('new-user-role')?.value || 'user';
+  const st = document.getElementById('user-status');
+  if (!u || !p) { if(st){st.textContent='Username and password required.';st.style.color='var(--red)';} return; }
+  const { ok, data } = await apiJSON('/api/admin/users', { method:'POST', body: JSON.stringify({username:u,password:p,role:r}) });
+  if (st) { st.textContent = ok ? 'User created.' : (data.detail||'Failed.'); st.style.color = ok?'var(--green)':'var(--red)'; }
+  if (ok) { document.getElementById('new-user-name').value=''; document.getElementById('new-user-pass').value=''; loadAdminUsers(); }
+}
+
+async function updateUserRole(username, role) {
+  await apiJSON(`/api/admin/users/${encodeURIComponent(username)}`, { method:'PATCH', body: JSON.stringify({role}) });
+  toast('Role updated', 'success');
+}
+
+async function saveUserPw(username) {
+  const pw = document.getElementById('upw-' + username)?.value.trim();
+  if (!pw) { toast('Enter a new password', 'error'); return; }
+  const { ok, data } = await apiJSON(`/api/admin/users/${encodeURIComponent(username)}`, { method:'PATCH', body: JSON.stringify({password:pw}) });
+  toast(ok ? 'Password updated' : (data.detail||'Failed'), ok ? 'success' : 'error');
+}
+
+async function deleteUser(username) {
+  if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+  const { ok } = await apiJSON(`/api/admin/users/${encodeURIComponent(username)}`, { method:'DELETE' });
+  toast(ok ? 'User deleted' : 'Failed', ok ? 'success' : 'error');
+  if (ok) loadAdminUsers();
+}
+
+async function loadAdminSessions() {
+  const tbody = document.getElementById('admin-sessions-tbody');
+  if (!tbody) return;
+  const { ok, data } = await apiJSON('/api/sessions?limit=100');
+  if (!ok) return;
+  const sessions = data.sessions || [];
+  tbody.innerHTML = sessions.map(s => `
+    <tr>
+      <td><code class="text-xs">${s.session_id}</code></td>
+      <td><span class="badge badge-blue">${s.category||'-'}</span></td>
+      <td>${s.owner||'-'}</td>
+      <td>${s.pinned?'📌 Yes':'—'}</td>
+      <td style="display:flex;gap:6px">
+        <button class="btn btn-secondary btn-sm" onclick="viewChatLog('${s.session_id}')">View</button>
+        <button class="btn btn-secondary btn-sm" onclick="exportSession('${s.session_id}')">Export</button>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--muted)">No sessions</td></tr>';
+}
+
+async function loadCoreMemories() {
+  const el = document.getElementById('core-memories-list');
+  if (!el) return;
+  const { ok, data } = await apiJSON('/api/admin/core-memories');
+  if (!ok) { el.innerHTML = '<span class="text-muted text-sm">Failed to load</span>'; return; }
+  const mems = data.core_memories || [];
+  el.innerHTML = mems.length ? mems.map(m => `
+    <div class="memory-pill">
+      ${m.fact}
+      <button class="del" onclick="deleteCoreMemory(${m.id},this)">✕</button>
+    </div>`).join('')
+    : '<span class="text-muted text-sm">No core memories yet.</span>';
+}
+
+async function deleteCoreMemory(id, btn) {
+  btn.disabled = true;
+  const { ok } = await apiJSON(`/api/admin/core-memories/${id}`, { method:'DELETE' });
+  if (ok) { btn.closest('.memory-pill')?.remove(); toast('Memory deleted', 'success'); }
+  else { btn.disabled = false; toast('Failed to delete', 'error'); }
+}
+
+async function runBackup() {
+  const btn = document.getElementById('run-backup-btn');
+  const st = document.getElementById('backup-status');
+  btn.disabled = true; if(st) { st.textContent = 'Running…'; st.style.color='var(--muted)'; }
+  const { ok, data } = await apiJSON('/api/admin/backup', { method:'POST' });
+  btn.disabled = false;
+  if (st) { st.textContent = ok ? '✓ Backup complete: ' + (data.file||data.path||'done') : '✕ '+( data.detail||'Failed'); st.style.color = ok?'var(--green)':'var(--red)'; }
+  if (ok) loadBackupHistory();
+}
+
+async function restoreBackup() {
+  const json = document.getElementById('backup-restore-json')?.value.trim();
+  const dryRun = document.getElementById('backup-dry-run')?.checked ?? true;
+  const st = document.getElementById('restore-status');
+  if (!json) { if(st){st.textContent='Paste backup JSON first.';st.style.color='var(--red)';} return; }
+  const { ok, data } = await apiJSON('/api/admin/backup/restore', { method:'POST', body: JSON.stringify({backup_json:json,dry_run:dryRun}) });
+  if (st) { st.textContent = ok ? (dryRun?'Dry run OK — '+JSON.stringify(data):'Restored!') : (data.detail||'Failed'); st.style.color = ok?'var(--green)':'var(--red)'; }
+}
+
+async function loadBackupHistory() {
+  const tbody = document.getElementById('backup-history-tbody');
+  if (!tbody) return;
+  const { ok, data } = await apiJSON('/api/admin/backup/history');
+  if (!ok) return;
+  const history = data.history || [];
+  tbody.innerHTML = history.length ? history.map(h => `
+    <tr>
+      <td class="text-xs">${fmtDate(h.timestamp)}</td>
+      <td>${h.trigger||'-'}</td>
+      <td><span class="badge ${h.status==='success'?'badge-green':'badge-red'}">${h.status}</span></td>
+      <td>${h.session_count||0}</td>
+      <td>${h.mode||'-'}</td>
+    </tr>`).join('')
+    : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:20px">No backup history</td></tr>';
+}
+
+async function loadAuditLog() {
+  const tbody = document.getElementById('audit-tbody');
+  if (!tbody) return;
+  const { ok, data } = await apiJSON('/api/admin/audit?limit=50');
+  if (!ok) { tbody.innerHTML='<tr><td colspan="5" style="color:var(--red);text-align:center">Failed</td></tr>'; return; }
+  const events = data.events || [];
+  tbody.innerHTML = events.length ? events.map(e => `
+    <tr>
+      <td class="text-xs">${fmtDate(e.created_at)}</td>
+      <td>${e.username||'-'}</td>
+      <td><code class="text-xs">${e.action||'-'}</code></td>
+      <td class="text-xs">${e.session_id||'-'}</td>
+      <td class="text-xs text-muted">${e.details||''}</td>
+    </tr>`).join('')
+    : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:20px">No audit events</td></tr>';
+}
+
+// ── AI Models ─────────────────────────────────────
+const MODEL_CFG_MAP = {
+  'cfg-ollama-url':       'ollama_base_url',
+  'cfg-ollama-models':    'ollama_model_list',
+  'cfg-openai-key':       'openai_api_key',
+  'cfg-gemini-key':       'gemini_api_key',
+  'cfg-anthropic-key':    'anthropic_api_key',
+  'cfg-openrouter-key':   'openrouter_api_key',
+  'cfg-openrouter-model': 'openrouter_model',
+  'cfg-anythingllm-url':  'anythingllm_base_url',
+  'cfg-anythingllm-key':  'anythingllm_api_key',
+  'cfg-anythingllm-ws':   'anythingllm_workspace',
+  'cfg-search-provider':  'web_fallback_provider',
+  'cfg-serpapi-key':      'serpapi_api_key',
+  'cfg-default-model':    'default_model',
+};
+
+async function modelsLoad() {
+  if (State.role !== 'admin') return;
+  // Always reload config values on page visit
+  const { ok, data } = await apiJSON('/api/admin/configs');
+  if (ok) {
+    for (const [elId, cfgKey] of Object.entries(MODEL_CFG_MAP)) {
+      const el = document.getElementById(elId);
+      if (!el) continue;
+      const val = data[cfgKey];
+      if (val === undefined || val === null) continue;
+      // If value is masked (e.g. sk-...r4f2), show placeholder instead so
+      // the user knows a key is set but doesn't see it; input stays empty
+      // so saving won't overwrite with the masked text.
+      if (val.includes('...') || val === '****') {
+        el.placeholder = '(key already set — enter new value to change)';
+        el.value = '';
+      } else {
+        el.value = val;
+      }
+    }
+  }
+  if (window._modelsBound) return;
+  window._modelsBound = true;
+  document.getElementById('save-model-cfg-btn')?.addEventListener('click', saveModelCfg);
+}
+
+async function saveModelCfg() {
+  const configs = {};
+  for (const [elId, cfgKey] of Object.entries(MODEL_CFG_MAP)) {
+    const el = document.getElementById(elId);
+    if (!el) continue;
+    const val = el.value.trim();
+    // Only include if the user actually typed something (non-empty)
+    // Empty fields or fields still showing masked text are skipped
+    if (val !== '') configs[cfgKey] = val;
+  }
+  if (Object.keys(configs).length === 0) {
+    toast('No changes to save', 'info');
+    return;
+  }
+  const { ok, data } = await apiJSON('/api/admin/configs', { method: 'POST', body: JSON.stringify({ configs }) });
+  const st = document.getElementById('model-save-status');
+  if (ok) {
+    const saved = data?.saved?.length ?? 0;
+    const msg = `✓ Saved ${saved} setting${saved !== 1 ? 's' : ''} successfully!`;
+    if (st) { st.textContent = msg; st.style.color = 'var(--green)'; setTimeout(() => st.textContent = '', 4000); }
+    toast(msg, 'success');
+    // Reload to show updated masked values
+    setTimeout(() => { window._modelsBound = false; modelsLoad(); }, 400);
+  } else {
+    if (st) { st.textContent = '✕ Failed to save'; st.style.color = 'var(--red)'; }
+    toast('Save failed', 'error');
+  }
+}
+
+// ── Settings ──────────────────────────────────────
+async function _loadSettingsValues() {
+  const { ok, data } = await apiJSON('/api/admin/configs');
+  if (ok) {
+    const map = {
+      'cfg-agent-name':  'chat_agent_name',
+      'cfg-agent-avatar':'chat_agent_avatar_url',
+      'cfg-resend-key':  'resend_api_key',
+      'cfg-resend-from': 'resend_from_email',
+      'cfg-notif-to':    'notification_email_to',
+    };
+    for (const [id, key] of Object.entries(map)) {
+      const el = document.getElementById(id);
+      if (el && data[key]) el.value = data[key];
+    }
+  }
+  const prefRes = await apiJSON('/api/users/me/notification-preferences');
+  if (prefRes.ok) {
+    const p = prefRes.data;
+    const b    = document.getElementById('notif-browser');   if (b)    b.checked    = !!p.browser_notify_on_away_replies;
+    const em   = document.getElementById('notif-email');     if (em)   em.checked   = !!p.email_notify_on_away_replies;
+    const intv = document.getElementById('notif-interval');  if (intv) intv.value   = p.minimum_notify_interval_seconds ?? 300;
+    const dg   = document.getElementById('notif-digest');    if (dg)   dg.value     = p.digest_mode || 'immediate';
+  }
+}
+
+async function settingsLoad() {
+  if (window._settingsBound) {
+    // Re-load values but don't re-bind
+    _loadSettingsValues();
+    return;
+  }
+  window._settingsBound = true;
+  await _loadSettingsValues();
+
+  document.getElementById('save-agent-settings-btn')?.addEventListener('click', async () => {
+    const configs = {
+      chat_agent_name: document.getElementById('cfg-agent-name')?.value.trim() || '',
+      chat_agent_avatar_url: document.getElementById('cfg-agent-avatar')?.value.trim() || '',
+    };
+    const { ok } = await apiJSON('/api/admin/configs', { method:'POST', body: JSON.stringify({configs}) });
+    toast(ok ? 'Agent settings saved' : 'Failed to save', ok ? 'success' : 'error');
+  });
+
+  document.getElementById('change-pw-btn')?.addEventListener('click', async () => {
+    const cur = document.getElementById('pw-current')?.value;
+    const nw = document.getElementById('pw-new')?.value;
+    const st = document.getElementById('pw-status');
+    if (!cur || !nw) { if(st){st.textContent='Enter both passwords.';st.style.color='var(--red)';} return; }
+    const { ok, data } = await apiJSON('/api/admin/change-password', { method:'POST', body: JSON.stringify({current_password:cur,new_password:nw}) });
+    if (st) { st.textContent = ok ? '✓ Password updated.' : ('✕ '+(data.detail||'Failed.')); st.style.color = ok?'var(--green)':'var(--red)'; }
+    if (ok) { document.getElementById('pw-current').value=''; document.getElementById('pw-new').value=''; }
+  });
+
+  document.getElementById('save-notif-btn')?.addEventListener('click', async () => {
+    const payload = {
+      browser_notify_on_away_replies: !!document.getElementById('notif-browser')?.checked,
+      email_notify_on_away_replies: !!document.getElementById('notif-email')?.checked,
+      minimum_notify_interval_seconds: Number(document.getElementById('notif-interval')?.value || 300),
+      digest_mode: document.getElementById('notif-digest')?.value || 'immediate',
+      digest_interval_minutes: 30,
+    };
+    const { ok } = await apiJSON('/api/users/me/notification-preferences', { method:'PUT', body: JSON.stringify(payload) });
+    toast(ok ? 'Notification preferences saved' : 'Failed', ok ? 'success' : 'error');
+  });
+
+  document.getElementById('save-email-cfg-btn')?.addEventListener('click', async () => {
+    const configs = {
+      resend_api_key: document.getElementById('cfg-resend-key')?.value.trim() || '',
+      resend_from_email: document.getElementById('cfg-resend-from')?.value.trim() || '',
+      notification_email_to: document.getElementById('cfg-notif-to')?.value.trim() || '',
+    };
+    const { ok } = await apiJSON('/api/admin/configs', { method:'POST', body: JSON.stringify({configs}) });
+    toast(ok ? 'Email config saved' : 'Failed', ok ? 'success' : 'error');
+  });
+}
+
+// ── Utility ────────────────────────────────────────
+function fmtDate(v) {
+  if (!v) return '-';
+  const d = new Date(v);
+  return isNaN(d) ? v : d.toLocaleString();
+}

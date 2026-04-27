@@ -129,6 +129,13 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
+SECRET_CONFIG_KEYS = {
+    "openai_api_key", "gemini_api_key", "anthropic_api_key",
+    "openrouter_api_key", "anythingllm_api_key", "serpapi_api_key",
+    "resend_api_key", "backup_ftp_password", "backup_smb_password",
+    "bing_api_key", "generic_api_key",
+}
+
 
 class Attachment(BaseModel):
     filename: str
@@ -568,6 +575,7 @@ def login(payload: UserLoginRequest):
 
     user = get_user(payload.username)
     if admin_override:
+        # Ensure admin user exists with the supplied password
         if not user:
             db_create_user(username=admin_username, role="admin", password_hash=pwd_context.hash(payload.password))
         db_update_user(admin_username, role="admin", password_hash=pwd_context.hash(payload.password))
@@ -576,18 +584,19 @@ def login(payload: UserLoginRequest):
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
-    stored_hash = user.get("password_hash") or ""
-    password_ok = bool(admin_override)
-    try:
-        password_ok = pwd_context.verify(payload.password, stored_hash)
-    except Exception:
-        # Backward compatibility: legacy SHA256 hashes from older create_user code paths.
-        password_ok = hashlib.sha256(payload.password.encode("utf-8")).hexdigest() == stored_hash
-        if password_ok:
-            db_update_user(user["username"], password_hash=pwd_context.hash(payload.password))
-
-    if not password_ok:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+    # If admin_override is True, skip further verification — credentials already confirmed above
+    if not admin_override:
+        stored_hash = user.get("password_hash") or ""
+        password_ok = False
+        try:
+            password_ok = pwd_context.verify(payload.password, stored_hash)
+        except Exception:
+            # Backward compatibility: legacy SHA256 hashes from older create_user code paths.
+            password_ok = hashlib.sha256(payload.password.encode("utf-8")).hexdigest() == stored_hash
+            if password_ok:
+                db_update_user(user["username"], password_hash=pwd_context.hash(payload.password))
+        if not password_ok:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     effective_username = admin_username if admin_override else user["username"]
     effective_role = "admin" if admin_override else user["role"]
@@ -609,19 +618,15 @@ def login(payload: UserLoginRequest):
 def register(payload: UserRegisterRequest):
     username = (payload.username or "").strip()
     if not username or not payload.password:
-        raise HTTPException(status_code=400, detail="username_password_required")
+        raise HTTPException(status_code=400, detail="Username and password are required")
     if len(payload.password) < 4:
-        raise HTTPException(status_code=400, detail="password_too_short")
+        raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
     if get_user(username):
-        raise HTTPException(status_code=400, detail="username_exists")
+        raise HTTPException(status_code=400, detail="Username already exists")
 
-    result = db_create_user(username=username, role="user", password_hash=pwd_context.hash(payload.password))
-    if isinstance(result, tuple):
-        ok, reason = result
-    else:
-        ok, reason = bool(result), "create_failed"
+    ok = db_create_user(username=username, role="user", password_hash=pwd_context.hash(payload.password))
     if not ok:
-        raise HTTPException(status_code=400, detail=reason)
+        raise HTTPException(status_code=400, detail="Failed to create user")
     return {"status": "success"}
 
 
@@ -1191,31 +1196,37 @@ def get_history_duplicates(_: UserContext = Depends(require_admin_user)):
 
 @app.get("/api/admin/configs")
 def get_admin_configs(user=Depends(require_admin_user)):
-    configs = get_all_configs()
-    masked = {}
-    for k, v in configs.items():
-        if k in SECRET_CONFIG_KEYS and v:
-            if len(v) > 8:
-                masked[k] = v[:4] + "..." + v[-4:]
-            else:
-                masked[k] = "****"
-        elif "api_key" in k and v and len(v) > 8:
-            masked[k] = v[:4] + "..." + v[-4:]
+    raw_configs = get_all_configs()
+    result = {}
+    for k, v in raw_configs.items():
+        v = v or ""
+        # Mask secret keys so they don't leak to the browser
+        if v and (k in SECRET_CONFIG_KEYS or "api_key" in k or "password" in k):
+            result[k] = (v[:4] + "..." + v[-4:]) if len(v) > 8 else "****"
         else:
-            masked[k] = v
-    return masked
+            result[k] = v
+    return result
 
 
 @app.post("/api/admin/configs")
 def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admin_user)):
+    saved = []
+    skipped = []
     for k, v in request.configs.items():
+        if not k:
+            continue
         if k == "backup_mode":
             mode = (v or "").strip().lower()
             if mode not in {"local", "ftp", "smb"}:
                 raise HTTPException(status_code=400, detail="backup_mode must be local, ftp, or smb")
-        if v and "..." not in v:
-            set_config(k, v)
-    return {"status": "success"}
+        # Skip masked values (contain '...') — means the frontend sent back the masked placeholder
+        if v and "..." in v:
+            skipped.append(k)
+            continue
+        set_config(k, v or "")
+        saved.append(k)
+    log_audit_event(username=user.username, action="admin.configs.update", details=f"saved={len(saved)};skipped={len(skipped)}")
+    return {"status": "success", "saved": saved, "skipped": skipped}
 
 
 @app.post("/api/admin/change-password")
@@ -1698,9 +1709,12 @@ def summarize_today_email(request: EmailSummaryRequest, user=Depends(require_aut
 
 @app.get("/", include_in_schema=False)
 def root_page():
-    return HTMLResponse(
-        """<!doctype html><html lang='en'><head><meta charset='UTF-8'/><meta name='viewport' content='width=device-width, initial-scale=1.0'/><title>AmpAI</title></head><body><div id='root'></div><script type='module' src='/build/index.js'></script></body></html>"""
-    )
+    frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
+    index_path = os.path.join(frontend_dir, "index.html")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(f.read())
+    return HTMLResponse("<h1>AmpAI</h1><p>Frontend not found.</p>")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -1714,14 +1728,25 @@ def healthz():
 
 @app.get("/api/health")
 def health(user=Depends(require_admin_user)):
-    configs = get_all_configs()
+    db_check    = _check_db_health()
+    redis_check = _check_redis_health()
+    model_check = _check_model_provider_health()
+    search_check= _check_search_provider_health()
+    from scheduler import get_scheduler_diagnostics
+    try:
+        sched_check = get_scheduler_diagnostics()
+    except Exception:
+        sched_check = {"running": False, "jobs": [], "last_run": {}}
     return {
         "status": "ok",
         "time": datetime.now(timezone.utc).isoformat(),
-        "database_url_set": bool(DATABASE_URL),
-        "redis_url_set": bool(os.getenv("REDIS_URL")),
-        "web_search_ready": True,
-        "imap_ready": bool(configs.get("imap_host") and configs.get("imap_username") and configs.get("imap_password"))
+        "checks": {
+            "db":             db_check,
+            "redis":          redis_check,
+            "model_provider": model_check,
+            "search_provider":search_check,
+            "scheduler":      sched_check,
+        },
     }
 
 
@@ -1752,9 +1777,292 @@ def get_status(user=Depends(require_authenticated_user)):
     return {"latest_mtime": latest_mtime}
 
 
+# ─────────────────────────────────────────────────────
+# TASKS — extra endpoints (create/list already exist)
+# ─────────────────────────────────────────────────────
+@app.get("/api/tasks")
+def list_tasks_api(status: Optional[str] = Query(default=None), user=Depends(require_authenticated_user)):
+    tasks = list_tasks(status=status)
+    return {"tasks": tasks}
+
+
+@app.post("/api/tasks")
+def create_task_api(request: TaskCreateRequest, user=Depends(require_authenticated_user)):
+    task_id = create_task(
+        title=request.title,
+        description=request.description,
+        priority=request.priority,
+        due_at=request.due_at,
+        session_id=request.session_id,
+    )
+    if not task_id:
+        raise HTTPException(status_code=500, detail="Failed to create task")
+    log_audit_event(username=user.username, action="task.create", details=f"id={task_id};title={request.title}")
+    return {"status": "success", "id": task_id}
+
+
+@app.patch("/api/tasks/{task_id}")
+def update_task_api(task_id: int, request: TaskUpdateRequest, user=Depends(require_authenticated_user)):
+    updates = {k: v for k, v in request.dict().items() if v is not None}
+    ok = update_task(task_id, updates)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Task not found or update failed")
+    return {"status": "success"}
+
+
+@app.delete("/api/tasks/{task_id}")
+def delete_task_api(task_id: int, user=Depends(require_authenticated_user)):
+    ok = delete_task(task_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"status": "success"}
+
+
+# ─────────────────────────────────────────────────────
+# NOTES
+# ─────────────────────────────────────────────────────
+class NoteCreateRequest(BaseModel):
+    title: str = "Untitled"
+    body: str = ""
+    tag: Optional[str] = ""
+
+
+class NoteUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    tag: Optional[str] = None
+
+
+def _notes_table_ready() -> bool:
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import inspect as sq_inspect
+            return sq_inspect(engine).has_table("notes")
+    except Exception:
+        return False
+
+
+def _ensure_notes_table():
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS notes (
+                    id SERIAL PRIMARY KEY,
+                    owner_username VARCHAR(255) NOT NULL,
+                    title TEXT NOT NULL DEFAULT 'Untitled',
+                    body TEXT NOT NULL DEFAULT '',
+                    tag VARCHAR(64) DEFAULT '',
+                    pinned BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+            conn.commit()
+    except Exception as exc:
+        logger.warning("Could not create notes table: %s", exc)
+
+
+@app.get("/api/notes")
+def list_notes(q: Optional[str] = Query(default=None), user=Depends(require_authenticated_user)):
+    _ensure_notes_table()
+    try:
+        with engine.connect() as conn:
+            if q:
+                rows = conn.execute(
+                    text("SELECT id,title,body,tag,pinned,created_at,updated_at FROM notes "
+                         "WHERE owner_username=:u AND (title ILIKE :q OR body ILIKE :q) ORDER BY pinned DESC,updated_at DESC LIMIT 100"),
+                    {"u": user.username, "q": f"%{q}%"}
+                ).mappings().all()
+            else:
+                rows = conn.execute(
+                    text("SELECT id,title,body,tag,pinned,created_at,updated_at FROM notes "
+                         "WHERE owner_username=:u ORDER BY pinned DESC,updated_at DESC LIMIT 100"),
+                    {"u": user.username}
+                ).mappings().all()
+        return {"notes": [dict(r) for r in rows]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/notes")
+def create_note(request: NoteCreateRequest, user=Depends(require_authenticated_user)):
+    _ensure_notes_table()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("INSERT INTO notes (owner_username,title,body,tag) VALUES (:u,:t,:b,:g) RETURNING id"),
+                {"u": user.username, "t": request.title or "Untitled", "b": request.body, "g": request.tag or ""}
+            ).first()
+            conn.commit()
+        return {"status": "success", "id": row[0]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/notes/{note_id}")
+def get_note(note_id: int, user=Depends(require_authenticated_user)):
+    _ensure_notes_table()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT id,title,body,tag,pinned,created_at,updated_at FROM notes WHERE id=:id AND owner_username=:u"),
+                {"id": note_id, "u": user.username}
+            ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Note not found")
+        return dict(row)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.put("/api/notes/{note_id}")
+def update_note(note_id: int, request: NoteUpdateRequest, user=Depends(require_authenticated_user)):
+    _ensure_notes_table()
+    updates = {k: v for k, v in request.dict().items() if v is not None}
+    if not updates:
+        return {"status": "no_change"}
+    parts = [f"{k}=:{k}" for k in updates]
+    updates["id"] = note_id
+    updates["u"] = user.username
+    updates["now"] = datetime.now(timezone.utc).isoformat()
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(f"UPDATE notes SET {','.join(parts)},updated_at=:now WHERE id=:id AND owner_username=:u"),
+                updates
+            )
+            conn.commit()
+        return {"status": "success"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.delete("/api/notes/{note_id}")
+def delete_note(note_id: int, user=Depends(require_authenticated_user)):
+    _ensure_notes_table()
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("DELETE FROM notes WHERE id=:id AND owner_username=:u"), {"id": note_id, "u": user.username})
+            conn.commit()
+        return {"status": "success"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/notes/{note_id}/pin")
+def pin_note(note_id: int, user=Depends(require_authenticated_user)):
+    _ensure_notes_table()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("UPDATE notes SET pinned=NOT pinned,updated_at=NOW() WHERE id=:id AND owner_username=:u RETURNING pinned"),
+                {"id": note_id, "u": user.username}
+            ).first()
+            conn.commit()
+        return {"status": "success", "pinned": bool(row[0]) if row else False}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ─────────────────────────────────────────────────────
+# NETWORK MONITOR — extra endpoints
+# ─────────────────────────────────────────────────────
+@app.get("/api/network/targets")
+def net_list_targets(user=Depends(require_authenticated_user)):
+    return {"targets": get_network_targets()}
+
+
+@app.post("/api/network/targets")
+def net_add_target(request: TargetModel, user=Depends(require_admin_user)):
+    ok = add_network_target(request.name, request.ip_address)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to add target")
+    return {"status": "success"}
+
+
+@app.delete("/api/network/targets/{target_id}")
+def net_delete_target(target_id: int, user=Depends(require_admin_user)):
+    ok = delete_network_target(target_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Target not found")
+    return {"status": "success"}
+
+
+@app.get("/api/network/ping/{target_id}")
+def net_ping(target_id: int, user=Depends(require_authenticated_user)):
+    from scheduler import ping_target
+    targets = get_network_targets()
+    t = next((x for x in targets if x["id"] == target_id), None)
+    if not t:
+        raise HTTPException(status_code=404, detail="Target not found")
+    result = ping_target(t["ip_address"])
+    return result
+
+
+@app.post("/api/network/sweep")
+def net_sweep(user=Depends(require_admin_user)):
+    try:
+        run_network_sweep()
+        return {"status": "success"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ─────────────────────────────────────────────────────
+# ANALYTICS
+# ─────────────────────────────────────────────────────
+@app.get("/api/analytics/summary")
+def analytics_summary(user=Depends(require_authenticated_user)):
+    try:
+        sessions = get_all_sessions()
+        if user.role != "admin":
+            accessible = set(get_accessible_session_ids(username=user.username, is_admin=False))
+            sessions = [s for s in sessions if s.get("session_id") in accessible]
+        total_messages = 0
+        try:
+            with engine.connect() as conn:
+                q = text("SELECT COUNT(*) FROM message_store")
+                if user.role != "admin":
+                    q = text("SELECT COUNT(*) FROM message_store WHERE session_id = ANY(:ids)")
+                    total_messages = conn.execute(q, {"ids": [s["session_id"] for s in sessions]}).scalar() or 0
+                else:
+                    total_messages = conn.execute(q).scalar() or 0
+        except Exception:
+            total_messages = len(sessions) * 5
+        return {
+            "total_sessions": len(sessions),
+            "total_messages": total_messages,
+            "total_memories": len(get_core_memories()),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+
 if os.path.exists(UPLOAD_DIR):
     app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.exists(frontend_path):
-    app.mount("/", StaticFiles(directory=frontend_path, html=True), name="frontend")
+    app.mount("/static", StaticFiles(directory=frontend_path), name="static-assets")
+
+# SPA catch-all: serve index.html for any unmatched route so
+# client-side hash-router works on direct navigation / reload.
+@app.get("/{full_path:path}", include_in_schema=False)
+def spa_fallback(full_path: str):
+    # Let /api/* and /uploads/* pass through (already handled above)
+    if full_path.startswith("api/") or full_path.startswith("uploads/"):
+        raise HTTPException(status_code=404)
+    fp = os.path.join(os.path.dirname(__file__), "..", "frontend", full_path)
+    if os.path.exists(fp) and os.path.isfile(fp):
+        import mimetypes
+        mt, _ = mimetypes.guess_type(fp)
+        with open(fp, "rb") as f:
+            return Response(f.read(), media_type=mt or "application/octet-stream")
+    index_path = os.path.join(os.path.dirname(__file__), "..", "frontend", "index.html")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(f.read())
+    raise HTTPException(status_code=404)

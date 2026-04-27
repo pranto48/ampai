@@ -218,3 +218,17 @@ def start_scheduler():
         scheduler.add_job(run_chat_reply_digest, 'interval', minutes=5)
         scheduler.start()
         logger.info("Background scheduler started")
+
+
+def get_scheduler_diagnostics() -> dict:
+    """Return a dict compatible with the admin health dashboard."""
+    try:
+        jobs = [str(j.id) for j in scheduler.get_jobs()] if scheduler.running else []
+        return {
+            "running": scheduler.running,
+            "jobs": jobs,
+            "last_run": {},
+        }
+    except Exception as exc:
+        return {"running": False, "jobs": [], "last_run": {}, "error": str(exc)}
+
