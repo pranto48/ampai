@@ -133,6 +133,9 @@ def chat_with_agent(
     memory_mode: str = "full",
     use_web_search: bool = False,
     attachments: List[Dict] = None,
+    memory_top_k: int = 5,
+    recency_bias: float = 0.0,
+    category_filter: str = None,
 ):
     if attachments is None:
         attachments = []
@@ -202,9 +205,28 @@ def chat_with_agent(
         f"{file_context}"
     )
 
+    retrieval_meta = {
+        "enabled": memory_mode == "indexed",
+        "top_k": None,
+        "recency_bias": None,
+        "category_filter": None,
+        "retrieved_count": 0,
+    }
+
     if memory_mode == "indexed":
         indexer = MemoryIndexer(model_type)
-        relevant_memories = indexer.search_facts(message, k=5)
+        relevant_memories = indexer.search_facts(
+            message,
+            k=memory_top_k,
+            recency_bias=recency_bias,
+            category_filter=category_filter,
+        )
+        retrieval_meta.update({
+            "top_k": memory_top_k,
+            "recency_bias": recency_bias,
+            "category_filter": category_filter,
+            "retrieved_count": len(relevant_memories),
+        })
         context_str = "\n---\n".join(relevant_memories) if relevant_memories else "No previous relevant facts found."
         system_msg = (
             agent_directives +
@@ -265,4 +287,4 @@ def chat_with_agent(
     sql_history.add_user_message(message_log)
     sql_history.add_ai_message(content)
 
-    return {"response": content, "web_search": web_search}
+    return {"response": content, "web_search": web_search, "retrieval_meta": retrieval_meta}
