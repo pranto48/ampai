@@ -286,113 +286,138 @@ function _setNoteStatus(s) {
 let _analyticsBound = false;
 
 async function analyticsLoad() {
+  _initAnalyticsDefaults();
   await _fetchAnalytics();
   if (_analyticsBound) return;
   _analyticsBound = true;
-  document.getElementById('refresh-analytics-btn')?.addEventListener('click', _fetchAnalytics);
-  document.getElementById('analytics-range')?.addEventListener('change', _fetchAnalytics);
+  document.getElementById('analytics-refresh-btn')?.addEventListener('click', _fetchAnalytics);
+  document.getElementById('analytics-apply-btn')?.addEventListener('click', _fetchAnalytics);
+  document.getElementById('analytics-owner-scope')?.addEventListener('change', _fetchAnalytics);
+  document.getElementById('analytics-export-csv-btn')?.addEventListener('click', _exportAnalyticsCsv);
+}
+
+function _initAnalyticsDefaults() {
+  const fromEl = document.getElementById('analytics-date-from');
+  const toEl = document.getElementById('analytics-date-to');
+  if (fromEl && !fromEl.value) {
+    const from = new Date();
+    from.setDate(from.getDate() - 30);
+    fromEl.value = from.toISOString().slice(0, 10);
+  }
+  if (toEl && !toEl.value) {
+    toEl.value = new Date().toISOString().slice(0, 10);
+  }
+  const scopeEl = document.getElementById('analytics-owner-scope');
+  if (scopeEl && State.role !== 'admin') {
+    const allOpt = scopeEl.querySelector('option[value="all"]');
+    if (allOpt) allOpt.remove();
+  }
 }
 
 async function _fetchAnalytics() {
-  // Sessions & memories
-  const [s1, s2, s3, s4] = await Promise.all([
-    apiJSON('/api/sessions?limit=200'),
-    apiJSON('/api/admin/core-memories').catch(() => ({ ok: false, data: {} })),
-    apiJSON('/api/tasks').catch(() => ({ ok: false, data: {} })),
-    apiJSON('/api/analytics/summary').catch(() => ({ ok: false, data: {} })),
-  ]);
+  const from = document.getElementById('analytics-date-from')?.value || '';
+  const to = document.getElementById('analytics-date-to')?.value || '';
+  const scope = document.getElementById('analytics-owner-scope')?.value || 'mine';
+  const staleDays = document.getElementById('analytics-stale-days')?.value || '30';
 
-  const sessions = s1.data?.sessions || [];
-  const memories = s2.data?.core_memories || [];
-  const tasks    = s3.data?.tasks || [];
-  const summary  = s4.data || {};
+  const query = new URLSearchParams({
+    date_from: from,
+    date_to: to,
+    owner_scope: scope,
+    stale_days: staleDays,
+  });
 
-  // KPIs
-  _setKPI('kpi-messages', summary.total_messages ?? sessions.length * 8);
-  _setKPI('kpi-sessions', s1.data?.total ?? sessions.length);
-  _setKPI('kpi-memories', memories.length);
-  _setKPI('kpi-tasks',    tasks.filter(t => t.status === 'done').length);
-
-  // Category chart
-  const cats = {};
-  sessions.forEach(s => { const c = s.category || 'Uncategorized'; cats[c] = (cats[c]||0) + 1; });
-  const total = sessions.length || 1;
-  const sorted = Object.entries(cats).sort((a,b) => b[1]-a[1]).slice(0,6);
-  const catEl = document.getElementById('category-chart');
-  if (catEl) {
-    catEl.innerHTML = sorted.length
-      ? sorted.map(([cat, n]) => {
-          const pct = Math.round((n/total)*100);
-          const colors = ['#818cf8','#10b981','#f59e0b','#ef4444','#06b6d4','#c084fc'];
-          const ci = sorted.findIndex(x=>x[0]===cat);
-          return `<div>
-            <div style="display:flex;justify-content:space-between;font-size:.78rem;margin-bottom:4px">
-              <span style="color:var(--text)">${_esc(cat)}</span>
-              <span style="color:var(--muted)">${n} (${pct}%)</span>
-            </div>
-            <div style="height:6px;background:var(--bg-4);border-radius:99px;overflow:hidden">
-              <div style="height:100%;width:${pct}%;background:${colors[ci%colors.length]};border-radius:99px;transition:width .6s"></div>
-            </div>
-          </div>`;
-        }).join('')
-      : '<div style="color:var(--muted);font-size:.8rem">No sessions yet</div>';
+  const { ok, data } = await apiJSON(`/api/memory/analytics?${query.toString()}`);
+  if (!ok) {
+    toast(data.detail || 'Failed to load analytics', 'error');
+    return;
   }
 
-  // Activity bar chart (last 7 days)
-  const actEl = document.getElementById('activity-chart');
-  if (actEl) {
-    const days = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(); d.setDate(d.getDate() - i);
-      const key = d.toISOString().slice(0,10);
-      const label = d.toLocaleDateString('en',{weekday:'short'});
-      const count = sessions.filter(s => (s.updated_at||'').startsWith(key)).length;
-      days.push({ label, count });
-    }
-    const max = Math.max(...days.map(d=>d.count), 1);
-    actEl.innerHTML = `<div style="display:flex;align-items:flex-end;gap:4px;height:140px;padding:0 4px;flex:1">
-      ${days.map(d => `
-        <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
-          <div style="font-size:.65rem;color:var(--muted)">${d.count||''}</div>
-          <div style="width:100%;background:rgba(99,102,241,.7);border-radius:4px 4px 0 0;
-            height:${Math.max(4, Math.round((d.count/max)*110))}px;transition:height .4s;
-            ${d.count===0?'background:var(--bg-4)':''}"></div>
-          <div style="font-size:.67rem;color:var(--muted)">${d.label}</div>
-        </div>`).join('')}
-    </div>`;
+  _setKPIText('kpi-memory-writes', data?.kpis?.memory_writes_total ?? 0);
+  _setKPIText('kpi-retrieval-hits', data?.kpis?.retrieval_hits_total ?? 0);
+  _setKPIText('kpi-stale-count', data?.kpis?.stale_memories_count ?? 0);
+  _setKPIText('kpi-top-category', (data?.top_categories?.[0]?.category) || '—');
+
+  _renderTrendTable('analytics-writes-trend', data?.memory_writes_per_day || [], 'Writes');
+  _renderTrendTable('analytics-retrieval-trend', data?.retrieval_hits_per_day || [], 'Hits');
+
+  const topEl = document.getElementById('analytics-top-categories');
+  if (topEl) {
+    const rows = data?.top_categories || [];
+    topEl.innerHTML = rows.length ? rows.map((r) => `
+      <div style="display:flex;justify-content:space-between;border-bottom:1px solid var(--border);padding:7px 0">
+        <span>${_esc(r.category || 'Uncategorized')}</span>
+        <strong>${Number(r.count || 0)}</strong>
+      </div>`).join('') : '<div style="color:var(--muted);font-size:.85rem">No categories in range.</div>';
   }
 
-  // Recent memories
-  const memEl = document.getElementById('recent-memories-list');
-  if (memEl) {
-    memEl.innerHTML = memories.length
-      ? memories.slice(0,5).map(m => `
-          <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-            <span style="color:#818cf8;flex-shrink:0">🧠</span>
-            <span style="font-size:.82rem;color:var(--text);line-height:1.4">${_esc(m.fact)}</span>
-          </div>`).join('')
-      : '<div style="color:var(--muted);font-size:.8rem">No core memories yet.</div>';
-  }
-
-  // Model usage placeholder
-  const modEl = document.getElementById('model-usage-list');
-  if (modEl) {
-    const cfg = (await apiJSON('/api/admin/configs').catch(()=>({ok:false,data:{}}))).data;
-    const def = cfg?.default_model || 'ollama';
-    modEl.innerHTML = `<div style="display:flex;align-items:center;gap:10px;padding:6px 0">
-      <span style="font-size:1rem">🤖</span>
-      <div style="flex:1">
-        <div style="font-size:.85rem;font-weight:600">${def}</div>
-        <div style="font-size:.75rem;color:var(--muted)">Default provider</div>
-      </div>
-      <span class="badge badge-green">Active</span>
-    </div>`;
+  const staleBody = document.getElementById('analytics-stale-body');
+  if (staleBody) {
+    const rows = data?.stale_memories || [];
+    staleBody.innerHTML = rows.length ? rows.slice(0, 100).map((r) => `
+      <tr>
+        <td><code>${_esc(r.session_id || '')}</code></td>
+        <td>${_esc(r.category || '')}</td>
+        <td>${_esc(r.owner || '')}</td>
+        <td>${_fmtDateOnly(r.updated_at)}</td>
+        <td>${r.last_retrieval_at ? _fmtDateOnly(r.last_retrieval_at) : 'Never'}</td>
+      </tr>`).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--muted)">No stale memories.</td></tr>';
   }
 }
 
-function _setKPI(id, val) {
+function _setKPIText(id, val) {
   const el = document.getElementById(id);
-  if (el) { const v = el.querySelector('.stat-value'); if (v) v.textContent = val ?? '—'; }
+  if (el) el.textContent = String(val ?? '—');
+}
+
+function _renderTrendTable(containerId, rows, label) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:.85rem">No data for selected range.</div>';
+    return;
+  }
+  el.innerHTML = `<table class="tbl"><thead><tr><th>Date</th><th>${label}</th></tr></thead><tbody>${
+    rows.map(r => `<tr><td>${_esc(r.day || '')}</td><td>${Number(r.count || 0)}</td></tr>`).join('')
+  }</tbody></table>`;
+}
+
+function _fmtDateOnly(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return _esc(String(value));
+  return d.toISOString().slice(0, 10);
+}
+
+async function _exportAnalyticsCsv() {
+  const from = document.getElementById('analytics-date-from')?.value || '';
+  const to = document.getElementById('analytics-date-to')?.value || '';
+  const scope = document.getElementById('analytics-owner-scope')?.value || 'mine';
+  const staleDays = document.getElementById('analytics-stale-days')?.value || '30';
+  const query = new URLSearchParams({
+    date_from: from,
+    date_to: to,
+    owner_scope: scope,
+    stale_days: staleDays,
+    export: 'csv',
+  });
+
+  const headers = {};
+  if (State.token) headers['Authorization'] = 'Bearer ' + State.token;
+  const res = await fetch(`/api/memory/analytics?${query.toString()}`, { headers });
+  if (!res.ok) {
+    toast('CSV export failed', 'error');
+    return;
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'memory-analytics.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // ═══════════════════════════════════════════════════

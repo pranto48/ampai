@@ -5,6 +5,7 @@ import uuid
 import urllib.parse
 import urllib.request
 from langchain_community.chat_message_histories import RedisChatMessageHistory
+from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from memory_indexer import MemoryIndexer
@@ -21,6 +22,7 @@ from database import DATABASE_URL, get_config, get_core_memories, add_core_memor
 from langchain_core.chat_history import BaseChatMessageHistory
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
 logger = get_logger(__name__)
 
 
@@ -193,6 +195,9 @@ def chat_with_agent(
     memory_mode: str = "full",
     use_web_search: bool = False,
     attachments: List[Dict] = None,
+    memory_top_k: int = 5,
+    recency_bias: float = 0.0,
+    category_filter: str = None,
 ):
     if attachments is None:
         attachments = []
@@ -261,10 +266,39 @@ def chat_with_agent(
         f"{web_context}"
         f"{file_context}"
     )
+    persona_prompt = (persona_prompt_override or "").strip()
+    if not persona_prompt and persona_id:
+        persona = get_persona_for_user(persona_id=persona_id, username=username, is_admin=is_admin)
+        if persona:
+            persona_prompt = (persona.get("system_prompt") or "").strip()
+    if persona_prompt:
+        agent_directives = (
+            f"PERSONA SYSTEM PROMPT (highest priority):\n{persona_prompt}\n\n"
+            + agent_directives
+        )
+
+    retrieval_meta = {
+        "enabled": memory_mode == "indexed",
+        "top_k": None,
+        "recency_bias": None,
+        "category_filter": None,
+        "retrieved_count": 0,
+    }
 
     if memory_mode == "indexed":
         indexer = MemoryIndexer(model_type)
-        relevant_memories = indexer.search_facts(message, k=5)
+        relevant_memories = indexer.search_facts(
+            message,
+            k=memory_top_k,
+            recency_bias=recency_bias,
+            category_filter=category_filter,
+        )
+        retrieval_meta.update({
+            "top_k": memory_top_k,
+            "recency_bias": recency_bias,
+            "category_filter": category_filter,
+            "retrieved_count": len(relevant_memories),
+        })
         context_str = "\n---\n".join(relevant_memories) if relevant_memories else "No previous relevant facts found."
         system_msg = (
             agent_directives +
@@ -301,14 +335,20 @@ def chat_with_agent(
     content = response.content
 
     match = re.search(r'\[SAVE_MEMORY:\s*(.*?)\]', content, re.IGNORECASE | re.DOTALL)
+    allowed_categories_set = {str(c).strip().lower() for c in (allowed_memory_categories or []) if str(c).strip()}
     if match:
         fact_to_save = match.group(1).strip().rstrip('].')
-        add_core_memory(fact_to_save)
-        try:
-            indexer = MemoryIndexer(model_type)
-            indexer.add_fact(fact_to_save)
-        except Exception as e:
-            print(f"Failed to add fact to PGVector: {e}")
+        save_allowed = persist_memory and not require_memory_approval
+        if save_allowed and allowed_categories_set:
+            inferred_category = "preferences" if re.search(r"\b(like|prefer|favorite|always|usually)\b", fact_to_save, re.IGNORECASE) else "general"
+            save_allowed = inferred_category in allowed_categories_set
+        if save_allowed:
+            add_core_memory(fact_to_save)
+            try:
+                indexer = MemoryIndexer(model_type)
+                indexer.add_fact(fact_to_save)
+            except Exception as e:
+                print(f"Failed to add fact to PGVector: {e}")
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
 
     task_suggestions = _parse_create_task_tags(content)
@@ -322,13 +362,13 @@ def chat_with_agent(
         attachment_names = [a['filename'] for a in attachments]
         message_log = f"[Attachments: {', '.join(attachment_names)}]\n" + message
 
-    pii_redaction_enabled = str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
-    if pii_redaction_enabled:
-        message_log = redact_pii_text(message_log)
-        content = redact_pii_text(content)
+        pii_redaction_enabled = pii_strict_mode or str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        if pii_redaction_enabled:
+            message_log = redact_pii_text(message_log)
+            content = redact_pii_text(content)
 
-    sql_history.add_user_message(message_log)
-    sql_history.add_ai_message(content)
+        sql_history.add_user_message(message_log)
+        sql_history.add_ai_message(content)
 
     return {
         "response": content,

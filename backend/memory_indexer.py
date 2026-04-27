@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from langchain_postgres import PGVector
 from langchain_core.documents import Document
 from database import get_config, DATABASE_URL
@@ -42,20 +43,47 @@ class MemoryIndexer:
         try:
             doc = Document(
                 page_content=fact,
-                metadata={"type": "distilled_fact"}
+                metadata={
+                    "type": "distilled_fact",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
             )
             self.vectorstore.add_documents([doc])
         except Exception as e:
             print(f"PGVector Add Error: {e}")
 
-    def search_facts(self, query: str, k: int = 5):
+    def search_facts(self, query: str, k: int = 5, recency_bias: float = 0.0, category_filter: str = None):
         if not self.enabled: return []
         try:
+            search_filter = {"type": "distilled_fact"}
+            if category_filter:
+                search_filter["category"] = category_filter
             results = self.vectorstore.similarity_search(
                 query,
                 k=k,
-                filter={"type": "distilled_fact"}
+                filter=search_filter
             )
+            if recency_bias > 0:
+                now = datetime.now(timezone.utc)
+
+                def _sort_key(doc):
+                    created_at = doc.metadata.get("created_at") if getattr(doc, "metadata", None) else None
+                    if not created_at:
+                        return 0.0
+                    try:
+                        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        age_days = max(0.0, (now - dt).total_seconds() / 86400.0)
+                        return 1.0 / (1.0 + age_days)
+                    except Exception:
+                        return 0.0
+
+                top_n = max(1, int(k))
+                recency_sorted = sorted(results, key=_sort_key, reverse=True)
+                keep_recent = int(round(top_n * recency_bias))
+                keep_recent = max(0, min(top_n, keep_recent))
+                blended = recency_sorted[:keep_recent] + [doc for doc in results if doc not in recency_sorted[:keep_recent]]
+                results = blended[:top_n]
+
             return [doc.page_content for doc in results]
         except Exception as e:
             print(f"PGVector Search Error: {e}")

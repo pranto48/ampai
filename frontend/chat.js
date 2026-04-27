@@ -4,15 +4,25 @@
 
 let chatAttachments = [];
 let _chatHandlersBound = false;
+const PERSONA_PREF_KEY = 'ampai_persona_id';
 
 function chatInit() {
   // Only load sessions each time; bind handlers only once
   loadSessions();
+  loadPersonaOptions();
   _updateChatSessionDisplay();
   _hideSuggestedActions();
   if (!_chatHandlersBound) {
     _chatHandlersBound = true;
     _bindChatHandlers();
+  }
+}
+
+async function loadMemoryPolicyBadge() {
+  const { ok, data } = await apiJSON('/api/users/me/memory-policy');
+  if (!ok) return;
+  if (typeof window.updateMemoryPolicyBadge === 'function') {
+    window.updateMemoryPolicyBadge(data || {});
   }
 }
 
@@ -52,6 +62,9 @@ function _bindChatHandlers() {
   });
 
   sendBtn?.addEventListener('click', _sendChat);
+  document.getElementById('persona-select')?.addEventListener('change', (e) => {
+    localStorage.setItem(PERSONA_PREF_KEY, e.target.value || '');
+  });
 
   // File attach
   document.getElementById('attach-btn')?.addEventListener('click', () => {
@@ -92,6 +105,32 @@ function _bindChatHandlers() {
   document.getElementById('chat-input')?.addEventListener('blur', () => {
     if (inputBox) inputBox.style.borderColor = 'var(--border)';
   });
+
+  const applyRetrievalPreset = (preset) => {
+    const topK = document.getElementById('memory-top-k');
+    const recency = document.getElementById('recency-bias');
+    const category = document.getElementById('category-filter');
+    if (!topK || !recency || !category) return;
+    if (preset === 'recent') {
+      topK.value = '4';
+      recency.value = '0.8';
+      category.value = '';
+      return;
+    }
+    if (preset === 'deep') {
+      topK.value = '12';
+      recency.value = '0.15';
+      category.value = '';
+      return;
+    }
+    topK.value = '5';
+    recency.value = '0.35';
+    category.value = '';
+  };
+
+  document.getElementById('retrieval-preset-balanced')?.addEventListener('click', () => applyRetrievalPreset('balanced'));
+  document.getElementById('retrieval-preset-recent')?.addEventListener('click', () => applyRetrievalPreset('recent'));
+  document.getElementById('retrieval-preset-deep')?.addEventListener('click', () => applyRetrievalPreset('deep'));
 }
 
 function _setSendEnabled(enabled) {
@@ -201,16 +240,27 @@ async function _sendChat() {
 
   const typId = _showTyping();
 
+  const memoryMode = document.getElementById('memory-mode-select')?.value || 'full';
+  const payload = {
+    session_id:   State.sessionId,
+    message:      message || 'Please review the attached files.',
+    model_type:   document.getElementById('model-select')?.value || 'ollama',
+    memory_mode:  memoryMode,
+    use_web_search: !!(document.getElementById('web-search-toggle')?.checked),
+    attachments:  atts,
+  };
+  if (memoryMode === 'indexed') {
+    const topK = parseInt(document.getElementById('memory-top-k')?.value || '5', 10);
+    const recencyBias = parseFloat(document.getElementById('recency-bias')?.value || '0.35');
+    const categoryFilter = (document.getElementById('category-filter')?.value || '').trim();
+    payload.memory_top_k = Number.isFinite(topK) ? topK : 5;
+    payload.recency_bias = Number.isFinite(recencyBias) ? recencyBias : 0.35;
+    if (categoryFilter) payload.category_filter = categoryFilter;
+  }
+
   const { ok, data } = await apiJSON('/api/chat', {
     method: 'POST',
-    body: JSON.stringify({
-      session_id:   State.sessionId,
-      message:      message || 'Please review the attached files.',
-      model_type:   document.getElementById('model-select')?.value        || 'ollama',
-      memory_mode:  document.getElementById('memory-mode-select')?.value  || 'full',
-      use_web_search: !!(document.getElementById('web-search-toggle')?.checked),
-      attachments:  atts,
-    }),
+    body: JSON.stringify(payload),
   });
 
   _removeTyping(typId);

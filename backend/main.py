@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import json
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 from datetime import datetime, timedelta, timezone
 import shutil
 import uuid
@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 from auth import bootstrap_default_admin
 from agent import chat_with_agent, get_llm, get_redis_history
 from database import (
+    add_core_memory,
     add_network_target,
     create_task,
     delete_core_memory,
@@ -41,6 +42,7 @@ from database import (
     get_all_sessions,
     get_config,
     get_core_memories,
+    get_memory_candidate_by_id,
     get_network_targets,
     get_duplicate_message_counts,
     get_user,
@@ -76,6 +78,7 @@ from database import (
     list_chat_messages,
     get_sql_chat_history,
     list_tasks,
+    list_personas,
     migrate_app_config_encryption,
     set_config,
     set_session_archived,
@@ -83,15 +86,22 @@ from database import (
     set_session_pinned,
     touch_session,
     touch_session_updated_at,
+    update_memory_candidate_status,
     update_task,
     log_audit_event,
     apply_retention_policy,
     upsert_session_insight,
     get_session_insight,
     list_audit_events,
+    get_memory_analytics,
     get_effective_notification_preferences,
+    get_effective_memory_policy,
     upsert_user_notification_preferences,
+    upsert_user_memory_policy,
     enqueue_pending_reply_notification,
+    create_persona,
+    update_persona,
+    delete_persona,
     engine,
 )
 from integrations.gmail_api import (
@@ -158,6 +168,9 @@ class ChatRequest(BaseModel):
     memory_mode: str = "full"
     use_web_search: bool = False
     attachments: List[Attachment] = []
+    memory_top_k: Optional[int] = None
+    recency_bias: Optional[float] = None
+    category_filter: Optional[str] = None
 
 
 class CategoryRequest(BaseModel):
@@ -191,6 +204,11 @@ class MemoryExplorerQuery(BaseModel):
     date_to: Optional[str] = ""
     limit: int = 50
     offset: int = 0
+
+
+class MemoryInboxUpdateRequest(BaseModel):
+    status: str
+    edited_text: Optional[str] = None
 
 
 class AdminPasswordChangeRequest(BaseModel):
@@ -230,6 +248,14 @@ class NotificationPreferencesUpdateRequest(BaseModel):
     minimum_notify_interval_seconds: int = 300
     digest_mode: str = "immediate"
     digest_interval_minutes: int = 30
+
+
+class MemoryPolicyUpdateRequest(BaseModel):
+    auto_capture_enabled: bool = True
+    require_approval: bool = False
+    pii_strict_mode: bool = False
+    retention_days: int = 365
+    allowed_categories: List[str] = []
 
 
 class TaskCreateRequest(BaseModel):
@@ -716,10 +742,60 @@ def _insight_worker() -> None:
             INSIGHT_QUEUE.task_done()
 
 
+@app.get("/api/personas")
+def api_list_personas(user: UserContext = Depends(require_authenticated_user)):
+    personas = list_personas(user.username, include_global=True)
+    return {"personas": personas}
+
+
+@app.post("/api/personas")
+def api_create_persona(request: PersonaCreateRequest, user: UserContext = Depends(require_authenticated_user)):
+    owner_username = None if (request.is_global and user.role == "admin") else user.username
+    persona = create_persona(
+        username=owner_username,
+        name=request.name,
+        system_prompt=request.system_prompt,
+        tags=request.tags or "",
+        is_default=bool(request.is_default),
+    )
+    if not persona:
+        raise HTTPException(status_code=500, detail="Failed to create persona")
+    return persona
+
+
+@app.patch("/api/personas/{persona_id}")
+def api_update_persona(persona_id: int, request: PersonaUpdateRequest, user: UserContext = Depends(require_authenticated_user)):
+    updated = update_persona(
+        persona_id=persona_id,
+        actor_username=user.username,
+        is_admin=(user.role == "admin"),
+        updates=request.model_dump(exclude_none=True),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Persona not found or not editable")
+    return updated
+
+
+@app.delete("/api/personas/{persona_id}")
+def api_delete_persona(persona_id: int, user: UserContext = Depends(require_authenticated_user)):
+    deleted = delete_persona(persona_id=persona_id, actor_username=user.username, is_admin=(user.role == "admin"))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Persona not found or not deletable")
+    return {"status": "success"}
+
+
 @app.post("/api/chat")
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
         _ensure_session_owner_for_user(request.session_id, user)
+        memory_top_k = int(request.memory_top_k if request.memory_top_k is not None else 5)
+        memory_top_k = max(1, min(20, memory_top_k))
+        recency_bias = float(request.recency_bias if request.recency_bias is not None else 0.35)
+        recency_bias = max(0.0, min(1.0, recency_bias))
+        category_filter = (request.category_filter or "").strip() or None
+        if category_filter and len(category_filter) > 64:
+            category_filter = category_filter[:64]
+
         result = chat_with_agent(
             session_id=request.session_id,
             message=request.message,
@@ -729,6 +805,9 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             memory_mode=request.memory_mode,
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
+            memory_top_k=memory_top_k,
+            recency_bias=recency_bias,
+            category_filter=category_filter,
         )
         ensure_session_owner(request.session_id, user.username)
         touch_session(request.session_id)
@@ -803,6 +882,32 @@ def update_my_notification_preferences(
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to save notification preferences")
     return {"status": "success", "preferences": get_effective_notification_preferences(current_user.username)}
+
+
+@app.get("/api/users/me/memory-policy")
+def get_my_memory_policy(current_user: UserContext = Depends(require_authenticated_user)):
+    return get_effective_memory_policy(current_user.username)
+
+
+@app.put("/api/users/me/memory-policy")
+def update_my_memory_policy(
+    request: MemoryPolicyUpdateRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    if request.retention_days < 1 or request.retention_days > 3650:
+        raise HTTPException(status_code=400, detail="retention_days must be between 1 and 3650")
+    allowed = [c.strip() for c in request.allowed_categories if (c or "").strip()]
+    ok = upsert_user_memory_policy(
+        username=current_user.username,
+        auto_capture_enabled=bool(request.auto_capture_enabled),
+        require_approval=bool(request.require_approval),
+        pii_strict_mode=bool(request.pii_strict_mode),
+        retention_days=int(request.retention_days),
+        allowed_categories=allowed,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save memory policy")
+    return {"status": "success", "policy": get_effective_memory_policy(current_user.username)}
 
 
 @app.post("/api/integrations/email/summary-today")
@@ -1084,6 +1189,13 @@ def get_sessions(
 def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _classify_tier(updated_at_raw: Optional[str]) -> str:
@@ -1101,13 +1213,6 @@ def _classify_tier(updated_at_raw: Optional[str]) -> str:
     if age_days <= warm_days:
         return "warm"
     return "cold"
-    raw = value.strip()
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except Exception:
-        return None
 
 
 @app.post("/api/memory/explorer")
@@ -1184,6 +1289,79 @@ def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = De
         "has_more": (offset + limit) < total,
         "categories": category_counts,
     }
+
+
+@app.get("/api/memory/inbox")
+def memory_inbox_list(
+    status: str = Query(default="pending"),
+    session_id: str = Query(default=""),
+    date_from: str = Query(default=""),
+    date_to: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    user=Depends(require_authenticated_user),
+):
+    records = list_memory_candidates(
+        username=user.username,
+        status=(status or "").strip().lower(),
+        limit=limit,
+        offset=offset,
+    )
+    filtered = records
+    cleaned_session = (session_id or "").strip()
+    if cleaned_session:
+        filtered = [row for row in filtered if (row.get("session_id") or "") == cleaned_session]
+
+    from_dt = _parse_iso_dt(date_from)
+    to_dt = _parse_iso_dt(date_to)
+    if from_dt:
+        filtered = [row for row in filtered if row.get("created_at") and row["created_at"] >= from_dt]
+    if to_dt:
+        filtered = [row for row in filtered if row.get("created_at") and row["created_at"] <= to_dt]
+
+    return {"candidates": filtered, "status": status, "offset": offset, "limit": limit}
+
+
+@app.patch("/api/memory/inbox/{candidate_id}")
+def memory_inbox_update(candidate_id: int, request: MemoryInboxUpdateRequest, user=Depends(require_authenticated_user)):
+    existing = get_memory_candidate_by_id(candidate_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Memory candidate not found")
+    if (existing.get("username") or "") != user.username:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    status_value = (request.status or "").strip().lower()
+    if status_value == "approved":
+        approved_text = (request.edited_text or existing.get("candidate_text") or "").strip()
+        if not approved_text:
+            raise HTTPException(status_code=400, detail="Cannot approve empty candidate")
+        if not add_core_memory(approved_text):
+            raise HTTPException(status_code=500, detail="Failed writing approved memory")
+        updated = update_memory_candidate_status(candidate_id, status_value, approved_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        log_audit_event(
+            username=user.username,
+            action="memory.review.approve",
+            session_id=updated.get("session_id"),
+            details=f"id={candidate_id}",
+        )
+    elif status_value == "rejected":
+        updated = update_memory_candidate_status(candidate_id, status_value, request.edited_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        log_audit_event(
+            username=user.username,
+            action="memory.review.reject",
+            session_id=updated.get("session_id"),
+            details=f"id={candidate_id}",
+        )
+    else:
+        updated = update_memory_candidate_status(candidate_id, status_value, request.edited_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+
+    return {"candidate": updated}
 
 
 @app.get("/api/history/{session_id}")
@@ -2176,6 +2354,76 @@ def analytics_summary(user=Depends(require_authenticated_user)):
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+def _memory_analytics_to_csv(payload: Dict[str, Any]) -> str:
+    lines: List[str] = []
+    lines.append("section,key,value")
+    kpis = payload.get("kpis") or {}
+    for key in ["memory_writes_total", "retrieval_hits_total", "stale_memories_count"]:
+        lines.append(f"kpi,{key},{kpis.get(key, 0)}")
+
+    lines.append("")
+    lines.append("memory_writes_per_day,day,count")
+    for row in payload.get("memory_writes_per_day") or []:
+        lines.append(f"memory_writes_per_day,{row.get('day','')},{row.get('count',0)}")
+
+    lines.append("")
+    lines.append("retrieval_hits_per_day,day,count")
+    for row in payload.get("retrieval_hits_per_day") or []:
+        lines.append(f"retrieval_hits_per_day,{row.get('day','')},{row.get('count',0)}")
+
+    lines.append("")
+    lines.append("top_categories,category,count")
+    for row in payload.get("top_categories") or []:
+        category = str(row.get("category", "")).replace('"', '""')
+        lines.append(f'top_categories,"{category}",{row.get("count",0)}')
+
+    lines.append("")
+    lines.append("stale_memories,session_id,category,owner,updated_at,last_retrieval_at")
+    for row in payload.get("stale_memories") or []:
+        category = str(row.get("category", "")).replace('"', '""')
+        owner = str(row.get("owner", "")).replace('"', '""')
+        lines.append(
+            f'stale_memories,{row.get("session_id","")},"{category}","{owner}",{row.get("updated_at","")},{row.get("last_retrieval_at","") or ""}'
+        )
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/api/memory/analytics")
+def memory_analytics(
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    owner_scope: str = Query(default="mine"),
+    stale_days: int = Query(default=30, ge=1, le=3650),
+    top_n: int = Query(default=8, ge=1, le=20),
+    export: Optional[str] = Query(default=None),
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    normalized_scope = (owner_scope or "mine").strip().lower()
+    if normalized_scope not in {"mine", "shared", "all"}:
+        raise HTTPException(status_code=400, detail="owner_scope must be mine, shared, or all")
+    if current_user.role != "admin" and normalized_scope == "all":
+        normalized_scope = "mine"
+
+    payload = get_memory_analytics(
+        username=current_user.username,
+        is_admin=current_user.role == "admin",
+        date_from=date_from,
+        date_to=date_to,
+        owner_scope=normalized_scope,
+        stale_days=stale_days,
+        top_n=top_n,
+    )
+
+    if (export or "").strip().lower() == "csv":
+        csv_body = _memory_analytics_to_csv(payload)
+        return Response(
+            content=csv_body,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=memory-analytics.csv"},
+        )
+    return payload
 
 
 
