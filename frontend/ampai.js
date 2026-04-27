@@ -50,7 +50,7 @@ function closeModal(id) { document.getElementById(id)?.classList.remove('open');
 // Sub-pages live inside #page-shell as .subpage divs.
 const SUBPAGES = ['chat','memory','tasks','notes','analytics','network','personas','models','settings','admin'];
 const PAGE_TITLES = {
-  chat:'Chat', memory:'Memory Explorer', tasks:'Task Manager',
+  chat:'Chat', memory:'Memory Explorer', 'memory-inbox':'Memory Inbox', tasks:'Task Manager',
   notes:'Notes', analytics:'Analytics', network:'Network Monitor',
   personas:'Personas', models:'AI Models', settings:'Settings', admin:'Admin Panel'
 };
@@ -106,6 +106,7 @@ function _hideEl(id) {
 function _onPageEnter(page) {
   if (page === 'chat')      chatInit();
   if (page === 'memory')    memoryLoad();
+  if (page === 'memory-inbox') memoryInboxLoad();
   if (page === 'tasks')     tasksLoad();
   if (page === 'notes')     notesLoad();
   if (page === 'analytics') analyticsLoad();
@@ -283,6 +284,9 @@ function _shellHTML() {
         <button class="nav-item" data-page="memory">
           <span class="icon">🧠</span><span class="sidebar-label">Memory</span>
         </button>
+        <button class="nav-item" data-page="memory-inbox">
+          <span class="icon">📥</span><span class="sidebar-label">Memory Inbox</span>
+        </button>
         <button class="nav-item" data-page="tasks">
           <span class="icon">✅</span><span class="sidebar-label">Tasks</span>
         </button>
@@ -352,6 +356,7 @@ function _shellHTML() {
         ${buildChatPage()}
       </div>
       <div id="sp-memory"   class="subpage hidden page-content">${buildMemoryPage()}</div>
+      <div id="sp-memory-inbox" class="subpage hidden page-content">${buildMemoryInboxPage()}</div>
       <div id="sp-tasks"    class="subpage hidden page-content">${buildTasksPage()}</div>
       <div id="sp-notes"    class="subpage hidden" style="display:flex;flex:1;min-height:0;height:calc(100vh - 57px)">${buildNotesPage()}</div>
       <div id="sp-analytics" class="subpage hidden page-content">${buildAnalyticsPage()}</div>

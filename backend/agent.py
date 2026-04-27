@@ -4,6 +4,7 @@ import json
 import urllib.parse
 import urllib.request
 from langchain_community.chat_message_histories import RedisChatMessageHistory
+from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from memory_indexer import MemoryIndexer
@@ -27,6 +28,7 @@ from database import (
 from langchain_core.chat_history import BaseChatMessageHistory
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
 logger = get_logger(__name__)
 
 
@@ -263,28 +265,35 @@ def chat_with_agent(
     content = response.content
 
     match = re.search(r'\[SAVE_MEMORY:\s*(.*?)\]', content, re.IGNORECASE | re.DOTALL)
+    allowed_categories_set = {str(c).strip().lower() for c in (allowed_memory_categories or []) if str(c).strip()}
     if match:
         fact_to_save = match.group(1).strip().rstrip('].')
-        add_core_memory(fact_to_save)
-        try:
-            indexer = MemoryIndexer(model_type)
-            indexer.add_fact(fact_to_save)
-        except Exception as e:
-            print(f"Failed to add fact to PGVector: {e}")
+        save_allowed = persist_memory and not require_memory_approval
+        if save_allowed and allowed_categories_set:
+            inferred_category = "preferences" if re.search(r"\b(like|prefer|favorite|always|usually)\b", fact_to_save, re.IGNORECASE) else "general"
+            save_allowed = inferred_category in allowed_categories_set
+        if save_allowed:
+            add_core_memory(fact_to_save)
+            try:
+                indexer = MemoryIndexer(model_type)
+                indexer.add_fact(fact_to_save)
+            except Exception as e:
+                print(f"Failed to add fact to PGVector: {e}")
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
 
-    sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
-    message_log = message
-    if attachments:
-        attachment_names = [a['filename'] for a in attachments]
-        message_log = f"[Attachments: {', '.join(attachment_names)}]\n" + message
+    if persist_memory:
+        sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+        message_log = message
+        if attachments:
+            attachment_names = [a['filename'] for a in attachments]
+            message_log = f"[Attachments: {', '.join(attachment_names)}]\n" + message
 
-    pii_redaction_enabled = str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
-    if pii_redaction_enabled:
-        message_log = redact_pii_text(message_log)
-        content = redact_pii_text(content)
+        pii_redaction_enabled = pii_strict_mode or str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        if pii_redaction_enabled:
+            message_log = redact_pii_text(message_log)
+            content = redact_pii_text(content)
 
-    sql_history.add_user_message(message_log)
-    sql_history.add_ai_message(content)
+        sql_history.add_user_message(message_log)
+        sql_history.add_ai_message(content)
 
     return {"response": content, "web_search": web_search}

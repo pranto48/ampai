@@ -100,6 +100,102 @@ async function exportSession(sessionId) {
   a.click();
 }
 
+// ── Memory Inbox ───────────────────────────────────
+const MI = { limit: 100, offset: 0, rows: [] };
+
+async function memoryInboxLoad() {
+  await miFetch();
+  if (window._miBound) return;
+  window._miBound = true;
+  document.getElementById('mi-refresh-btn')?.addEventListener('click', () => miFetch());
+  document.getElementById('mi-apply')?.addEventListener('click', () => miFetch());
+}
+
+function _miFilters() {
+  const params = new URLSearchParams();
+  params.set('status', document.getElementById('mi-status')?.value || 'pending');
+  params.set('limit', String(MI.limit));
+  params.set('offset', String(MI.offset));
+  const session = document.getElementById('mi-session')?.value.trim();
+  if (session) params.set('session_id', session);
+  const dateFrom = document.getElementById('mi-date-from')?.value;
+  const dateTo = document.getElementById('mi-date-to')?.value;
+  if (dateFrom) params.set('date_from', `${dateFrom}T00:00:00Z`);
+  if (dateTo) params.set('date_to', `${dateTo}T23:59:59Z`);
+  return params;
+}
+
+function miRenderRows() {
+  const tbody = document.getElementById('mi-body');
+  if (!tbody) return;
+  if (!MI.rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:28px;color:var(--muted)">No memory candidates found</td></tr>';
+    return;
+  }
+  tbody.innerHTML = MI.rows.map(r => `
+    <tr id="mi-row-${r.id}">
+      <td><code>${r.id}</code></td>
+      <td style="font-size:.78rem">${r.session_id || '-'}</td>
+      <td style="max-width:360px">${(r.candidate_text || '').replace(/</g, '&lt;')}</td>
+      <td>${r.confidence || '-'}</td>
+      <td><span class="badge badge-blue">${r.status || 'pending'}</span></td>
+      <td class="text-xs text-muted">${fmtDate(r.created_at)}</td>
+      <td style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" onclick="memoryInboxApprove(${r.id})">Approve</button>
+        <button class="btn btn-danger btn-sm" onclick="memoryInboxReject(${r.id})">Reject</button>
+        <button class="btn btn-secondary btn-sm" onclick="memoryInboxEditApprove(${r.id})">Edit + Approve</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+async function miFetch() {
+  const tbody = document.getElementById('mi-body');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:32px;color:var(--muted)">Loading…</td></tr>';
+  const { ok, data } = await apiJSON(`/api/memory/inbox?${_miFilters().toString()}`);
+  if (!ok) {
+    if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:28px;color:var(--red)">Failed to load inbox</td></tr>';
+    return;
+  }
+  MI.rows = data.candidates || [];
+  miRenderRows();
+}
+
+function _miOptimisticUpdate(id, patch) {
+  MI.rows = MI.rows.map(row => row.id === id ? { ...row, ...patch } : row);
+  miRenderRows();
+}
+
+async function _miPatch(id, status, edited_text = null) {
+  _miOptimisticUpdate(id, { status, candidate_text: edited_text || MI.rows.find(r => r.id === id)?.candidate_text });
+  const { ok, data } = await apiJSON(`/api/memory/inbox/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status, edited_text }),
+  });
+  if (!ok) {
+    toast(data.detail || 'Memory review failed', 'error');
+    miFetch();
+    return;
+  }
+  toast(`Candidate ${status}`, 'success');
+  _miOptimisticUpdate(id, data.candidate || {});
+}
+
+async function memoryInboxApprove(id) {
+  await _miPatch(id, 'approved');
+}
+
+async function memoryInboxReject(id) {
+  await _miPatch(id, 'rejected');
+}
+
+async function memoryInboxEditApprove(id) {
+  const row = MI.rows.find(r => r.id === id);
+  const edited = prompt('Edit memory before approving', row?.candidate_text || '');
+  if (edited === null) return;
+  await _miPatch(id, 'approved', edited);
+}
+
 // ── Admin ──────────────────────────────────────────
 async function adminInit() {
   if (State.role !== 'admin') { toast('Admin access required', 'error'); navigate('chat'); return; }
@@ -500,6 +596,17 @@ async function _loadSettingsValues() {
     const intv = document.getElementById('notif-interval');  if (intv) intv.value   = p.minimum_notify_interval_seconds ?? 300;
     const dg   = document.getElementById('notif-digest');    if (dg)   dg.value     = p.digest_mode || 'immediate';
   }
+  const policyRes = await apiJSON('/api/users/me/memory-policy');
+  if (policyRes.ok) {
+    const p = policyRes.data || {};
+    const ac = document.getElementById('memory-auto-capture'); if (ac) ac.checked = !!p.auto_capture_enabled;
+    const ra = document.getElementById('memory-require-approval'); if (ra) ra.checked = !!p.require_approval;
+    const ps = document.getElementById('memory-pii-strict'); if (ps) ps.checked = !!p.pii_strict_mode;
+    const rd = document.getElementById('memory-retention-days'); if (rd) rd.value = Number(p.retention_days || 365);
+    const cat = document.getElementById('memory-allowed-categories');
+    if (cat) cat.value = Array.isArray(p.allowed_categories) ? p.allowed_categories.join(', ') : '';
+    if (typeof window.updateMemoryPolicyBadge === 'function') window.updateMemoryPolicyBadge(p);
+  }
 }
 
 async function settingsLoad() {
@@ -551,7 +658,38 @@ async function settingsLoad() {
     const { ok } = await apiJSON('/api/admin/configs', { method:'POST', body: JSON.stringify({configs}) });
     toast(ok ? 'Email config saved' : 'Failed', ok ? 'success' : 'error');
   });
+
+  document.getElementById('save-memory-policy-btn')?.addEventListener('click', async () => {
+    const retentionDays = Number(document.getElementById('memory-retention-days')?.value || 365);
+    if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) {
+      toast('Retention days must be between 1 and 3650', 'error');
+      return;
+    }
+    const categories = (document.getElementById('memory-allowed-categories')?.value || '')
+      .split(',')
+      .map(v => v.trim())
+      .filter(Boolean);
+    const payload = {
+      auto_capture_enabled: !!document.getElementById('memory-auto-capture')?.checked,
+      require_approval: !!document.getElementById('memory-require-approval')?.checked,
+      pii_strict_mode: !!document.getElementById('memory-pii-strict')?.checked,
+      retention_days: retentionDays,
+      allowed_categories: categories,
+    };
+    const { ok, data } = await apiJSON('/api/users/me/memory-policy', { method:'PUT', body: JSON.stringify(payload) });
+    toast(ok ? 'Memory policy saved' : (data.detail || 'Failed to save memory policy'), ok ? 'success' : 'error');
+    if (ok && typeof window.updateMemoryPolicyBadge === 'function') window.updateMemoryPolicyBadge(payload);
+  });
 }
+
+window.updateMemoryPolicyBadge = function updateMemoryPolicyBadge(policy = {}) {
+  const badge = document.getElementById('memory-policy-badge');
+  if (!badge) return;
+  const autoCapture = !!policy.auto_capture_enabled;
+  const requireApproval = !!policy.require_approval;
+  const label = !autoCapture ? 'Memory: Off' : (requireApproval ? 'Memory: Manual Approval' : 'Memory: Auto Capture');
+  badge.textContent = label;
+};
 
 // ── Utility ────────────────────────────────────────
 function fmtDate(v) {
