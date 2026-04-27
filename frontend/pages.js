@@ -39,6 +39,11 @@ function buildChatPage() {
         <option value="anythingllm">🏠 AnythingLLM</option>
         <option value="openrouter">🔀 OpenRouter</option>
       </select>
+      <select id="persona-select" title="Persona"
+        style="padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.25);
+        border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.82rem;outline:none;min-width:170px">
+        <option value="">🧩 Default Persona</option>
+      </select>
       <select id="memory-mode-select" title="Memory mode"
         style="padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.25);
         border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.82rem;outline:none">
@@ -55,6 +60,42 @@ function buildChatPage() {
         font-size:.8rem;color:var(--muted);cursor:pointer">
         <input type="checkbox" id="web-search-toggle" style="accent-color:var(--accent)"/> 🌐
       </label>
+      <span id="memory-policy-badge" style="font-size:.72rem;color:var(--muted);padding:4px 8px;border:1px solid var(--border);border-radius:999px">
+        Memory: Loading…
+      </span>
+    </div>
+
+    <div style="padding:10px 18px;border-bottom:1px solid var(--border);background:rgba(0,0,0,.12)">
+      <details id="advanced-retrieval-panel">
+        <summary style="cursor:pointer;font-size:.82rem;color:var(--muted);font-weight:600">
+          Advanced Memory Retrieval
+        </summary>
+        <div style="margin-top:10px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;align-items:end">
+          <div>
+            <label style="display:block;font-size:.75rem;color:var(--muted);margin-bottom:4px">Top K</label>
+            <input id="memory-top-k" type="number" min="1" max="20" value="5"
+              style="width:100%;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.25);border:1px solid var(--border);color:var(--text)"/>
+          </div>
+          <div>
+            <label style="display:block;font-size:.75rem;color:var(--muted);margin-bottom:4px">Recency bias</label>
+            <input id="recency-bias" type="number" min="0" max="1" step="0.05" value="0.35"
+              style="width:100%;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.25);border:1px solid var(--border);color:var(--text)"/>
+          </div>
+          <div>
+            <label style="display:block;font-size:.75rem;color:var(--muted);margin-bottom:4px">Category filter</label>
+            <input id="category-filter" type="text" placeholder="optional"
+              style="width:100%;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.25);border:1px solid var(--border);color:var(--text)"/>
+          </div>
+          <div>
+            <label style="display:block;font-size:.75rem;color:var(--muted);margin-bottom:4px">Quick presets</label>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <button id="retrieval-preset-balanced" type="button" class="btn btn-secondary btn-sm">Balanced</button>
+              <button id="retrieval-preset-recent" type="button" class="btn btn-secondary btn-sm">Recent-first</button>
+              <button id="retrieval-preset-deep" type="button" class="btn btn-secondary btn-sm">Deep context</button>
+            </div>
+          </div>
+        </div>
+      </details>
     </div>
 
     <!-- Messages -->
@@ -72,6 +113,7 @@ function buildChatPage() {
         </div>
       </div>
     </div>
+    <div id="suggested-actions-panel" style="display:none;padding:10px 18px;border-top:1px solid var(--border);background:var(--bg-2)"></div>
 
     <!-- Input -->
     <div style="padding:14px 18px;border-top:1px solid var(--border);
@@ -164,6 +206,74 @@ function buildMemoryPage() {
     <button id="mx-prev" class="btn btn-secondary btn-sm">← Prev</button>
     <span id="mx-page" style="font-size:.75rem;color:var(--muted)">—</span>
     <button id="mx-next" class="btn btn-secondary btn-sm">Next →</button>
+  </div>
+</div>`;
+}
+
+// ── Analytics inner HTML ───────────────────────────
+function buildAnalyticsPage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px">
+  <h2 style="font-size:1.15rem;font-weight:700">📊 Memory Analytics</h2>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button id="analytics-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+    <button id="analytics-export-csv-btn" class="btn btn-secondary btn-sm">⬇ Export CSV</button>
+  </div>
+</div>
+
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:18px">
+  <div style="min-width:140px">
+    <label class="lbl">From</label>
+    <input id="analytics-date-from" type="date" class="input"/>
+  </div>
+  <div style="min-width:140px">
+    <label class="lbl">To</label>
+    <input id="analytics-date-to" type="date" class="input"/>
+  </div>
+  <div style="min-width:130px">
+    <label class="lbl">Scope</label>
+    <select id="analytics-owner-scope" class="input">
+      <option value="mine">Mine</option>
+      <option value="shared">Shared</option>
+      <option value="all">All</option>
+    </select>
+  </div>
+  <div style="min-width:120px">
+    <label class="lbl">Stale days</label>
+    <input id="analytics-stale-days" type="number" min="1" value="30" class="input"/>
+  </div>
+  <button id="analytics-apply-btn" class="btn btn-primary">Apply</button>
+</div>
+
+<div class="grid-4" style="gap:14px;margin-bottom:18px">
+  <div class="stat-card"><div id="kpi-memory-writes" class="stat-value">—</div><div class="stat-label">Memory Writes</div></div>
+  <div class="stat-card"><div id="kpi-retrieval-hits" class="stat-value">—</div><div class="stat-label">Retrieval Hits</div></div>
+  <div class="stat-card"><div id="kpi-stale-count" class="stat-value">—</div><div class="stat-label">Stale Memories</div></div>
+  <div class="stat-card"><div id="kpi-top-category" class="stat-value">—</div><div class="stat-label">Top Category</div></div>
+</div>
+
+<div class="grid-2" style="gap:16px;margin-bottom:18px">
+  <div class="card">
+    <div class="card-title">Memory Writes per Day</div>
+    <div id="analytics-writes-trend"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Retrieval Hits per Day</div>
+    <div id="analytics-retrieval-trend"></div>
+  </div>
+</div>
+
+<div class="grid-2" style="gap:16px">
+  <div class="card">
+    <div class="card-title">Top Categories</div>
+    <div id="analytics-top-categories"></div>
+  </div>
+  <div class="card" style="overflow:auto">
+    <div class="card-title">Stale Memories</div>
+    <table class="tbl">
+      <thead><tr><th>Session</th><th>Category</th><th>Owner</th><th>Updated</th><th>Last Retrieval</th></tr></thead>
+      <tbody id="analytics-stale-body"><tr><td colspan="5" style="text-align:center;color:var(--muted)">Loading…</td></tr></tbody>
+    </table>
   </div>
 </div>`;
 }
@@ -504,6 +614,7 @@ function buildMemoryModal() {
       <button class="modal-close" data-close-modal="modal-chat-log">✕</button>
     </div>
     <div id="modal-chat-body" style="display:flex;flex-direction:column;gap:10px;max-height:60vh;overflow-y:auto"></div>
+    <div id="modal-task-suggestions" style="margin-top:12px"></div>
     <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
       <button id="modal-export-btn" class="btn btn-secondary btn-sm">⬇ Export JSON</button>
       <button class="btn btn-ghost btn-sm" data-close-modal="modal-chat-log">Close</button>

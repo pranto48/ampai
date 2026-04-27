@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional, Dict, Tuple
 from sqlalchemy import create_engine, MetaData, Table as SATable, Column, Integer, String, DateTime, Boolean, select, inspect, text
 from cryptography.fernet import Fernet, InvalidToken
@@ -51,6 +51,21 @@ core_memories = Table(
     'core_memories', metadata,
     Column('id', Integer, primary_key=True, autoincrement=True),
     Column('fact', String)
+)
+
+memory_candidates = Table(
+    "memory_candidates",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("session_id", String, nullable=True),
+    Column("candidate_text", String, nullable=False),
+    Column("source_message_id", String, nullable=True),
+    Column("source_offset", Integer, nullable=True),
+    Column("confidence", String, nullable=True),
+    Column("status", String, nullable=False, default="pending"),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("reviewed_at", DateTime(timezone=True), nullable=True),
 )
 
 network_targets = Table(
@@ -187,6 +202,18 @@ users = Table(
     Column("password_hash", String, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
+persona_presets = Table(
+    "persona_presets",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=True),
+    Column("name", String, nullable=False),
+    Column("system_prompt", String, nullable=False),
+    Column("tags", String, nullable=True),
+    Column("is_default", Boolean, nullable=False, default=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
 
 try:
@@ -1740,6 +1767,61 @@ def _as_bool(value, default: bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def get_default_memory_policy() -> Dict[str, object]:
+    categories_raw = get_config("memory_policy_default_allowed_categories", "")
+    categories = [c.strip() for c in str(categories_raw or "").split(",") if c.strip()]
+    return {
+        "auto_capture_enabled": _as_bool(get_config("memory_policy_default_auto_capture_enabled", "true"), True),
+        "require_approval": _as_bool(get_config("memory_policy_default_require_approval", "false"), False),
+        "pii_strict_mode": _as_bool(get_config("memory_policy_default_pii_strict_mode", "false"), False),
+        "retention_days": max(1, int(get_config("memory_policy_default_retention_days", "365") or 365)),
+        "allowed_categories": categories,
+    }
+
+
+def get_effective_memory_policy(username: str) -> Dict[str, object]:
+    defaults = get_default_memory_policy()
+    raw = get_config(f"user:{username}:memory_policy", "")
+    if not raw:
+        return defaults
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return defaults
+        merged = {**defaults, **parsed}
+        merged["auto_capture_enabled"] = bool(merged.get("auto_capture_enabled", defaults["auto_capture_enabled"]))
+        merged["require_approval"] = bool(merged.get("require_approval", defaults["require_approval"]))
+        merged["pii_strict_mode"] = bool(merged.get("pii_strict_mode", defaults["pii_strict_mode"]))
+        merged["retention_days"] = max(1, int(merged.get("retention_days", defaults["retention_days"])))
+        categories = merged.get("allowed_categories")
+        if isinstance(categories, list):
+            merged["allowed_categories"] = [str(c).strip() for c in categories if str(c).strip()]
+        else:
+            merged["allowed_categories"] = defaults["allowed_categories"]
+        return merged
+    except Exception as exc:
+        logger.warning(f"Error loading memory policy for user {username}: {exc}")
+        return defaults
+
+
+def upsert_user_memory_policy(
+    username: str,
+    auto_capture_enabled: bool,
+    require_approval: bool,
+    pii_strict_mode: bool,
+    retention_days: int,
+    allowed_categories: List[str],
+) -> bool:
+    payload = {
+        "auto_capture_enabled": bool(auto_capture_enabled),
+        "require_approval": bool(require_approval),
+        "pii_strict_mode": bool(pii_strict_mode),
+        "retention_days": max(1, int(retention_days)),
+        "allowed_categories": [str(c).strip() for c in (allowed_categories or []) if str(c).strip()],
+    }
+    return set_config(f"user:{username}:memory_policy", json.dumps(payload))
+
+
 def get_effective_notification_preferences(username: str) -> Dict[str, object]:
     defaults = {
         "browser_notify_on_away_replies": _as_bool(get_config("notification_default_browser_notify_on_away_replies", "true"), True),
@@ -1907,6 +1989,178 @@ def mark_pending_reply_notifications_delivered(ids: List[int]) -> int:
         return 0
 
 
+def list_personas(username: str, include_global: bool = True) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            if include_global:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT id, username, name, system_prompt, tags, is_default, created_at
+                        FROM persona_presets
+                        WHERE username = :username OR username IS NULL
+                        ORDER BY is_default DESC, created_at DESC, id DESC
+                        """
+                    ),
+                    {"username": username},
+                ).mappings().all()
+            else:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT id, username, name, system_prompt, tags, is_default, created_at
+                        FROM persona_presets
+                        WHERE username = :username
+                        ORDER BY is_default DESC, created_at DESC, id DESC
+                        """
+                    ),
+                    {"username": username},
+                ).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as exc:
+        logger.exception("Error listing personas", exc_info=exc)
+        return []
+
+
+def create_persona(username: Optional[str], name: str, system_prompt: str, tags: str = "", is_default: bool = False) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    owner = username if username else None
+    try:
+        with engine.connect() as conn:
+            if is_default:
+                conn.execute(
+                    text("UPDATE persona_presets SET is_default = FALSE WHERE username IS NOT DISTINCT FROM :owner"),
+                    {"owner": owner},
+                )
+            row = conn.execute(
+                text(
+                    """
+                    INSERT INTO persona_presets (username, name, system_prompt, tags, is_default, created_at)
+                    VALUES (:username, :name, :system_prompt, :tags, :is_default, NOW())
+                    RETURNING id, username, name, system_prompt, tags, is_default, created_at
+                    """
+                ),
+                {
+                    "username": owner,
+                    "name": (name or "").strip()[:120],
+                    "system_prompt": (system_prompt or "").strip()[:8000],
+                    "tags": (tags or "").strip()[:500],
+                    "is_default": bool(is_default),
+                },
+            ).mappings().first()
+            conn.commit()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error creating persona", exc_info=exc)
+        return None
+
+
+def update_persona(persona_id: int, actor_username: str, is_admin: bool, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    allowed = {"name", "system_prompt", "tags", "is_default"}
+    payload = {k: v for k, v in (updates or {}).items() if k in allowed and v is not None}
+    if not payload:
+        return None
+    try:
+        with engine.connect() as conn:
+            existing = conn.execute(
+                text("SELECT id, username FROM persona_presets WHERE id = :id"),
+                {"id": int(persona_id)},
+            ).mappings().first()
+            if not existing:
+                return None
+            owner = existing.get("username")
+            if not is_admin and owner != actor_username:
+                return None
+            if payload.get("is_default") is True:
+                conn.execute(
+                    text("UPDATE persona_presets SET is_default = FALSE WHERE username IS NOT DISTINCT FROM :owner"),
+                    {"owner": owner},
+                )
+            set_clauses = []
+            params: Dict[str, Any] = {"id": int(persona_id)}
+            for key, value in payload.items():
+                set_clauses.append(f"{key} = :{key}")
+                if key == "name":
+                    params[key] = str(value).strip()[:120]
+                elif key == "system_prompt":
+                    params[key] = str(value).strip()[:8000]
+                elif key == "tags":
+                    params[key] = str(value).strip()[:500]
+                elif key == "is_default":
+                    params[key] = bool(value)
+                else:
+                    params[key] = value
+            row = conn.execute(
+                text(
+                    f"""
+                    UPDATE persona_presets
+                    SET {', '.join(set_clauses)}
+                    WHERE id = :id
+                    RETURNING id, username, name, system_prompt, tags, is_default, created_at
+                    """
+                ),
+                params,
+            ).mappings().first()
+            conn.commit()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error updating persona", exc_info=exc)
+        return None
+
+
+def delete_persona(persona_id: int, actor_username: str, is_admin: bool) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            existing = conn.execute(
+                text("SELECT username FROM persona_presets WHERE id = :id"),
+                {"id": int(persona_id)},
+            ).mappings().first()
+            if not existing:
+                return False
+            owner = existing.get("username")
+            if not is_admin and owner != actor_username:
+                return False
+            result = conn.execute(text("DELETE FROM persona_presets WHERE id = :id"), {"id": int(persona_id)})
+            conn.commit()
+            return bool(result.rowcount)
+    except Exception as exc:
+        logger.exception("Error deleting persona", exc_info=exc)
+        return False
+
+
+def get_persona_for_user(persona_id: int, username: str, is_admin: bool = False) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, username, name, system_prompt, tags, is_default, created_at
+                    FROM persona_presets
+                    WHERE id = :id
+                    """
+                ),
+                {"id": int(persona_id)},
+            ).mappings().first()
+            if not row:
+                return None
+            data = dict(row)
+            owner = data.get("username")
+            if is_admin or owner is None or owner == username:
+                return data
+            return None
+    except Exception:
+        return None
+
+
 def ensure_enterprise_tables() -> None:
     if not engine:
         return
@@ -1939,9 +2193,115 @@ def ensure_enterprise_tables() -> None:
                     """
                 )
             )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS persona_presets (
+                        id BIGSERIAL PRIMARY KEY,
+                        username VARCHAR NULL,
+                        name VARCHAR NOT NULL,
+                        system_prompt TEXT NOT NULL,
+                        tags TEXT,
+                        is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
             conn.commit()
     except Exception as exc:
         logger.exception("Error ensuring enterprise tables", exc_info=exc)
+
+
+def list_memory_candidates(
+    username: str,
+    status: Optional[str] = "pending",
+    limit: int = 50,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    safe_limit = max(1, min(int(limit), 500))
+    safe_offset = max(0, int(offset))
+    cleaned_status = (status or "").strip().lower()
+    try:
+        with engine.connect() as conn:
+            where_sql = "WHERE username = :username"
+            params: Dict[str, Any] = {"username": username, "limit": safe_limit, "offset": safe_offset}
+            if cleaned_status:
+                where_sql += " AND status = :status"
+                params["status"] = cleaned_status
+            rows = conn.execute(
+                text(
+                    f"""
+                    SELECT id, username, session_id, candidate_text, source_message_id, source_offset,
+                           confidence, status, created_at, reviewed_at
+                    FROM memory_candidates
+                    {where_sql}
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                params,
+            ).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as exc:
+        logger.exception("Error listing memory candidates", exc_info=exc)
+        return []
+
+
+def update_memory_candidate_status(id: int, status: str, edited_text: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    clean_status = (status or "").strip().lower()
+    if clean_status not in {"pending", "approved", "rejected"}:
+        return None
+    try:
+        with engine.connect() as conn:
+            params: Dict[str, Any] = {"id": int(id), "status": clean_status}
+            set_sql = "status = :status, reviewed_at = NOW()"
+            if edited_text is not None and edited_text.strip():
+                params["candidate_text"] = edited_text.strip()
+                set_sql += ", candidate_text = :candidate_text"
+            row = conn.execute(
+                text(
+                    f"""
+                    UPDATE memory_candidates
+                    SET {set_sql}
+                    WHERE id = :id
+                    RETURNING id, username, session_id, candidate_text, source_message_id, source_offset,
+                              confidence, status, created_at, reviewed_at
+                    """
+                ),
+                params,
+            ).mappings().first()
+            conn.commit()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error updating memory candidate status", exc_info=exc)
+        return None
+
+
+def get_memory_candidate_by_id(id: int) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, username, session_id, candidate_text, source_message_id, source_offset,
+                           confidence, status, created_at, reviewed_at
+                    FROM memory_candidates
+                    WHERE id = :id
+                    """
+                ),
+                {"id": int(id)},
+            ).mappings().first()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error getting memory candidate", exc_info=exc)
+        return None
 
 
 def log_audit_event(username: str, action: str, session_id: Optional[str] = None, category: Optional[str] = None, details: Optional[str] = None) -> None:
@@ -1990,6 +2350,252 @@ def list_audit_events(limit: int = 200) -> List[Dict[str, Any]]:
             return [dict(r) for r in rows]
     except Exception:
         return []
+
+
+def _normalize_analytics_scope(scope: Optional[str]) -> str:
+    normalized = (scope or "mine").strip().lower()
+    return normalized if normalized in {"mine", "shared", "all"} else "mine"
+
+
+def _parse_analytics_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception:
+        return None
+
+
+def get_memory_analytics(
+    username: str,
+    is_admin: bool,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    owner_scope: str = "mine",
+    stale_days: int = 30,
+    top_n: int = 8,
+) -> Dict[str, Any]:
+    if not engine:
+        return {
+            "kpis": {"memory_writes_total": 0, "retrieval_hits_total": 0, "stale_memories_count": 0},
+            "memory_writes_per_day": [],
+            "retrieval_hits_per_day": [],
+            "top_categories": [],
+            "stale_memories": [],
+        }
+
+    scope = _normalize_analytics_scope(owner_scope)
+    if not is_admin and scope == "all":
+        scope = "mine"
+
+    from_dt = _parse_analytics_dt(date_from)
+    to_dt = _parse_analytics_dt(date_to)
+    if not to_dt:
+        to_dt = datetime.now(timezone.utc)
+    if not from_dt:
+        from_dt = to_dt - timedelta(days=30)
+    if from_dt > to_dt:
+        from_dt, to_dt = to_dt, from_dt
+
+    stale_days = max(1, int(stale_days))
+    top_n = max(1, min(int(top_n), 20))
+
+    accessible_ids = set(get_accessible_session_ids(username=username, is_admin=is_admin))
+    shared_ids = set(list_shared_sessions_for_user(username))
+    if not is_admin and not accessible_ids:
+        return {
+            "kpis": {"memory_writes_total": 0, "retrieval_hits_total": 0, "stale_memories_count": 0},
+            "memory_writes_per_day": [],
+            "retrieval_hits_per_day": [],
+            "top_categories": [],
+            "stale_memories": [],
+            "scope": scope,
+            "date_from": from_dt.isoformat(),
+            "date_to": to_dt.isoformat(),
+            "stale_days": stale_days,
+        }
+
+    audit_scope_sql = ""
+    metadata_scope_sql = ""
+    params: Dict[str, Any] = {
+        "from_dt": from_dt,
+        "to_dt": to_dt,
+        "stale_days": stale_days,
+        "top_n": top_n,
+    }
+
+    if is_admin:
+        if scope == "mine":
+            audit_scope_sql = "AND ae.username = :username"
+            metadata_scope_sql = "AND sa.owner_username = :username"
+            params["username"] = username
+    else:
+        session_ids = sorted(accessible_ids)
+        if scope == "mine":
+            session_ids = [sid for sid in session_ids if sid not in shared_ids]
+        elif scope == "shared":
+            session_ids = [sid for sid in session_ids if sid in shared_ids]
+        params["session_ids"] = session_ids
+        if not session_ids:
+            return {
+                "kpis": {"memory_writes_total": 0, "retrieval_hits_total": 0, "stale_memories_count": 0},
+                "memory_writes_per_day": [],
+                "retrieval_hits_per_day": [],
+                "top_categories": [],
+                "stale_memories": [],
+                "scope": scope,
+                "date_from": from_dt.isoformat(),
+                "date_to": to_dt.isoformat(),
+                "stale_days": stale_days,
+            }
+        audit_scope_sql = "AND (ae.session_id = ANY(:session_ids) OR ae.username = :username)"
+        metadata_scope_sql = "AND sm.session_id = ANY(:session_ids)"
+        params["username"] = username
+
+    try:
+        with engine.connect() as conn:
+            writes_rows = conn.execute(
+                text(
+                    f"""
+                    SELECT DATE_TRUNC('day', ae.created_at) AS day, COUNT(*) AS count
+                    FROM audit_events ae
+                    LEFT JOIN session_access sa ON sa.session_id = ae.session_id
+                    WHERE ae.action = 'memory.write.chat'
+                      AND ae.created_at >= :from_dt
+                      AND ae.created_at <= :to_dt
+                      {audit_scope_sql}
+                    GROUP BY 1
+                    ORDER BY 1 ASC
+                    """
+                ),
+                params,
+            ).mappings().all()
+
+            retrieval_rows = conn.execute(
+                text(
+                    f"""
+                    SELECT DATE_TRUNC('day', ae.created_at) AS day, COUNT(*) AS count
+                    FROM audit_events ae
+                    LEFT JOIN session_access sa ON sa.session_id = ae.session_id
+                    WHERE ae.action IN ('memory.read.history', 'memory.read.explorer')
+                      AND ae.created_at >= :from_dt
+                      AND ae.created_at <= :to_dt
+                      {audit_scope_sql}
+                    GROUP BY 1
+                    ORDER BY 1 ASC
+                    """
+                ),
+                params,
+            ).mappings().all()
+
+            categories_rows = conn.execute(
+                text(
+                    f"""
+                    SELECT COALESCE(sm.category, 'Uncategorized') AS category, COUNT(*) AS count
+                    FROM session_metadata sm
+                    LEFT JOIN session_access sa ON sa.session_id = sm.session_id
+                    WHERE 1=1
+                      {metadata_scope_sql}
+                    GROUP BY 1
+                    ORDER BY count DESC, category ASC
+                    LIMIT :top_n
+                    """
+                ),
+                params,
+            ).mappings().all()
+
+            stale_rows = conn.execute(
+                text(
+                    f"""
+                    SELECT
+                        sm.session_id,
+                        COALESCE(sm.category, 'Uncategorized') AS category,
+                        COALESCE(sa.owner_username, 'unknown') AS owner,
+                        sm.updated_at,
+                        (
+                            SELECT MAX(ae.created_at)
+                            FROM audit_events ae
+                            WHERE ae.session_id = sm.session_id
+                              AND ae.action IN ('memory.read.history', 'memory.read.explorer')
+                        ) AS last_retrieval_at
+                    FROM session_metadata sm
+                    LEFT JOIN session_access sa ON sa.session_id = sm.session_id
+                    WHERE sm.updated_at IS NOT NULL
+                      AND sm.updated_at::timestamptz <= NOW() - make_interval(days => :stale_days)
+                      AND (
+                          (
+                              SELECT MAX(ae.created_at)
+                              FROM audit_events ae
+                              WHERE ae.session_id = sm.session_id
+                                AND ae.action IN ('memory.read.history', 'memory.read.explorer')
+                          ) IS NULL
+                          OR
+                          (
+                              SELECT MAX(ae.created_at)
+                              FROM audit_events ae
+                              WHERE ae.session_id = sm.session_id
+                                AND ae.action IN ('memory.read.history', 'memory.read.explorer')
+                          ) <= NOW() - make_interval(days => :stale_days)
+                      )
+                      {metadata_scope_sql}
+                    ORDER BY sm.updated_at ASC
+                    LIMIT 200
+                    """
+                ),
+                params,
+            ).mappings().all()
+    except Exception as exc:
+        logger.exception("Error building memory analytics", exc_info=exc)
+        return {
+            "kpis": {"memory_writes_total": 0, "retrieval_hits_total": 0, "stale_memories_count": 0},
+            "memory_writes_per_day": [],
+            "retrieval_hits_per_day": [],
+            "top_categories": [],
+            "stale_memories": [],
+            "scope": scope,
+            "date_from": from_dt.isoformat(),
+            "date_to": to_dt.isoformat(),
+            "stale_days": stale_days,
+        }
+
+    writes = [{"day": r["day"].date().isoformat(), "count": int(r["count"] or 0)} for r in writes_rows]
+    retrieval = [{"day": r["day"].date().isoformat(), "count": int(r["count"] or 0)} for r in retrieval_rows]
+    top_categories_rows = [{"category": r["category"], "count": int(r["count"] or 0)} for r in categories_rows]
+    stale_memories = []
+    for row in stale_rows:
+        updated_at = row.get("updated_at")
+        last_retrieval = row.get("last_retrieval_at")
+        stale_memories.append(
+            {
+                "session_id": row.get("session_id"),
+                "category": row.get("category") or "Uncategorized",
+                "owner": row.get("owner") or "unknown",
+                "updated_at": updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or ""),
+                "last_retrieval_at": last_retrieval.isoformat() if hasattr(last_retrieval, "isoformat") else (str(last_retrieval) if last_retrieval else None),
+            }
+        )
+
+    return {
+        "kpis": {
+            "memory_writes_total": sum(item["count"] for item in writes),
+            "retrieval_hits_total": sum(item["count"] for item in retrieval),
+            "stale_memories_count": len(stale_memories),
+        },
+        "memory_writes_per_day": writes,
+        "retrieval_hits_per_day": retrieval,
+        "top_categories": top_categories_rows,
+        "stale_memories": stale_memories,
+        "scope": scope,
+        "date_from": from_dt.isoformat(),
+        "date_to": to_dt.isoformat(),
+        "stale_days": stale_days,
+    }
 
 
 def upsert_session_insight(session_id: str, summary: str, tags: List[str]) -> bool:

@@ -1,9 +1,11 @@
 import os
 import re
 import json
+import uuid
 import urllib.parse
 import urllib.request
 from langchain_community.chat_message_histories import RedisChatMessageHistory
+from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from memory_indexer import MemoryIndexer
@@ -14,11 +16,13 @@ from logging_utils import get_logger
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_models import ChatOllama
-from database import get_config, get_core_memories, add_core_memory, create_task, get_sql_chat_history, redact_pii_text
+from langchain_community.chat_message_histories import SQLChatMessageHistory
+from database import DATABASE_URL, get_config, get_core_memories, add_core_memory, redact_pii_text
 
 from langchain_core.chat_history import BaseChatMessageHistory
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
 logger = get_logger(__name__)
 
 
@@ -50,6 +54,64 @@ class ShortTermRedisMessageHistory(BaseChatMessageHistory):
 
 def get_short_redis_history(session_id: str):
     return ShortTermRedisMessageHistory(session_id=session_id, k=6)
+
+
+TASK_CUE_PATTERNS = [
+    r"\b(todo|to-do|task|tasks)\b",
+    r"\bremind me\b",
+    r"\bfollow up\b",
+    r"\bdeadline\b",
+    r"\baction item\b",
+    r"\bshould I\b",
+    r"\bneed to\b",
+]
+
+
+def _looks_like_task_intent(text: str) -> bool:
+    sample = (text or "").lower()
+    return any(re.search(pattern, sample) for pattern in TASK_CUE_PATTERNS)
+
+
+def _parse_create_task_tags(content: str) -> List[Dict[str, Any]]:
+    matches = re.findall(r"\[CREATE_TASK:\s*(.*?)\]", content or "", flags=re.IGNORECASE | re.DOTALL)
+    suggestions: List[Dict[str, Any]] = []
+    for raw in matches:
+        parsed = {"title": "", "description": "", "priority": "medium", "due_at": None}
+        for part in raw.split("|"):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            k = key.strip().lower()
+            v = value.strip()
+            if k == "title":
+                parsed["title"] = v
+            elif k == "description":
+                parsed["description"] = v
+            elif k == "priority":
+                parsed["priority"] = v.lower() if v else "medium"
+            elif k in {"due", "due_at"}:
+                parsed["due_at"] = v or None
+        if parsed["title"]:
+            parsed["id"] = str(uuid.uuid4())
+            parsed["source"] = "llm_tag"
+            suggestions.append(parsed)
+    return suggestions
+
+
+def _build_fallback_suggestion(message: str, response: str) -> List[Dict[str, Any]]:
+    if not (_looks_like_task_intent(message) or _looks_like_task_intent(response)):
+        return []
+    title = (message or "").strip().split("\n")[0][:120]
+    if not title:
+        title = "Follow up on recent conversation"
+    return [{
+        "id": str(uuid.uuid4()),
+        "title": title,
+        "description": (response or message or "").strip()[:500],
+        "priority": "medium",
+        "due_at": None,
+        "source": "intent_heuristic",
+    }]
 
 
 def _parse_model_list(raw_value: str, defaults: List[str]) -> List[str]:
@@ -136,6 +198,9 @@ def chat_with_agent(
     category_filter: str = "",
     use_web_search: bool = False,
     attachments: List[Dict] = None,
+    memory_top_k: int = 5,
+    recency_bias: float = 0.0,
+    category_filter: str = None,
 ):
     if attachments is None:
         attachments = []
@@ -204,6 +269,24 @@ def chat_with_agent(
         f"{web_context}"
         f"{file_context}"
     )
+    persona_prompt = (persona_prompt_override or "").strip()
+    if not persona_prompt and persona_id:
+        persona = get_persona_for_user(persona_id=persona_id, username=username, is_admin=is_admin)
+        if persona:
+            persona_prompt = (persona.get("system_prompt") or "").strip()
+    if persona_prompt:
+        agent_directives = (
+            f"PERSONA SYSTEM PROMPT (highest priority):\n{persona_prompt}\n\n"
+            + agent_directives
+        )
+
+    retrieval_meta = {
+        "enabled": memory_mode == "indexed",
+        "top_k": None,
+        "recency_bias": None,
+        "category_filter": None,
+        "retrieved_count": 0,
+    }
 
     if memory_mode == "indexed":
         indexer = MemoryIndexer(model_type)
@@ -246,15 +329,26 @@ def chat_with_agent(
     content = response.content
 
     match = re.search(r'\[SAVE_MEMORY:\s*(.*?)\]', content, re.IGNORECASE | re.DOTALL)
+    allowed_categories_set = {str(c).strip().lower() for c in (allowed_memory_categories or []) if str(c).strip()}
     if match:
         fact_to_save = match.group(1).strip().rstrip('].')
-        add_core_memory(fact_to_save)
-        try:
-            indexer = MemoryIndexer(model_type)
-            indexer.add_fact(fact_to_save)
-        except Exception as e:
-            print(f"Failed to add fact to PGVector: {e}")
+        save_allowed = persist_memory and not require_memory_approval
+        if save_allowed and allowed_categories_set:
+            inferred_category = "preferences" if re.search(r"\b(like|prefer|favorite|always|usually)\b", fact_to_save, re.IGNORECASE) else "general"
+            save_allowed = inferred_category in allowed_categories_set
+        if save_allowed:
+            add_core_memory(fact_to_save)
+            try:
+                indexer = MemoryIndexer(model_type)
+                indexer.add_fact(fact_to_save)
+            except Exception as e:
+                print(f"Failed to add fact to PGVector: {e}")
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
+
+    task_suggestions = _parse_create_task_tags(content)
+    content = re.sub(r"\[CREATE_TASK:\s*.*?\]", "", content, flags=re.IGNORECASE | re.DOTALL).strip()
+    if not task_suggestions:
+        task_suggestions = _build_fallback_suggestion(message, content)
 
     sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
     message_log = message
@@ -262,12 +356,17 @@ def chat_with_agent(
         attachment_names = [a['filename'] for a in attachments]
         message_log = f"[Attachments: {', '.join(attachment_names)}]\n" + message
 
-    pii_redaction_enabled = str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
-    if pii_redaction_enabled:
-        message_log = redact_pii_text(message_log)
-        content = redact_pii_text(content)
+        pii_redaction_enabled = pii_strict_mode or str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        if pii_redaction_enabled:
+            message_log = redact_pii_text(message_log)
+            content = redact_pii_text(content)
 
-    sql_history.add_user_message(message_log)
-    sql_history.add_ai_message(content)
+        sql_history.add_user_message(message_log)
+        sql_history.add_ai_message(content)
 
-    return {"response": content, "web_search": web_search}
+    return {
+        "response": content,
+        "web_search": web_search,
+        "task_suggestions": task_suggestions,
+        "has_task_cues": bool(task_suggestions),
+    }

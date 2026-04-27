@@ -111,6 +111,7 @@ function _onPageEnter(page) {
   if (page === 'personas')  personasLoad();
   if (page === 'analytics') analyticsLoad();
   if (page === 'network')   networkLoad();
+  if (page === 'personas')  personasLoad();
   if (page === 'admin')     adminInit();
   if (page === 'models')    modelsLoad();
   if (page === 'settings')  settingsLoad();
@@ -301,6 +302,9 @@ function _shellHTML() {
         <button class="nav-item" data-page="models">
           <span class="icon">🤖</span><span class="sidebar-label">AI Models</span>
         </button>
+        <button class="nav-item" data-page="personas">
+          <span class="icon">🧩</span><span class="sidebar-label">Personas</span>
+        </button>
         <button class="nav-item" data-page="settings">
           <span class="icon">⚙️</span><span class="sidebar-label">Settings</span>
         </button>
@@ -357,6 +361,7 @@ function _shellHTML() {
       <div id="sp-personas" class="subpage hidden page-content">${buildPersonasPage()}</div>
       <div id="sp-analytics" class="subpage hidden page-content">${buildAnalyticsPage()}</div>
       <div id="sp-network"  class="subpage hidden page-content">${buildNetworkPage()}</div>
+      <div id="sp-personas" class="subpage hidden page-content">${buildPersonasPage()}</div>
       <div id="sp-models"   class="subpage hidden page-content">${buildModelsPage()}</div>
       <div id="sp-settings" class="subpage hidden page-content">${buildSettingsPage()}</div>
       <div id="sp-admin"    class="subpage hidden page-content">${buildAdminPage()}</div>
