@@ -204,6 +204,18 @@ users = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
 
+persona_presets = Table(
+    "persona_presets",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=True),
+    Column("name", String, nullable=False),
+    Column("system_prompt", String, nullable=False),
+    Column("tags", String, nullable=True),
+    Column("is_default", Boolean, nullable=False, default=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
 try:
     engine = create_engine(DATABASE_URL)
     metadata.create_all(engine)
@@ -1977,6 +1989,178 @@ def mark_pending_reply_notifications_delivered(ids: List[int]) -> int:
         return 0
 
 
+def list_personas(username: str, include_global: bool = True) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            if include_global:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT id, username, name, system_prompt, tags, is_default, created_at
+                        FROM persona_presets
+                        WHERE username = :username OR username IS NULL
+                        ORDER BY is_default DESC, created_at DESC, id DESC
+                        """
+                    ),
+                    {"username": username},
+                ).mappings().all()
+            else:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT id, username, name, system_prompt, tags, is_default, created_at
+                        FROM persona_presets
+                        WHERE username = :username
+                        ORDER BY is_default DESC, created_at DESC, id DESC
+                        """
+                    ),
+                    {"username": username},
+                ).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as exc:
+        logger.exception("Error listing personas", exc_info=exc)
+        return []
+
+
+def create_persona(username: Optional[str], name: str, system_prompt: str, tags: str = "", is_default: bool = False) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    owner = username if username else None
+    try:
+        with engine.connect() as conn:
+            if is_default:
+                conn.execute(
+                    text("UPDATE persona_presets SET is_default = FALSE WHERE username IS NOT DISTINCT FROM :owner"),
+                    {"owner": owner},
+                )
+            row = conn.execute(
+                text(
+                    """
+                    INSERT INTO persona_presets (username, name, system_prompt, tags, is_default, created_at)
+                    VALUES (:username, :name, :system_prompt, :tags, :is_default, NOW())
+                    RETURNING id, username, name, system_prompt, tags, is_default, created_at
+                    """
+                ),
+                {
+                    "username": owner,
+                    "name": (name or "").strip()[:120],
+                    "system_prompt": (system_prompt or "").strip()[:8000],
+                    "tags": (tags or "").strip()[:500],
+                    "is_default": bool(is_default),
+                },
+            ).mappings().first()
+            conn.commit()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error creating persona", exc_info=exc)
+        return None
+
+
+def update_persona(persona_id: int, actor_username: str, is_admin: bool, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    allowed = {"name", "system_prompt", "tags", "is_default"}
+    payload = {k: v for k, v in (updates or {}).items() if k in allowed and v is not None}
+    if not payload:
+        return None
+    try:
+        with engine.connect() as conn:
+            existing = conn.execute(
+                text("SELECT id, username FROM persona_presets WHERE id = :id"),
+                {"id": int(persona_id)},
+            ).mappings().first()
+            if not existing:
+                return None
+            owner = existing.get("username")
+            if not is_admin and owner != actor_username:
+                return None
+            if payload.get("is_default") is True:
+                conn.execute(
+                    text("UPDATE persona_presets SET is_default = FALSE WHERE username IS NOT DISTINCT FROM :owner"),
+                    {"owner": owner},
+                )
+            set_clauses = []
+            params: Dict[str, Any] = {"id": int(persona_id)}
+            for key, value in payload.items():
+                set_clauses.append(f"{key} = :{key}")
+                if key == "name":
+                    params[key] = str(value).strip()[:120]
+                elif key == "system_prompt":
+                    params[key] = str(value).strip()[:8000]
+                elif key == "tags":
+                    params[key] = str(value).strip()[:500]
+                elif key == "is_default":
+                    params[key] = bool(value)
+                else:
+                    params[key] = value
+            row = conn.execute(
+                text(
+                    f"""
+                    UPDATE persona_presets
+                    SET {', '.join(set_clauses)}
+                    WHERE id = :id
+                    RETURNING id, username, name, system_prompt, tags, is_default, created_at
+                    """
+                ),
+                params,
+            ).mappings().first()
+            conn.commit()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error updating persona", exc_info=exc)
+        return None
+
+
+def delete_persona(persona_id: int, actor_username: str, is_admin: bool) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            existing = conn.execute(
+                text("SELECT username FROM persona_presets WHERE id = :id"),
+                {"id": int(persona_id)},
+            ).mappings().first()
+            if not existing:
+                return False
+            owner = existing.get("username")
+            if not is_admin and owner != actor_username:
+                return False
+            result = conn.execute(text("DELETE FROM persona_presets WHERE id = :id"), {"id": int(persona_id)})
+            conn.commit()
+            return bool(result.rowcount)
+    except Exception as exc:
+        logger.exception("Error deleting persona", exc_info=exc)
+        return False
+
+
+def get_persona_for_user(persona_id: int, username: str, is_admin: bool = False) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, username, name, system_prompt, tags, is_default, created_at
+                    FROM persona_presets
+                    WHERE id = :id
+                    """
+                ),
+                {"id": int(persona_id)},
+            ).mappings().first()
+            if not row:
+                return None
+            data = dict(row)
+            owner = data.get("username")
+            if is_admin or owner is None or owner == username:
+                return data
+            return None
+    except Exception:
+        return None
+
+
 def ensure_enterprise_tables() -> None:
     if not engine:
         return
@@ -2012,17 +2196,14 @@ def ensure_enterprise_tables() -> None:
             conn.execute(
                 text(
                     """
-                    CREATE TABLE IF NOT EXISTS memory_candidates (
+                    CREATE TABLE IF NOT EXISTS persona_presets (
                         id BIGSERIAL PRIMARY KEY,
-                        username VARCHAR NOT NULL,
-                        session_id VARCHAR,
-                        candidate_text TEXT NOT NULL,
-                        source_message_id VARCHAR,
-                        source_offset INTEGER,
-                        confidence VARCHAR,
-                        status VARCHAR NOT NULL DEFAULT 'pending',
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        reviewed_at TIMESTAMPTZ
+                        username VARCHAR NULL,
+                        name VARCHAR NOT NULL,
+                        system_prompt TEXT NOT NULL,
+                        tags TEXT,
+                        is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                     """
                 )

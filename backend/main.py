@@ -78,6 +78,7 @@ from database import (
     list_chat_messages,
     get_sql_chat_history,
     list_tasks,
+    list_personas,
     migrate_app_config_encryption,
     set_config,
     set_session_archived,
@@ -98,6 +99,9 @@ from database import (
     upsert_user_notification_preferences,
     upsert_user_memory_policy,
     enqueue_pending_reply_notification,
+    create_persona,
+    update_persona,
+    delete_persona,
     engine,
 )
 from integrations.gmail_api import (
@@ -164,6 +168,23 @@ class ChatRequest(BaseModel):
     memory_mode: str = "full"
     use_web_search: bool = False
     attachments: List[Attachment] = []
+    persona_id: Optional[int] = None
+    system_prompt_override: Optional[str] = None
+
+
+class PersonaCreateRequest(BaseModel):
+    name: str
+    system_prompt: str
+    tags: Optional[str] = ""
+    is_default: bool = False
+    is_global: bool = False
+
+
+class PersonaUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    system_prompt: Optional[str] = None
+    tags: Optional[str] = None
+    is_default: Optional[bool] = None
 
 
 class CategoryRequest(BaseModel):
@@ -731,6 +752,48 @@ def _insight_worker() -> None:
             INSIGHT_QUEUE.task_done()
 
 
+@app.get("/api/personas")
+def api_list_personas(user: UserContext = Depends(require_authenticated_user)):
+    personas = list_personas(user.username, include_global=True)
+    return {"personas": personas}
+
+
+@app.post("/api/personas")
+def api_create_persona(request: PersonaCreateRequest, user: UserContext = Depends(require_authenticated_user)):
+    owner_username = None if (request.is_global and user.role == "admin") else user.username
+    persona = create_persona(
+        username=owner_username,
+        name=request.name,
+        system_prompt=request.system_prompt,
+        tags=request.tags or "",
+        is_default=bool(request.is_default),
+    )
+    if not persona:
+        raise HTTPException(status_code=500, detail="Failed to create persona")
+    return persona
+
+
+@app.patch("/api/personas/{persona_id}")
+def api_update_persona(persona_id: int, request: PersonaUpdateRequest, user: UserContext = Depends(require_authenticated_user)):
+    updated = update_persona(
+        persona_id=persona_id,
+        actor_username=user.username,
+        is_admin=(user.role == "admin"),
+        updates=request.model_dump(exclude_none=True),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Persona not found or not editable")
+    return updated
+
+
+@app.delete("/api/personas/{persona_id}")
+def api_delete_persona(persona_id: int, user: UserContext = Depends(require_authenticated_user)):
+    deleted = delete_persona(persona_id=persona_id, actor_username=user.username, is_admin=(user.role == "admin"))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Persona not found or not deletable")
+    return {"status": "success"}
+
+
 @app.post("/api/chat")
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
@@ -745,10 +808,10 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             memory_mode=request.memory_mode,
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
-            persist_memory=bool(memory_policy.get("auto_capture_enabled", True)),
-            require_memory_approval=bool(memory_policy.get("require_approval", False)),
-            pii_strict_mode=bool(memory_policy.get("pii_strict_mode", False)),
-            allowed_memory_categories=memory_policy.get("allowed_categories", []),
+            persona_id=request.persona_id,
+            persona_prompt_override=request.system_prompt_override,
+            username=user.username,
+            is_admin=(user.role == "admin"),
         )
         ensure_session_owner(request.session_id, user.username)
         if bool(memory_policy.get("auto_capture_enabled", True)):

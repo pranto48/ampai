@@ -48,11 +48,11 @@ function closeModal(id) { document.getElementById(id)?.classList.remove('open');
 // ── Navigation ─────────────────────────────────────
 // Two top-level pages: #page-login and #page-shell.
 // Sub-pages live inside #page-shell as .subpage divs.
-const SUBPAGES = ['chat','memory','memory-inbox','tasks','notes','analytics','network','models','settings','admin'];
+const SUBPAGES = ['chat','memory','tasks','notes','analytics','network','personas','models','settings','admin'];
 const PAGE_TITLES = {
   chat:'Chat', memory:'Memory Explorer', 'memory-inbox':'Memory Inbox', tasks:'Task Manager',
   notes:'Notes', analytics:'Analytics', network:'Network Monitor',
-  models:'AI Models', settings:'Settings', admin:'Admin Panel'
+  personas:'Personas', models:'AI Models', settings:'Settings', admin:'Admin Panel'
 };
 
 function navigate(page) {
@@ -111,6 +111,7 @@ function _onPageEnter(page) {
   if (page === 'notes')     notesLoad();
   if (page === 'analytics') analyticsLoad();
   if (page === 'network')   networkLoad();
+  if (page === 'personas')  personasLoad();
   if (page === 'admin')     adminInit();
   if (page === 'models')    modelsLoad();
   if (page === 'settings')  settingsLoad();
@@ -301,6 +302,9 @@ function _shellHTML() {
         <button class="nav-item" data-page="models">
           <span class="icon">🤖</span><span class="sidebar-label">AI Models</span>
         </button>
+        <button class="nav-item" data-page="personas">
+          <span class="icon">🧩</span><span class="sidebar-label">Personas</span>
+        </button>
         <button class="nav-item" data-page="settings">
           <span class="icon">⚙️</span><span class="sidebar-label">Settings</span>
         </button>
@@ -357,6 +361,7 @@ function _shellHTML() {
       <div id="sp-notes"    class="subpage hidden" style="display:flex;flex:1;min-height:0;height:calc(100vh - 57px)">${buildNotesPage()}</div>
       <div id="sp-analytics" class="subpage hidden page-content">${buildAnalyticsPage()}</div>
       <div id="sp-network"  class="subpage hidden page-content">${buildNetworkPage()}</div>
+      <div id="sp-personas" class="subpage hidden page-content">${buildPersonasPage()}</div>
       <div id="sp-models"   class="subpage hidden page-content">${buildModelsPage()}</div>
       <div id="sp-settings" class="subpage hidden page-content">${buildSettingsPage()}</div>
       <div id="sp-admin"    class="subpage hidden page-content">${buildAdminPage()}</div>

@@ -39,6 +39,11 @@ function buildChatPage() {
         <option value="anythingllm">🏠 AnythingLLM</option>
         <option value="openrouter">🔀 OpenRouter</option>
       </select>
+      <select id="persona-select" title="Persona"
+        style="padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.25);
+        border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.82rem;outline:none;min-width:170px">
+        <option value="">🧩 Default Persona</option>
+      </select>
       <select id="memory-mode-select" title="Memory mode"
         style="padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.25);
         border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.82rem;outline:none">
@@ -154,48 +159,49 @@ function buildMemoryPage() {
 </div>`;
 }
 
-function buildMemoryInboxPage() {
+function buildPersonasPage() {
   return `
-<div class="section-head" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
-  <h2 style="font-size:1.15rem;font-weight:700">📥 Memory Inbox</h2>
-  <button id="mi-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+  <h2 style="font-size:1.15rem;font-weight:700">🧩 Personas</h2>
+  <button id="personas-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
 </div>
 
-<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;
-  background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:20px">
-  <div style="flex:1;min-width:160px">
-    <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:6px;font-weight:500">Status</label>
-    <select id="mi-status" class="input">
-      <option value="pending">Pending</option>
-      <option value="approved">Approved</option>
-      <option value="rejected">Rejected</option>
-      <option value="">All</option>
-    </select>
+<div class="card" style="margin-bottom:16px">
+  <div class="card-title">Create Persona</div>
+  <div class="grid-2" style="gap:12px">
+    <div>
+      <label class="lbl">Name</label>
+      <input id="persona-name" class="input" placeholder="Helpful Technical Mentor"/>
+    </div>
+    <div>
+      <label class="lbl">Tags (comma separated)</label>
+      <input id="persona-tags" class="input" placeholder="coding, concise"/>
+    </div>
   </div>
-  <div style="flex:1;min-width:180px">
-    <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:6px;font-weight:500">Session</label>
-    <input id="mi-session" class="input" placeholder="Filter by session id"/>
+  <div style="margin-top:10px">
+    <label class="lbl">System Prompt</label>
+    <textarea id="persona-system-prompt" class="input" rows="5" placeholder="You are a concise assistant..."></textarea>
   </div>
-  <div style="flex:1;min-width:150px">
-    <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:6px;font-weight:500">From</label>
-    <input id="mi-date-from" type="date" class="input"/>
+  <div style="display:flex;gap:12px;margin-top:10px;align-items:center;flex-wrap:wrap">
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      <input type="checkbox" id="persona-is-default" style="accent-color:var(--accent)"/>
+      <span style="font-size:.86rem">Set as default</span>
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      <input type="checkbox" id="persona-is-global" style="accent-color:var(--accent)"/>
+      <span style="font-size:.86rem">Global (admin only)</span>
+    </label>
+    <button id="create-persona-btn" class="btn btn-primary btn-sm">Create Persona</button>
+    <span id="persona-create-status" style="font-size:.82rem;color:var(--muted)"></span>
   </div>
-  <div style="flex:1;min-width:150px">
-    <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:6px;font-weight:500">To</label>
-    <input id="mi-date-to" type="date" class="input"/>
-  </div>
-  <button id="mi-apply" class="btn btn-primary">Apply</button>
 </div>
 
-<div class="card" style="overflow-x:auto">
+<div class="card">
+  <div class="card-title">Saved Personas</div>
   <table class="tbl">
-    <thead>
-      <tr>
-        <th>ID</th><th>Session</th><th>Candidate</th><th>Confidence</th><th>Status</th><th>Created</th><th>Actions</th>
-      </tr>
-    </thead>
-    <tbody id="mi-body">
-      <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:32px">Loading…</td></tr>
+    <thead><tr><th>Name</th><th>Scope</th><th>Tags</th><th>Default</th><th>Prompt</th><th>Actions</th></tr></thead>
+    <tbody id="personas-body">
+      <tr><td colspan="6" style="text-align:center;padding:22px;color:var(--muted)">Loading…</td></tr>
     </tbody>
   </table>
 </div>`;

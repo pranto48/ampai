@@ -15,7 +15,15 @@ from logging_utils import get_logger
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_models import ChatOllama
-from database import get_config, get_core_memories, add_core_memory, create_task, get_sql_chat_history, redact_pii_text
+from database import (
+    get_config,
+    get_core_memories,
+    add_core_memory,
+    create_task,
+    get_sql_chat_history,
+    redact_pii_text,
+    get_persona_for_user,
+)
 
 from langchain_core.chat_history import BaseChatMessageHistory
 
@@ -135,10 +143,10 @@ def chat_with_agent(
     memory_mode: str = "full",
     use_web_search: bool = False,
     attachments: List[Dict] = None,
-    persist_memory: bool = True,
-    require_memory_approval: bool = False,
-    pii_strict_mode: bool = False,
-    allowed_memory_categories: List[str] = None,
+    persona_id: int = None,
+    persona_prompt_override: str = None,
+    username: str = "",
+    is_admin: bool = False,
 ):
     if attachments is None:
         attachments = []
@@ -207,6 +215,16 @@ def chat_with_agent(
         f"{web_context}"
         f"{file_context}"
     )
+    persona_prompt = (persona_prompt_override or "").strip()
+    if not persona_prompt and persona_id:
+        persona = get_persona_for_user(persona_id=persona_id, username=username, is_admin=is_admin)
+        if persona:
+            persona_prompt = (persona.get("system_prompt") or "").strip()
+    if persona_prompt:
+        agent_directives = (
+            f"PERSONA SYSTEM PROMPT (highest priority):\n{persona_prompt}\n\n"
+            + agent_directives
+        )
 
     if memory_mode == "indexed":
         indexer = MemoryIndexer(model_type)
