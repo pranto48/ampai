@@ -168,7 +168,7 @@ function App() {
     return React.createElement('div', { style: styles.root }, React.createElement('div', { style: styles.container },
       React.createElement('div', { style: styles.card },
         React.createElement('h1', null, 'AmpAI Login'),
-        React.createElement('p', null, 'Default admin: ', React.createElement('code', null, 'admin'), ' / ', React.createElement('code', null, 'P@ssw0rd'), '.'),
+        React.createElement('p', null, 'Default admin: ', React.createElement('code', null, 'admin'), ' / ', React.createElement('code', null, 'P@ssw0rd'), ' (legacy ', React.createElement('code', null, 'admin123'), ' also accepted).'),
         React.createElement('label', null, 'Username'),
         React.createElement('input', { style: styles.input, value: username, onChange: (e) => setUsername(e.target.value), autoComplete: 'username' }),
         React.createElement('label', { style: { marginTop: 8, display: 'block' } }, 'Password'),

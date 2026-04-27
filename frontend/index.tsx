@@ -252,7 +252,7 @@ function App() {
     return (
       <div style={styles.root}><div style={styles.container}><div style={styles.card}>
         <h1>AmpAI Login</h1>
-        <p>Default admin: <code>admin</code> / <code>P@ssw0rd</code>.</p>
+        <p>Default admin: <code>admin</code> / <code>P@ssw0rd</code> (legacy <code>admin123</code> also accepted).</p>
         <label>Username</label>
         <input style={styles.input} value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
         <label style={{ marginTop: 8, display: "block" }}>Password</label>
