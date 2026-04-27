@@ -67,6 +67,7 @@ function buildChatPage() {
         </div>
       </div>
     </div>
+    <div id="suggested-actions-panel" style="display:none;padding:10px 18px;border-top:1px solid var(--border);background:var(--bg-2)"></div>
 
     <!-- Input -->
     <div style="padding:14px 18px;border-top:1px solid var(--border);
@@ -462,6 +463,7 @@ function buildMemoryModal() {
       <button class="modal-close" data-close-modal="modal-chat-log">✕</button>
     </div>
     <div id="modal-chat-body" style="display:flex;flex-direction:column;gap:10px;max-height:60vh;overflow-y:auto"></div>
+    <div id="modal-task-suggestions" style="margin-top:12px"></div>
     <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
       <button id="modal-export-btn" class="btn btn-secondary btn-sm">⬇ Export JSON</button>
       <button class="btn btn-ghost btn-sm" data-close-modal="modal-chat-log">Close</button>
