@@ -50,6 +50,9 @@ function buildChatPage() {
         font-size:.8rem;color:var(--muted);cursor:pointer">
         <input type="checkbox" id="web-search-toggle" style="accent-color:var(--accent)"/> 🌐
       </label>
+      <span id="memory-policy-badge" style="font-size:.72rem;color:var(--muted);padding:4px 8px;border:1px solid var(--border);border-radius:999px">
+        Memory: Loading…
+      </span>
     </div>
 
     <!-- Messages -->
@@ -299,6 +302,31 @@ function buildSettingsPage() {
         </select>
       </div>
       <button id="save-notif-btn" class="btn btn-primary btn-sm">Save Notifications</button>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">🧠 Memory Policy</div>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px">
+        <input type="checkbox" id="memory-auto-capture" style="accent-color:var(--accent)"/>
+        <span style="font-size:.875rem">Auto-capture conversation memory</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px">
+        <input type="checkbox" id="memory-require-approval" style="accent-color:var(--accent)"/>
+        <span style="font-size:.875rem">Require approval before memory writes</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px">
+        <input type="checkbox" id="memory-pii-strict" style="accent-color:var(--accent)"/>
+        <span style="font-size:.875rem">Strict PII redaction</span>
+      </label>
+      <div style="margin-bottom:12px">
+        <label class="lbl">Retention (days)</label>
+        <input id="memory-retention-days" type="number" min="1" max="3650" class="input" value="365"/>
+      </div>
+      <div style="margin-bottom:14px">
+        <label class="lbl">Allowed categories (comma-separated)</label>
+        <input id="memory-allowed-categories" class="input" placeholder="preferences,projects,tasks"/>
+      </div>
+      <button id="save-memory-policy-btn" class="btn btn-primary btn-sm">Save Memory Policy</button>
     </div>
 
     <div class="card">
