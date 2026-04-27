@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 from auth import bootstrap_default_admin
 from agent import chat_with_agent, get_llm, get_redis_history
 from database import (
+    add_core_memory,
     add_network_target,
     create_task,
     delete_core_memory,
@@ -41,6 +42,7 @@ from database import (
     get_all_sessions,
     get_config,
     get_core_memories,
+    get_memory_candidate_by_id,
     get_network_targets,
     get_duplicate_message_counts,
     get_user,
@@ -83,12 +85,14 @@ from database import (
     set_session_pinned,
     touch_session,
     touch_session_updated_at,
+    update_memory_candidate_status,
     update_task,
     log_audit_event,
     apply_retention_policy,
     upsert_session_insight,
     get_session_insight,
     list_audit_events,
+    list_memory_candidates,
     get_effective_notification_preferences,
     upsert_user_notification_preferences,
     enqueue_pending_reply_notification,
@@ -191,6 +195,11 @@ class MemoryExplorerQuery(BaseModel):
     date_to: Optional[str] = ""
     limit: int = 50
     offset: int = 0
+
+
+class MemoryInboxUpdateRequest(BaseModel):
+    status: str
+    edited_text: Optional[str] = None
 
 
 class AdminPasswordChangeRequest(BaseModel):
@@ -997,6 +1006,13 @@ def get_sessions(
 def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _classify_tier(updated_at_raw: Optional[str]) -> str:
@@ -1014,13 +1030,6 @@ def _classify_tier(updated_at_raw: Optional[str]) -> str:
     if age_days <= warm_days:
         return "warm"
     return "cold"
-    raw = value.strip()
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except Exception:
-        return None
 
 
 @app.post("/api/memory/explorer")
@@ -1097,6 +1106,79 @@ def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = De
         "has_more": (offset + limit) < total,
         "categories": category_counts,
     }
+
+
+@app.get("/api/memory/inbox")
+def memory_inbox_list(
+    status: str = Query(default="pending"),
+    session_id: str = Query(default=""),
+    date_from: str = Query(default=""),
+    date_to: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    user=Depends(require_authenticated_user),
+):
+    records = list_memory_candidates(
+        username=user.username,
+        status=(status or "").strip().lower(),
+        limit=limit,
+        offset=offset,
+    )
+    filtered = records
+    cleaned_session = (session_id or "").strip()
+    if cleaned_session:
+        filtered = [row for row in filtered if (row.get("session_id") or "") == cleaned_session]
+
+    from_dt = _parse_iso_dt(date_from)
+    to_dt = _parse_iso_dt(date_to)
+    if from_dt:
+        filtered = [row for row in filtered if row.get("created_at") and row["created_at"] >= from_dt]
+    if to_dt:
+        filtered = [row for row in filtered if row.get("created_at") and row["created_at"] <= to_dt]
+
+    return {"candidates": filtered, "status": status, "offset": offset, "limit": limit}
+
+
+@app.patch("/api/memory/inbox/{candidate_id}")
+def memory_inbox_update(candidate_id: int, request: MemoryInboxUpdateRequest, user=Depends(require_authenticated_user)):
+    existing = get_memory_candidate_by_id(candidate_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Memory candidate not found")
+    if (existing.get("username") or "") != user.username:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    status_value = (request.status or "").strip().lower()
+    if status_value == "approved":
+        approved_text = (request.edited_text or existing.get("candidate_text") or "").strip()
+        if not approved_text:
+            raise HTTPException(status_code=400, detail="Cannot approve empty candidate")
+        if not add_core_memory(approved_text):
+            raise HTTPException(status_code=500, detail="Failed writing approved memory")
+        updated = update_memory_candidate_status(candidate_id, status_value, approved_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        log_audit_event(
+            username=user.username,
+            action="memory.review.approve",
+            session_id=updated.get("session_id"),
+            details=f"id={candidate_id}",
+        )
+    elif status_value == "rejected":
+        updated = update_memory_candidate_status(candidate_id, status_value, request.edited_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        log_audit_event(
+            username=user.username,
+            action="memory.review.reject",
+            session_id=updated.get("session_id"),
+            details=f"id={candidate_id}",
+        )
+    else:
+        updated = update_memory_candidate_status(candidate_id, status_value, request.edited_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+
+    return {"candidate": updated}
 
 
 @app.get("/api/history/{session_id}")

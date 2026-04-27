@@ -53,6 +53,21 @@ core_memories = Table(
     Column('fact', String)
 )
 
+memory_candidates = Table(
+    "memory_candidates",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("session_id", String, nullable=True),
+    Column("candidate_text", String, nullable=False),
+    Column("source_message_id", String, nullable=True),
+    Column("source_offset", Integer, nullable=True),
+    Column("confidence", String, nullable=True),
+    Column("status", String, nullable=False, default="pending"),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("reviewed_at", DateTime(timezone=True), nullable=True),
+)
+
 network_targets = Table(
     'network_targets', metadata,
     Column('id', Integer, primary_key=True, autoincrement=True),
@@ -1939,9 +1954,118 @@ def ensure_enterprise_tables() -> None:
                     """
                 )
             )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_candidates (
+                        id BIGSERIAL PRIMARY KEY,
+                        username VARCHAR NOT NULL,
+                        session_id VARCHAR,
+                        candidate_text TEXT NOT NULL,
+                        source_message_id VARCHAR,
+                        source_offset INTEGER,
+                        confidence VARCHAR,
+                        status VARCHAR NOT NULL DEFAULT 'pending',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        reviewed_at TIMESTAMPTZ
+                    )
+                    """
+                )
+            )
             conn.commit()
     except Exception as exc:
         logger.exception("Error ensuring enterprise tables", exc_info=exc)
+
+
+def list_memory_candidates(
+    username: str,
+    status: Optional[str] = "pending",
+    limit: int = 50,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    safe_limit = max(1, min(int(limit), 500))
+    safe_offset = max(0, int(offset))
+    cleaned_status = (status or "").strip().lower()
+    try:
+        with engine.connect() as conn:
+            where_sql = "WHERE username = :username"
+            params: Dict[str, Any] = {"username": username, "limit": safe_limit, "offset": safe_offset}
+            if cleaned_status:
+                where_sql += " AND status = :status"
+                params["status"] = cleaned_status
+            rows = conn.execute(
+                text(
+                    f"""
+                    SELECT id, username, session_id, candidate_text, source_message_id, source_offset,
+                           confidence, status, created_at, reviewed_at
+                    FROM memory_candidates
+                    {where_sql}
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                params,
+            ).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as exc:
+        logger.exception("Error listing memory candidates", exc_info=exc)
+        return []
+
+
+def update_memory_candidate_status(id: int, status: str, edited_text: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    clean_status = (status or "").strip().lower()
+    if clean_status not in {"pending", "approved", "rejected"}:
+        return None
+    try:
+        with engine.connect() as conn:
+            params: Dict[str, Any] = {"id": int(id), "status": clean_status}
+            set_sql = "status = :status, reviewed_at = NOW()"
+            if edited_text is not None and edited_text.strip():
+                params["candidate_text"] = edited_text.strip()
+                set_sql += ", candidate_text = :candidate_text"
+            row = conn.execute(
+                text(
+                    f"""
+                    UPDATE memory_candidates
+                    SET {set_sql}
+                    WHERE id = :id
+                    RETURNING id, username, session_id, candidate_text, source_message_id, source_offset,
+                              confidence, status, created_at, reviewed_at
+                    """
+                ),
+                params,
+            ).mappings().first()
+            conn.commit()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error updating memory candidate status", exc_info=exc)
+        return None
+
+
+def get_memory_candidate_by_id(id: int) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, username, session_id, candidate_text, source_message_id, source_offset,
+                           confidence, status, created_at, reviewed_at
+                    FROM memory_candidates
+                    WHERE id = :id
+                    """
+                ),
+                {"id": int(id)},
+            ).mappings().first()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error getting memory candidate", exc_info=exc)
+        return None
 
 
 def log_audit_event(username: str, action: str, session_id: Optional[str] = None, category: Optional[str] = None, details: Optional[str] = None) -> None:
