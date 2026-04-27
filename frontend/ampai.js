@@ -50,9 +50,9 @@ function closeModal(id) { document.getElementById(id)?.classList.remove('open');
 // Sub-pages live inside #page-shell as .subpage divs.
 const SUBPAGES = ['chat','memory','tasks','notes','analytics','network','personas','models','settings','admin'];
 const PAGE_TITLES = {
-  chat:'Chat', memory:'Memory Explorer', 'memory-inbox':'Memory Inbox', tasks:'Task Manager',
-  notes:'Notes', analytics:'Analytics', network:'Network Monitor',
-  personas:'Personas', models:'AI Models', settings:'Settings', admin:'Admin Panel'
+  chat:'Chat', memory:'Memory Explorer', tasks:'Task Manager',
+  notes:'Notes', analytics:'Memory Analytics', network:'Network Monitor',
+  models:'AI Models', settings:'Settings', admin:'Admin Panel'
 };
 
 function navigate(page) {

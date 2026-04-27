@@ -193,51 +193,71 @@ function buildMemoryPage() {
 </div>`;
 }
 
-function buildPersonasPage() {
+// ── Analytics inner HTML ───────────────────────────
+function buildAnalyticsPage() {
   return `
-<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
-  <h2 style="font-size:1.15rem;font-weight:700">🧩 Personas</h2>
-  <button id="personas-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
-</div>
-
-<div class="card" style="margin-bottom:16px">
-  <div class="card-title">Create Persona</div>
-  <div class="grid-2" style="gap:12px">
-    <div>
-      <label class="lbl">Name</label>
-      <input id="persona-name" class="input" placeholder="Helpful Technical Mentor"/>
-    </div>
-    <div>
-      <label class="lbl">Tags (comma separated)</label>
-      <input id="persona-tags" class="input" placeholder="coding, concise"/>
-    </div>
-  </div>
-  <div style="margin-top:10px">
-    <label class="lbl">System Prompt</label>
-    <textarea id="persona-system-prompt" class="input" rows="5" placeholder="You are a concise assistant..."></textarea>
-  </div>
-  <div style="display:flex;gap:12px;margin-top:10px;align-items:center;flex-wrap:wrap">
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-      <input type="checkbox" id="persona-is-default" style="accent-color:var(--accent)"/>
-      <span style="font-size:.86rem">Set as default</span>
-    </label>
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-      <input type="checkbox" id="persona-is-global" style="accent-color:var(--accent)"/>
-      <span style="font-size:.86rem">Global (admin only)</span>
-    </label>
-    <button id="create-persona-btn" class="btn btn-primary btn-sm">Create Persona</button>
-    <span id="persona-create-status" style="font-size:.82rem;color:var(--muted)"></span>
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px">
+  <h2 style="font-size:1.15rem;font-weight:700">📊 Memory Analytics</h2>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button id="analytics-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+    <button id="analytics-export-csv-btn" class="btn btn-secondary btn-sm">⬇ Export CSV</button>
   </div>
 </div>
 
-<div class="card">
-  <div class="card-title">Saved Personas</div>
-  <table class="tbl">
-    <thead><tr><th>Name</th><th>Scope</th><th>Tags</th><th>Default</th><th>Prompt</th><th>Actions</th></tr></thead>
-    <tbody id="personas-body">
-      <tr><td colspan="6" style="text-align:center;padding:22px;color:var(--muted)">Loading…</td></tr>
-    </tbody>
-  </table>
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:18px">
+  <div style="min-width:140px">
+    <label class="lbl">From</label>
+    <input id="analytics-date-from" type="date" class="input"/>
+  </div>
+  <div style="min-width:140px">
+    <label class="lbl">To</label>
+    <input id="analytics-date-to" type="date" class="input"/>
+  </div>
+  <div style="min-width:130px">
+    <label class="lbl">Scope</label>
+    <select id="analytics-owner-scope" class="input">
+      <option value="mine">Mine</option>
+      <option value="shared">Shared</option>
+      <option value="all">All</option>
+    </select>
+  </div>
+  <div style="min-width:120px">
+    <label class="lbl">Stale days</label>
+    <input id="analytics-stale-days" type="number" min="1" value="30" class="input"/>
+  </div>
+  <button id="analytics-apply-btn" class="btn btn-primary">Apply</button>
+</div>
+
+<div class="grid-4" style="gap:14px;margin-bottom:18px">
+  <div class="stat-card"><div id="kpi-memory-writes" class="stat-value">—</div><div class="stat-label">Memory Writes</div></div>
+  <div class="stat-card"><div id="kpi-retrieval-hits" class="stat-value">—</div><div class="stat-label">Retrieval Hits</div></div>
+  <div class="stat-card"><div id="kpi-stale-count" class="stat-value">—</div><div class="stat-label">Stale Memories</div></div>
+  <div class="stat-card"><div id="kpi-top-category" class="stat-value">—</div><div class="stat-label">Top Category</div></div>
+</div>
+
+<div class="grid-2" style="gap:16px;margin-bottom:18px">
+  <div class="card">
+    <div class="card-title">Memory Writes per Day</div>
+    <div id="analytics-writes-trend"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Retrieval Hits per Day</div>
+    <div id="analytics-retrieval-trend"></div>
+  </div>
+</div>
+
+<div class="grid-2" style="gap:16px">
+  <div class="card">
+    <div class="card-title">Top Categories</div>
+    <div id="analytics-top-categories"></div>
+  </div>
+  <div class="card" style="overflow:auto">
+    <div class="card-title">Stale Memories</div>
+    <table class="tbl">
+      <thead><tr><th>Session</th><th>Category</th><th>Owner</th><th>Updated</th><th>Last Retrieval</th></tr></thead>
+      <tbody id="analytics-stale-body"><tr><td colspan="5" style="text-align:center;color:var(--muted)">Loading…</td></tr></tbody>
+    </table>
+  </div>
 </div>`;
 }
 
