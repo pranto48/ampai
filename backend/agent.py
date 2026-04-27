@@ -131,6 +131,9 @@ def chat_with_agent(
     api_key: str = None,
     model_name: str = None,
     memory_mode: str = "full",
+    memory_top_k: int = 5,
+    recency_bias: float = 0.0,
+    category_filter: str = "",
     use_web_search: bool = False,
     attachments: List[Dict] = None,
 ):
@@ -204,12 +207,14 @@ def chat_with_agent(
 
     if memory_mode == "indexed":
         indexer = MemoryIndexer(model_type)
-        relevant_memories = indexer.search_facts(message, k=5)
+        k = max(1, min(int(memory_top_k or 5), 20))
+        relevant_memories = indexer.search_facts(message, k=k)
         context_str = "\n---\n".join(relevant_memories) if relevant_memories else "No previous relevant facts found."
         system_msg = (
             agent_directives +
             "FAST INDEXED MEMORY MODE: Instead of full history, here are the most relevant distilled facts retrieved for this query:\n"
             f"{context_str}\n\n"
+            f"Retrieval tuning: top_k={k}, recency_bias={recency_bias}, category_filter={category_filter or 'none'}.\n"
             "Use these to provide highly contextual answers."
         )
         prompt = ChatPromptTemplate.from_messages([

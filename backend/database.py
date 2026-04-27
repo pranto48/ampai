@@ -239,6 +239,40 @@ def _load_fernet_keys() -> List[Fernet]:
     return fernets
 
 
+def encrypt_config_value(value: Optional[str]) -> str:
+    """Encrypt app config values when CONFIG_ENCRYPTION_KEY is configured."""
+    plain = "" if value is None else str(value)
+    fernets = _load_fernet_keys()
+    if not fernets:
+        return plain
+    try:
+        token = fernets[0].encrypt(plain.encode("utf-8")).decode("utf-8")
+        return f"{ENCRYPTED_PREFIX}{token}"
+    except Exception as e:
+        logger.warning(f"Failed encrypting config value: {e}")
+        return plain
+
+
+def decrypt_config_value(value: Optional[str]) -> str:
+    """Decrypt config value if it is stored with the enc:: prefix."""
+    if value is None:
+        return ""
+    raw = str(value)
+    if not raw.startswith(ENCRYPTED_PREFIX):
+        return raw
+    token = raw[len(ENCRYPTED_PREFIX):]
+    for fernet in _load_fernet_keys():
+        try:
+            return fernet.decrypt(token.encode("utf-8")).decode("utf-8")
+        except InvalidToken:
+            continue
+        except Exception as e:
+            logger.warning(f"Failed decrypting config value: {e}")
+            break
+    logger.warning("Could not decrypt config value; returning empty string")
+    return ""
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -491,7 +525,7 @@ def get_config(key: str, default=None):
         with engine.connect() as conn:
             stmt = select(app_configs.c.config_value).where(app_configs.c.config_key == key)
             result = conn.execute(stmt).first()
-            return result[0] if result else default
+            return decrypt_config_value(result[0]) if result else default
     except Exception as e:
         logger.warning(f"Error getting config {key}: {e}")
         return default
@@ -520,7 +554,7 @@ def get_all_configs():
             if not inspect(engine).has_table("app_configs"):
                 return {}
             stmt = select(app_configs.c.config_key, app_configs.c.config_value)
-            return {row[0]: row[1] for row in conn.execute(stmt)}
+            return {row[0]: decrypt_config_value(row[1]) for row in conn.execute(stmt)}
     except Exception as e:
         logger.warning(f"Error getting all configs: {e}")
         return {}

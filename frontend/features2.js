@@ -2,6 +2,147 @@
    AmpAI — Logic for Tasks, Notes, Analytics, Network
    ===================================================== */
 
+let _memoryInboxBound = false;
+let _personasBound = false;
+
+async function memoryInboxLoad() {
+  await _fetchMemoryInbox();
+  if (_memoryInboxBound) return;
+  _memoryInboxBound = true;
+  document.getElementById('mi-refresh-btn')?.addEventListener('click', _fetchMemoryInbox);
+  document.getElementById('mi-status-filter')?.addEventListener('change', _fetchMemoryInbox);
+  document.getElementById('mi-capture-btn')?.addEventListener('click', _captureMemoryInboxItem);
+}
+
+async function _fetchMemoryInbox() {
+  const status = document.getElementById('mi-status-filter')?.value || 'pending';
+  const { ok, data } = await apiJSON(`/api/memory/inbox?status=${encodeURIComponent(status)}`);
+  const tbody = document.getElementById('mi-body');
+  if (!tbody) return;
+  if (!ok) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--red);padding:20px">Failed to load inbox</td></tr>';
+    return;
+  }
+  const items = data.items || [];
+  tbody.innerHTML = items.length ? items.map(i => `
+    <tr>
+      <td style="max-width:340px;font-size:.82rem">${_esc(i.edited_text || i.candidate_text || '-')}</td>
+      <td><code class="text-xs">${_esc(i.session_id||'-')}</code></td>
+      <td>${Number(i.confidence||0).toFixed(2)}</td>
+      <td><span class="badge ${i.status==='approved'?'badge-green':i.status==='rejected'?'badge-red':'badge-yellow'}">${_esc(i.status||'pending')}</span></td>
+      <td class="text-xs text-muted">${_fmtRelative(i.created_at)}</td>
+      <td style="display:flex;gap:6px">
+        <button class="btn btn-secondary btn-sm" onclick="_reviewMemoryInbox('${i.id}','approved')">Approve</button>
+        <button class="btn btn-secondary btn-sm" onclick="_reviewMemoryInbox('${i.id}','rejected')">Reject</button>
+      </td>
+    </tr>
+  `).join('') : '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No candidates</td></tr>';
+}
+
+async function _captureMemoryInboxItem() {
+  const text = document.getElementById('mi-capture-text')?.value.trim() || '';
+  if (!text) return toast('Enter a memory candidate first', 'info');
+  const { ok } = await apiJSON('/api/memory/inbox/capture', { method: 'POST', body: JSON.stringify({ text, session_id: State.sessionId }) });
+  if (ok) {
+    document.getElementById('mi-capture-text').value = '';
+    toast('Memory candidate captured', 'success');
+    _fetchMemoryInbox();
+  } else {
+    toast('Failed to capture candidate', 'error');
+  }
+}
+
+async function _reviewMemoryInbox(id, status) {
+  const edited = prompt(`Optional edit before marking as ${status}:`) || '';
+  const { ok } = await apiJSON(`/api/memory/inbox/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status, edited_text: edited }),
+  });
+  if (ok) {
+    toast(`Marked ${status}`, 'success');
+    _fetchMemoryInbox();
+  } else {
+    toast('Failed to update candidate', 'error');
+  }
+}
+
+async function personasLoad() {
+  await _fetchPersonas();
+  if (_personasBound) return;
+  _personasBound = true;
+  document.getElementById('persona-new-btn')?.addEventListener('click', () => _openPersonaModal());
+  document.getElementById('persona-save-btn')?.addEventListener('click', _savePersona);
+}
+
+async function _fetchPersonas() {
+  const { ok, data } = await apiJSON('/api/personas');
+  const list = document.getElementById('persona-list');
+  if (!list) return;
+  if (!ok) {
+    list.innerHTML = '<div class="card" style="color:var(--red)">Failed to load personas.</div>';
+    return;
+  }
+  const personas = data.personas || [];
+  list.innerHTML = personas.length ? personas.map(p => `
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <strong>${_esc(p.name || 'Unnamed')}</strong>
+        ${p.is_default ? '<span class="badge badge-green">Default</span>' : ''}
+      </div>
+      <div style="font-size:.78rem;color:var(--muted);margin-bottom:8px">${_esc((p.tags||[]).join(', ') || 'No tags')}</div>
+      <div style="font-size:.82rem;line-height:1.5;max-height:84px;overflow:hidden">${_esc(p.system_prompt || '').slice(0,260)}</div>
+      <div style="display:flex;gap:6px;margin-top:10px">
+        <button class="btn btn-secondary btn-sm" onclick="_openPersonaModal(${JSON.stringify(p).replace(/\"/g,'&quot;')})">Edit</button>
+        <button class="btn btn-danger btn-sm" onclick="_deletePersona('${p.id}')">Delete</button>
+      </div>
+    </div>
+  `).join('') : '<div class="card" style="color:var(--muted)">No personas yet.</div>';
+}
+
+function _openPersonaModal(persona = null) {
+  document.getElementById('persona-modal-title').textContent = persona ? 'Edit Persona' : 'New Persona';
+  document.getElementById('persona-edit-id').value = persona?.id || '';
+  document.getElementById('persona-name').value = persona?.name || '';
+  document.getElementById('persona-tags').value = (persona?.tags || []).join(', ');
+  document.getElementById('persona-prompt').value = persona?.system_prompt || '';
+  document.getElementById('persona-default').checked = !!persona?.is_default;
+  openModal('modal-persona');
+}
+
+async function _savePersona() {
+  const id = document.getElementById('persona-edit-id').value;
+  const payload = {
+    name: document.getElementById('persona-name').value.trim(),
+    system_prompt: document.getElementById('persona-prompt').value.trim(),
+    tags: (document.getElementById('persona-tags').value || '').split(',').map(s => s.trim()).filter(Boolean),
+    is_default: !!document.getElementById('persona-default').checked,
+  };
+  if (!payload.name || !payload.system_prompt) return toast('Name and prompt are required', 'error');
+  const { ok } = await apiJSON(id ? `/api/personas/${encodeURIComponent(id)}` : '/api/personas', {
+    method: id ? 'PATCH' : 'POST',
+    body: JSON.stringify(payload),
+  });
+  if (ok) {
+    closeModal('modal-persona');
+    toast('Persona saved', 'success');
+    _fetchPersonas();
+    if (typeof chatInit === 'function') chatInit();
+  } else {
+    toast('Failed to save persona', 'error');
+  }
+}
+
+async function _deletePersona(id) {
+  if (!confirm('Delete this persona?')) return;
+  const { ok } = await apiJSON(`/api/personas/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (ok) {
+    toast('Persona deleted', 'success');
+    _fetchPersonas();
+  } else {
+    toast('Failed to delete persona', 'error');
+  }
+}
+
 // ═══════════════════════════════════════════════════
 // TASKS
 // ═══════════════════════════════════════════════════
@@ -294,12 +435,13 @@ async function analyticsLoad() {
 }
 
 async function _fetchAnalytics() {
+  const days = Number(document.getElementById('analytics-range')?.value || 30);
   // Sessions & memories
   const [s1, s2, s3, s4] = await Promise.all([
     apiJSON('/api/sessions?limit=200'),
     apiJSON('/api/admin/core-memories').catch(() => ({ ok: false, data: {} })),
     apiJSON('/api/tasks').catch(() => ({ ok: false, data: {} })),
-    apiJSON('/api/analytics/summary').catch(() => ({ ok: false, data: {} })),
+    apiJSON(`/api/memory/analytics?days=${days}`).catch(() => ({ ok: false, data: {} })),
   ]);
 
   const sessions = s1.data?.sessions || [];
@@ -308,10 +450,10 @@ async function _fetchAnalytics() {
   const summary  = s4.data || {};
 
   // KPIs
-  _setKPI('kpi-messages', summary.total_messages ?? sessions.length * 8);
-  _setKPI('kpi-sessions', s1.data?.total ?? sessions.length);
-  _setKPI('kpi-memories', memories.length);
-  _setKPI('kpi-tasks',    tasks.filter(t => t.status === 'done').length);
+  _setKPI('kpi-messages', summary.memory_candidates_approved ?? sessions.length * 8);
+  _setKPI('kpi-sessions', summary.sessions_considered ?? (s1.data?.total ?? sessions.length));
+  _setKPI('kpi-memories', summary.memory_candidates_pending ?? memories.length);
+  _setKPI('kpi-tasks',    summary.task_suggestions_converted ?? tasks.filter(t => t.status === 'done').length);
 
   // Category chart
   const cats = {};
