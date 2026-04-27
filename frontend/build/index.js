@@ -19,6 +19,16 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [ok, setOk] = useState('');
+  const [chatInput, setChatInput] = useState('');
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [sessionId] = useState(() => {
+    const existing = localStorage.getItem('ampai_session_id');
+    if (existing) return existing;
+    const generated = `sess_${Date.now()}`;
+    localStorage.setItem('ampai_session_id', generated);
+    return generated;
+  });
   const token = localStorage.getItem('ampai_token') || '';
   const role = localStorage.getItem('ampai_role') || 'user';
   const loggedIn = !!token;
@@ -57,6 +67,43 @@ function App() {
     } finally { setBusy(false); }
   }
 
+  async function onSendChat() {
+    const message = chatInput.trim();
+    if (!message || chatBusy) return;
+    setChatBusy(true);
+    setError('');
+    setChatMessages((prev) => [...prev, { role: 'user', text: message }]);
+    setChatInput('');
+
+    try {
+      const token = localStorage.getItem('ampai_token') || '';
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          session_id: sessionId,
+          message,
+          model_type: 'ollama',
+          memory_mode: 'full',
+          use_web_search: false,
+          attachments: [],
+        }),
+      });
+      const raw = await res.text();
+      let data = {};
+      try { data = JSON.parse(raw); } catch { data = { detail: raw }; }
+      if (!res.ok) throw new Error(data.detail || `Chat failed (${res.status})`);
+      const reply = data.response || data.reply || data.message || 'No response.';
+      setChatMessages((prev) => [...prev, { role: 'assistant', text: String(reply) }]);
+    } catch (e) {
+      const msg = e.message || 'Chat failed';
+      setError(msg);
+      setChatMessages((prev) => [...prev, { role: 'assistant', text: `Error: ${msg}` }]);
+    } finally {
+      setChatBusy(false);
+    }
+  }
+
   function onLogout() {
     localStorage.removeItem('ampai_token');
     localStorage.removeItem('ampai_role');
@@ -69,11 +116,26 @@ function App() {
     return React.createElement('div', { style: styles.root },
       React.createElement('div', { style: styles.card },
         React.createElement('h1', null, 'AmpAI Chat'),
-        React.createElement('p', null, `Welcome, ${username || 'user'} (${role}).`),
-        React.createElement('p', null, 'Your login is valid and chat route is active.'),
+        React.createElement('p', null, `Welcome, ${username || 'user'} (${role}). Session: ${sessionId}`),
+        React.createElement('div', { style: { maxHeight: 280, overflowY: 'auto', border: '1px solid #334155', borderRadius: 8, padding: 10, marginBottom: 10 } },
+          chatMessages.length === 0 ? React.createElement('p', { style: { margin: 0 } }, 'Start chatting with your assistant.') : null,
+          ...chatMessages.map((m, i) => React.createElement('p', { key: i, style: { margin: '6px 0' } },
+            React.createElement('strong', null, m.role === 'user' ? 'You' : 'AI', ': '),
+            m.text
+          ))
+        ),
+        React.createElement('input', {
+          style: styles.input,
+          placeholder: 'Type a message...',
+          value: chatInput,
+          onChange: (e) => setChatInput(e.target.value),
+          onKeyDown: (e) => { if (e.key === 'Enter') onSendChat(); },
+        }),
         React.createElement('div', { style: styles.row },
+          React.createElement('button', { style: styles.btnPrimary, onClick: onSendChat, disabled: chatBusy, type: 'button' }, chatBusy ? 'Sending...' : 'Send'),
           React.createElement('button', { style: styles.btnGhost, onClick: onLogout, type: 'button' }, 'Logout')
-        )
+        ),
+        error ? React.createElement('div', { style: styles.error }, error) : null
       )
     );
   }

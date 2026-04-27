@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 
+type ChatMessage = { role: "user" | "assistant"; text: string };
+
 type AuthResponse = {
   token?: string;
   role?: string;
@@ -52,6 +54,16 @@ export default function IndexPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
+  const [chatInput, setChatInput] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [sessionId] = useState(() => {
+    const existing = localStorage.getItem("ampai_session_id");
+    if (existing) return existing;
+    const generated = `sess_${Date.now()}`;
+    localStorage.setItem("ampai_session_id", generated);
+    return generated;
+  });
 
   const token = localStorage.getItem("ampai_token") || "";
   const role = localStorage.getItem("ampai_role") || "user";
@@ -113,6 +125,46 @@ export default function IndexPage() {
     }
   }
 
+  async function onSendChat() {
+    const message = chatInput.trim();
+    if (!message || chatBusy) return;
+    setChatBusy(true);
+    setError("");
+    setChatMessages((prev) => [...prev, { role: "user", text: message }]);
+    setChatInput("");
+
+    try {
+      const token = localStorage.getItem("ampai_token") || "";
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          message,
+          model_type: "ollama",
+          memory_mode: "full",
+          use_web_search: false,
+          attachments: [],
+        }),
+      });
+      const raw = await res.text();
+      let data: any = {};
+      try { data = JSON.parse(raw); } catch { data = { detail: raw }; }
+      if (!res.ok) throw new Error(data.detail || `Chat failed (${res.status})`);
+      const reply = data.response || data.reply || data.message || "No response.";
+      setChatMessages((prev) => [...prev, { role: "assistant", text: String(reply) }]);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Chat failed";
+      setError(msg);
+      setChatMessages((prev) => [...prev, { role: "assistant", text: `Error: ${msg}` }]);
+    } finally {
+      setChatBusy(false);
+    }
+  }
+
   function onLogout() {
     localStorage.removeItem("ampai_token");
     localStorage.removeItem("ampai_role");
@@ -127,11 +179,27 @@ export default function IndexPage() {
       <div style={styles.root}>
         <div style={styles.card}>
           <h1>AmpAI Chat</h1>
-          <p>Welcome, {username || "user"} ({role}).</p>
-          <p>Your login is valid and chat route is active.</p>
+          <p>Welcome, {username || "user"} ({role}). Session: {sessionId}</p>
+          <div style={{ maxHeight: 280, overflowY: "auto", border: "1px solid #334155", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            {chatMessages.length === 0 && <p style={{ margin: 0 }}>Start chatting with your assistant.</p>}
+            {chatMessages.map((m, i) => (
+              <p key={i} style={{ margin: "6px 0" }}><strong>{m.role === "user" ? "You" : "AI"}:</strong> {m.text}</p>
+            ))}
+          </div>
+          <input
+            style={styles.input}
+            placeholder="Type a message..."
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onSendChat();
+            }}
+          />
           <div style={styles.row}>
+            <button style={styles.btnPrimary} onClick={onSendChat} disabled={chatBusy} type="button">{chatBusy ? "Sending..." : "Send"}</button>
             <button style={styles.btnGhost} onClick={onLogout} type="button">Logout</button>
           </div>
+          {error && <div style={styles.error}>{error}</div>}
         </div>
       </div>
     );
