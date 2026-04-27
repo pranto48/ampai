@@ -99,6 +99,112 @@ function buildTasksPage() {
 </div>`;
 }
 
+function buildMemoryInboxPage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+  <h2 style="font-size:1.15rem;font-weight:700">📥 Memory Inbox</h2>
+  <div style="display:flex;gap:8px">
+    <select id="mi-status-filter" class="input" style="width:auto;padding:6px 10px">
+      <option value="pending">Pending</option>
+      <option value="approved">Approved</option>
+      <option value="rejected">Rejected</option>
+      <option value="all">All</option>
+    </select>
+    <button id="mi-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+  </div>
+</div>
+<div class="card" style="margin-bottom:14px">
+  <label class="lbl">Capture candidate memory manually</label>
+  <div style="display:flex;gap:8px">
+    <input id="mi-capture-text" class="input" placeholder="e.g., I prefer short bullet-point answers."/>
+    <button id="mi-capture-btn" class="btn btn-primary btn-sm">Add</button>
+  </div>
+</div>
+<div class="card" style="overflow-x:auto">
+  <table class="tbl">
+    <thead>
+      <tr><th>Candidate</th><th>Session</th><th>Confidence</th><th>Status</th><th>Created</th><th>Action</th></tr>
+    </thead>
+    <tbody id="mi-body">
+      <tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">Loading…</td></tr>
+    </tbody>
+  </table>
+</div>`;
+}
+
+function buildPersonasPage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+  <h2 style="font-size:1.15rem;font-weight:700">🎭 Persona Library</h2>
+  <button id="persona-new-btn" class="btn btn-primary btn-sm">＋ New Persona</button>
+</div>
+<div class="card" style="margin-bottom:14px">
+  <div style="font-size:.82rem;color:var(--muted)">Select a persona from chat topbar. Personas prepend reusable instructions to your request.</div>
+</div>
+<div id="persona-list" class="grid-2" style="gap:12px"></div>
+
+<div id="modal-persona" class="modal-overlay">
+  <div class="modal-box" style="max-width:680px">
+    <div class="modal-header">
+      <div class="modal-title" id="persona-modal-title">New Persona</div>
+      <button class="modal-close" data-close-modal="modal-persona">✕</button>
+    </div>
+    <input id="persona-edit-id" type="hidden"/>
+    <div class="fg"><label class="lbl">Name</label><input id="persona-name" class="input"/></div>
+    <div class="fg"><label class="lbl">Tags (comma-separated)</label><input id="persona-tags" class="input" placeholder="coding, research"/></div>
+    <div class="fg"><label class="lbl">System Prompt</label><textarea id="persona-prompt" class="input" rows="8" style="resize:vertical"></textarea></div>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input id="persona-default" type="checkbox" style="accent-color:var(--accent)"/> Set as default</label>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-ghost btn-sm" data-close-modal="modal-persona">Cancel</button>
+      <button id="persona-save-btn" class="btn btn-primary btn-sm">Save Persona</button>
+    </div>
+  </div>
+</div>`;
+}
+
+function buildDailyBriefPage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+  <h2 style="font-size:1.15rem;font-weight:700">📰 Daily Brief</h2>
+  <div style="display:flex;gap:8px">
+    <button id="pull-email-context-btn" class="btn btn-secondary btn-sm">📧 Pull Email Context</button>
+    <button id="pull-calendar-context-btn" class="btn btn-secondary btn-sm">📅 Pull Calendar Context</button>
+    <button id="brief-refresh-btn" class="btn btn-primary btn-sm">↻ Refresh</button>
+  </div>
+</div>
+<div class="grid-2" style="gap:16px">
+  <div class="card"><div class="card-title">Open Tasks</div><div id="brief-open-tasks"></div></div>
+  <div class="card"><div class="card-title">Pending Replies</div><div id="brief-pending-replies"></div></div>
+  <div class="card"><div class="card-title">Recent Important Memories</div><div id="brief-memories"></div></div>
+  <div class="card"><div class="card-title">Pending Memory Candidates</div><div id="brief-candidates"></div></div>
+</div>`;
+}
+
+function buildWorkspacePage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+  <h2 style="font-size:1.15rem;font-weight:700">👥 Team Workspaces</h2>
+  <button id="workspace-new-btn" class="btn btn-primary btn-sm">＋ New Workspace</button>
+</div>
+<div id="workspace-list" class="grid-2" style="gap:12px"></div>
+
+<div id="modal-workspace" class="modal-overlay">
+  <div class="modal-box" style="max-width:620px">
+    <div class="modal-header">
+      <div class="modal-title">New Workspace</div>
+      <button class="modal-close" data-close-modal="modal-workspace">✕</button>
+    </div>
+    <div class="fg"><label class="lbl">Name</label><input id="workspace-name" class="input"/></div>
+    <div class="fg"><label class="lbl">Description</label><input id="workspace-description" class="input"/></div>
+    <div class="fg"><label class="lbl">Members (username:role, comma separated)</label><input id="workspace-members" class="input" placeholder="alice:editor, bob:viewer"/></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-ghost btn-sm" data-close-modal="modal-workspace">Cancel</button>
+      <button id="workspace-save-btn" class="btn btn-primary btn-sm">Create</button>
+    </div>
+  </div>
+</div>`;
+}
+
 // ── Notes Page ─────────────────────────────────────
 function buildNotesPage() {
   return `

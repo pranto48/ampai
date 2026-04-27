@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import json
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta, timezone
 import shutil
 import uuid
@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 from auth import bootstrap_default_admin
 from agent import chat_with_agent, get_llm, get_redis_history
 from database import (
+    add_core_memory,
     add_network_target,
     create_task,
     delete_core_memory,
@@ -156,8 +157,53 @@ class ChatRequest(BaseModel):
     api_key: Optional[str] = None
     model_name: Optional[str] = None
     memory_mode: str = "full"
+    memory_top_k: int = 5
+    memory_recency_bias: float = 0.0
+    memory_category_filter: Optional[str] = ""
+    persona_id: Optional[str] = None
     use_web_search: bool = False
     attachments: List[Attachment] = []
+
+
+class MemoryInboxUpdateRequest(BaseModel):
+    status: str
+    edited_text: Optional[str] = ""
+
+
+class MemoryPolicyRequest(BaseModel):
+    auto_capture_enabled: bool = True
+    require_approval: bool = True
+    pii_strict_mode: bool = True
+    retention_days: int = 365
+    allowed_categories: List[str] = []
+
+
+class PersonaCreateRequest(BaseModel):
+    name: str
+    system_prompt: str
+    tags: List[str] = []
+    is_default: bool = False
+
+
+class PersonaUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    system_prompt: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_default: Optional[bool] = None
+
+
+class WorkspaceCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    members: List[Dict[str, str]] = []
+
+
+class WorkspaceMemberUpdateRequest(BaseModel):
+    role: str
+
+
+class WorkspaceShareSessionRequest(BaseModel):
+    session_id: str
 
 
 class CategoryRequest(BaseModel):
@@ -304,6 +350,77 @@ class UserLoginRequest(BaseModel):
 class UserContext(BaseModel):
     username: str
     role: str
+
+
+def _load_config_list(key: str) -> List[Dict[str, Any]]:
+    raw = get_config(key, "[]") or "[]"
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _save_config_list(key: str, value: List[Dict[str, Any]]) -> None:
+    set_config(key, json.dumps(value))
+
+
+def _append_config_item(key: str, item: Dict[str, Any]) -> Dict[str, Any]:
+    rows = _load_config_list(key)
+    rows.insert(0, item)
+    _save_config_list(key, rows[:500])
+    return item
+
+
+def _workspace_store() -> List[Dict[str, Any]]:
+    return _load_config_list("team_workspaces")
+
+
+def _save_workspace_store(rows: List[Dict[str, Any]]) -> None:
+    _save_config_list("team_workspaces", rows[:300])
+
+
+def _can_manage_workspace(user: UserContext, workspace: Dict[str, Any]) -> bool:
+    if user.role == "admin":
+        return True
+    for member in workspace.get("members", []):
+        if member.get("username") == user.username and member.get("role") in {"owner", "admin"}:
+            return True
+    return False
+
+
+def _get_memory_policy(username: str) -> Dict[str, Any]:
+    key = f"memory_policy_{username}"
+    raw = get_config(key, "") or ""
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    return {
+        "auto_capture_enabled": True,
+        "require_approval": True,
+        "pii_strict_mode": True,
+        "retention_days": 365,
+        "allowed_categories": [],
+    }
+
+
+def _create_memory_candidate(username: str, session_id: str, text: str, confidence: float = 0.5) -> Dict[str, Any]:
+    candidate = {
+        "id": str(uuid.uuid4()),
+        "username": username,
+        "session_id": session_id,
+        "candidate_text": (text or "").strip()[:1000],
+        "confidence": round(float(confidence), 2),
+        "status": "pending",
+        "edited_text": "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "reviewed_at": "",
+    }
+    return _append_config_item("memory_inbox_candidates", candidate)
 
 
 def _bootstrap_default_users() -> None:
@@ -716,16 +833,64 @@ def _insight_worker() -> None:
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
         _ensure_session_owner_for_user(request.session_id, user)
+        persona_prompt = ""
+        if request.persona_id:
+            personas = _load_config_list("personas_library")
+            persona = next((p for p in personas if p.get("id") == request.persona_id), None)
+            if persona and persona.get("system_prompt"):
+                persona_prompt = str(persona.get("system_prompt")).strip()
+        message_for_agent = request.message
+        if persona_prompt:
+            message_for_agent = f"[Persona Instructions]\n{persona_prompt}\n\n[User Message]\n{request.message}"
         result = chat_with_agent(
             session_id=request.session_id,
-            message=request.message,
+            message=message_for_agent,
             model_type=request.model_type,
             api_key=request.api_key,
             model_name=request.model_name,
             memory_mode=request.memory_mode,
+            memory_top_k=max(1, min(20, int(request.memory_top_k or 5))),
+            recency_bias=float(request.memory_recency_bias or 0.0),
+            category_filter=(request.memory_category_filter or "").strip(),
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
         )
+        response_text = str(result.get("response") or "")
+        suggestions: List[Dict[str, Any]] = []
+        for match in re.finditer(r"\[CREATE_TASK:\s*(.*?)\]", response_text, re.IGNORECASE | re.DOTALL):
+            raw = match.group(1)
+            fields: Dict[str, str] = {}
+            for part in raw.split("|"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    fields[k.strip().lower()] = v.strip()
+            title = (fields.get("title") or "").strip()
+            if not title:
+                continue
+            suggestion = {
+                "id": str(uuid.uuid4()),
+                "username": user.username,
+                "session_id": request.session_id,
+                "title": title[:200],
+                "description": (fields.get("description") or "")[:1000],
+                "priority": (fields.get("priority") or "medium").lower(),
+                "due_at": fields.get("due") or None,
+                "status": "pending",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            suggestions.append(suggestion)
+        if suggestions:
+            all_suggestions = _load_config_list("task_suggestions")
+            all_suggestions = suggestions + all_suggestions
+            _save_config_list("task_suggestions", all_suggestions[:500])
+            result["task_suggestions"] = suggestions
+            cleaned = re.sub(r"\[CREATE_TASK:\s*.*?\]", "", response_text, flags=re.IGNORECASE | re.DOTALL).strip()
+            result["response"] = cleaned or response_text
+        policy = _get_memory_policy(user.username)
+        if policy.get("auto_capture_enabled") and policy.get("require_approval"):
+            user_msg = (request.message or "").strip()
+            if user_msg and re.search(r"\b(remember|preference|my name is|i prefer|always)\b", user_msg, re.IGNORECASE):
+                _create_memory_candidate(user.username, request.session_id, user_msg, confidence=0.65)
         ensure_session_owner(request.session_id, user.username)
         touch_session(request.session_id)
         log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={request.model_type}")
@@ -737,6 +902,56 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     except Exception as e:
         logger.exception("chat failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/memory/inbox")
+def list_memory_inbox(status: str = "pending", current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _load_config_list("memory_inbox_candidates")
+    scoped = [r for r in rows if current_user.role == "admin" or r.get("username") == current_user.username]
+    if status and status != "all":
+        scoped = [r for r in scoped if (r.get("status") or "") == status]
+    return {"items": scoped[:200]}
+
+
+@app.post("/api/memory/inbox/capture")
+def capture_memory_candidate(payload: Dict[str, str], current_user: UserContext = Depends(require_authenticated_user)):
+    text = (payload.get("text") or "").strip()
+    session_id = (payload.get("session_id") or "").strip() or "manual"
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    item = _create_memory_candidate(current_user.username, session_id, text, confidence=0.8)
+    return {"status": "success", "item": item}
+
+
+@app.patch("/api/memory/inbox/{candidate_id}")
+def update_memory_inbox(candidate_id: str, request: MemoryInboxUpdateRequest, current_user: UserContext = Depends(require_authenticated_user)):
+    next_status = (request.status or "").strip().lower()
+    if next_status not in {"approved", "rejected", "pending"}:
+        raise HTTPException(status_code=400, detail="status must be approved, rejected, or pending")
+    rows = _load_config_list("memory_inbox_candidates")
+    updated = None
+    for row in rows:
+        if row.get("id") != candidate_id:
+            continue
+        if current_user.role != "admin" and row.get("username") != current_user.username:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        row["status"] = next_status
+        row["edited_text"] = (request.edited_text or "").strip()
+        row["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+        if next_status == "approved":
+            approved_text = row["edited_text"] or row.get("candidate_text") or ""
+            if approved_text:
+                try:
+                    add_core_memory(approved_text)
+                except Exception:
+                    logger.exception("Failed to persist approved memory candidate")
+        updated = row
+        break
+    if not updated:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    _save_config_list("memory_inbox_candidates", rows)
+    log_audit_event(username=current_user.username, action=f"memory.review.{next_status}", session_id=updated.get("session_id"), details=updated.get("id"))
+    return {"status": "success", "item": updated}
 
 
 @app.post("/api/notifications/chat-reply")
@@ -790,6 +1005,338 @@ def update_my_notification_preferences(
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to save notification preferences")
     return {"status": "success", "preferences": get_effective_notification_preferences(current_user.username)}
+
+
+@app.get("/api/users/me/memory-policy")
+def get_my_memory_policy(current_user: UserContext = Depends(require_authenticated_user)):
+    return _get_memory_policy(current_user.username)
+
+
+@app.put("/api/users/me/memory-policy")
+def update_my_memory_policy(request: MemoryPolicyRequest, current_user: UserContext = Depends(require_authenticated_user)):
+    payload = {
+        "auto_capture_enabled": bool(request.auto_capture_enabled),
+        "require_approval": bool(request.require_approval),
+        "pii_strict_mode": bool(request.pii_strict_mode),
+        "retention_days": max(1, int(request.retention_days)),
+        "allowed_categories": [c.strip() for c in (request.allowed_categories or []) if c and c.strip()],
+    }
+    set_config(f"memory_policy_{current_user.username}", json.dumps(payload))
+    return {"status": "success", **payload}
+
+
+@app.get("/api/personas")
+def list_personas(current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _load_config_list("personas_library")
+    scoped = [r for r in rows if r.get("username") in {"*", current_user.username}]
+    return {"personas": scoped[:200]}
+
+
+@app.post("/api/personas")
+def create_persona(request: PersonaCreateRequest, current_user: UserContext = Depends(require_authenticated_user)):
+    name = (request.name or "").strip()
+    system_prompt = (request.system_prompt or "").strip()
+    if not name or not system_prompt:
+        raise HTTPException(status_code=400, detail="name and system_prompt are required")
+    rows = _load_config_list("personas_library")
+    persona = {
+        "id": str(uuid.uuid4()),
+        "username": current_user.username,
+        "name": name[:120],
+        "system_prompt": system_prompt[:5000],
+        "tags": request.tags or [],
+        "is_default": bool(request.is_default),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if persona["is_default"]:
+        for row in rows:
+            if row.get("username") == current_user.username:
+                row["is_default"] = False
+    rows.insert(0, persona)
+    _save_config_list("personas_library", rows[:500])
+    return {"status": "success", "persona": persona}
+
+
+@app.patch("/api/personas/{persona_id}")
+def update_persona(persona_id: str, request: PersonaUpdateRequest, current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _load_config_list("personas_library")
+    updated = None
+    for row in rows:
+        if row.get("id") != persona_id:
+            continue
+        if current_user.role != "admin" and row.get("username") != current_user.username:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        if request.name is not None:
+            row["name"] = request.name.strip()[:120]
+        if request.system_prompt is not None:
+            row["system_prompt"] = request.system_prompt.strip()[:5000]
+        if request.tags is not None:
+            row["tags"] = [t.strip() for t in request.tags if t and t.strip()]
+        if request.is_default is not None:
+            if request.is_default:
+                for other in rows:
+                    if other.get("username") == row.get("username"):
+                        other["is_default"] = False
+            row["is_default"] = bool(request.is_default)
+        updated = row
+        break
+    if not updated:
+        raise HTTPException(status_code=404, detail="Persona not found")
+    _save_config_list("personas_library", rows)
+    return {"status": "success", "persona": updated}
+
+
+@app.delete("/api/personas/{persona_id}")
+def delete_persona(persona_id: str, current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _load_config_list("personas_library")
+    next_rows = []
+    deleted = None
+    for row in rows:
+        if row.get("id") == persona_id:
+            if current_user.role != "admin" and row.get("username") != current_user.username:
+                raise HTTPException(status_code=403, detail="Forbidden")
+            deleted = row
+            continue
+        next_rows.append(row)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Persona not found")
+    _save_config_list("personas_library", next_rows)
+    return {"status": "success"}
+
+
+@app.get("/api/workspaces")
+def list_workspaces(current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _workspace_store()
+    scoped = []
+    for row in rows:
+        members = row.get("members", [])
+        if current_user.role == "admin" or any(m.get("username") == current_user.username for m in members):
+            scoped.append(row)
+    return {"workspaces": scoped[:200]}
+
+
+@app.post("/api/workspaces")
+def create_workspace(request: WorkspaceCreateRequest, current_user: UserContext = Depends(require_authenticated_user)):
+    name = (request.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    rows = _workspace_store()
+    workspace = {
+        "id": str(uuid.uuid4()),
+        "name": name[:120],
+        "description": (request.description or "")[:400],
+        "members": [{"username": current_user.username, "role": "owner"}],
+        "session_ids": [],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    for member in request.members or []:
+        username = (member.get("username") or "").strip()
+        role = (member.get("role") or "viewer").strip().lower()
+        if not username or role not in {"owner", "admin", "editor", "viewer"}:
+            continue
+        if any(m.get("username") == username for m in workspace["members"]):
+            continue
+        workspace["members"].append({"username": username, "role": role})
+    rows.insert(0, workspace)
+    _save_workspace_store(rows)
+    return {"status": "success", "workspace": workspace}
+
+
+@app.post("/api/workspaces/{workspace_id}/members/{username}")
+def upsert_workspace_member(workspace_id: str, username: str, request: WorkspaceMemberUpdateRequest, current_user: UserContext = Depends(require_authenticated_user)):
+    role = (request.role or "").strip().lower()
+    if role not in {"owner", "admin", "editor", "viewer"}:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    rows = _workspace_store()
+    target = None
+    for row in rows:
+        if row.get("id") == workspace_id:
+            target = row
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not _can_manage_workspace(current_user, target):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    clean_username = username.strip()
+    members = target.setdefault("members", [])
+    existing = next((m for m in members if m.get("username") == clean_username), None)
+    if existing:
+        existing["role"] = role
+    else:
+        members.append({"username": clean_username, "role": role})
+    _save_workspace_store(rows)
+    return {"status": "success", "workspace": target}
+
+
+@app.delete("/api/workspaces/{workspace_id}/members/{username}")
+def remove_workspace_member(workspace_id: str, username: str, current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _workspace_store()
+    target = None
+    for row in rows:
+        if row.get("id") == workspace_id:
+            target = row
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not _can_manage_workspace(current_user, target):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    members = target.get("members", [])
+    target["members"] = [m for m in members if m.get("username") != username.strip()]
+    _save_workspace_store(rows)
+    return {"status": "success", "workspace": target}
+
+
+@app.post("/api/workspaces/{workspace_id}/share-session")
+def share_session_to_workspace(workspace_id: str, request: WorkspaceShareSessionRequest, current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _workspace_store()
+    target = None
+    for row in rows:
+        if row.get("id") == workspace_id:
+            target = row
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not _can_manage_workspace(current_user, target):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    session_id = (request.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    session_ids = target.setdefault("session_ids", [])
+    if session_id not in session_ids:
+        session_ids.append(session_id)
+    _save_workspace_store(rows)
+    return {"status": "success", "workspace": target}
+
+
+@app.get("/api/daily-brief")
+def get_daily_brief(current_user: UserContext = Depends(require_authenticated_user)):
+    all_tasks = list_tasks()
+    open_tasks = [t for t in all_tasks if (t.get("status") or "todo") != "done"][:10]
+    memories = get_core_memories()[:8]
+    pending_replies_raw = get_config(f"pending_reply_notifications_{current_user.username}", "[]") or "[]"
+    try:
+        pending_replies = json.loads(pending_replies_raw)
+        if not isinstance(pending_replies, list):
+            pending_replies = []
+    except Exception:
+        pending_replies = []
+    candidates = _load_config_list("memory_inbox_candidates")
+    pending_candidates = [c for c in candidates if c.get("username") == current_user.username and c.get("status") == "pending"][:8]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "open_tasks": open_tasks,
+        "recent_memories": memories,
+        "pending_replies": pending_replies[:10],
+        "pending_memory_candidates": pending_candidates,
+    }
+
+
+@app.post("/api/integrations/context/pull")
+def pull_external_context(payload: Dict[str, Any], current_user: UserContext = Depends(require_authenticated_user)):
+    provider = (payload.get("provider") or "email").strip().lower()
+    if provider not in {"email", "calendar"}:
+        raise HTTPException(status_code=400, detail="provider must be email or calendar")
+    summary = ""
+    if provider == "email":
+        timezone_name = (payload.get("timezone") or "UTC").strip() or "UTC"
+        messages = _fetch_todays_email_messages(provider="outlook", timezone_name=timezone_name, max_results=20)
+        summary = "\n".join([f"- {(m.get('subject') or '(no subject)')} | {(m.get('from') or '')}" for m in messages[:15]])
+    else:
+        calendar_feed = (get_config("calendar_feed_url") or "").strip()
+        summary = f"Calendar connector configured: {'yes' if calendar_feed else 'no'}; events sync placeholder."
+    session_id = (payload.get("session_id") or "external_context").strip()
+    created = _create_memory_candidate(current_user.username, session_id, f"[{provider.upper()} CONTEXT]\n{summary}", confidence=0.7)
+    return {"status": "success", "provider": provider, "candidate": created}
+
+
+@app.post("/api/quick-capture")
+def quick_capture(payload: Dict[str, str], current_user: UserContext = Depends(require_authenticated_user)):
+    text = (payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    session_id = (payload.get("session_id") or "quick_capture").strip()
+    item = _create_memory_candidate(current_user.username, session_id, text, confidence=0.9)
+    return {"status": "success", "item": item}
+
+@app.get("/api/sessions/{session_id}/task-suggestions")
+def list_session_task_suggestions(session_id: str, current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _load_config_list("task_suggestions")
+    scoped = [
+        r for r in rows
+        if r.get("session_id") == session_id and (current_user.role == "admin" or r.get("username") == current_user.username)
+    ]
+    return {"suggestions": scoped[:200]}
+
+
+@app.post("/api/tasks/from-suggestion/{suggestion_id}")
+def create_task_from_suggestion(suggestion_id: str, current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _load_config_list("task_suggestions")
+    target = None
+    for row in rows:
+        if row.get("id") == suggestion_id:
+            target = row
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="Suggestion not found")
+    if current_user.role != "admin" and target.get("username") != current_user.username:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    task_id = create_task(
+        title=(target.get("title") or "Suggested Task")[:200],
+        description=target.get("description") or "",
+        priority=(target.get("priority") or "medium"),
+        due_at=target.get("due_at"),
+        session_id=target.get("session_id"),
+    )
+    target["status"] = "converted"
+    target["converted_task_id"] = task_id
+    target["converted_at"] = datetime.now(timezone.utc).isoformat()
+    _save_config_list("task_suggestions", rows)
+    return {"status": "success", "task_id": task_id}
+
+
+@app.get("/api/memory/analytics")
+def get_memory_analytics(days: int = 30, current_user: UserContext = Depends(require_authenticated_user)):
+    days = max(1, min(days, 365))
+    sessions = get_all_sessions()
+    visible_sessions = []
+    for session in sessions:
+        if current_user.role == "admin":
+            visible_sessions.append(session)
+        elif (session.get("owner") or "") == current_user.username:
+            visible_sessions.append(session)
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    recent_sessions = []
+    for s in visible_sessions:
+        raw = s.get("updated_at")
+        try:
+            ts = datetime.fromisoformat(raw.replace("Z", "+00:00")) if isinstance(raw, str) else None
+        except Exception:
+            ts = None
+        if ts and ts >= since:
+            recent_sessions.append(s)
+    categories: Dict[str, int] = {}
+    for s in recent_sessions:
+        cat = (s.get("category") or "Uncategorized").strip() or "Uncategorized"
+        categories[cat] = categories.get(cat, 0) + 1
+    candidates = _load_config_list("memory_inbox_candidates")
+    suggestions = _load_config_list("task_suggestions")
+    if current_user.role != "admin":
+        candidates = [c for c in candidates if c.get("username") == current_user.username]
+        suggestions = [s for s in suggestions if s.get("username") == current_user.username]
+    approved_count = sum(1 for c in candidates if c.get("status") == "approved")
+    pending_count = sum(1 for c in candidates if c.get("status") == "pending")
+    converted_count = sum(1 for s in suggestions if s.get("status") == "converted")
+    total_suggestions = len(suggestions)
+    return {
+        "days": days,
+        "sessions_considered": len(recent_sessions),
+        "category_counts": categories,
+        "memory_candidates_pending": pending_count,
+        "memory_candidates_approved": approved_count,
+        "task_suggestions_total": total_suggestions,
+        "task_suggestions_converted": converted_count,
+        "task_suggestion_conversion_rate": round((converted_count / total_suggestions), 3) if total_suggestions else 0.0,
+    }
 
 
 @app.post("/api/integrations/email/summary-today")

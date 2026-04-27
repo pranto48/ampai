@@ -43,8 +43,13 @@ function buildChatPage() {
         style="padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.25);
         border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.82rem;outline:none">
         <option value="full">🧠 Full Memory</option>
+        <option value="indexed">⚡ Indexed Memory</option>
         <option value="context_only">💬 Context Only</option>
         <option value="none">⛔ No Memory</option>
+      </select>
+      <select id="persona-select" style="padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.25);
+        border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.82rem;outline:none;max-width:180px">
+        <option value="">🎭 Persona (None)</option>
       </select>
       <label title="Enable web search" style="display:flex;align-items:center;gap:5px;
         font-size:.8rem;color:var(--muted);cursor:pointer">
@@ -77,6 +82,8 @@ function buildChatPage() {
         id="input-box">
         <button id="attach-btn" title="Attach file" style="background:none;border:none;cursor:pointer;
           color:var(--muted);padding:6px;font-size:1.1rem;transition:color .15s">📎</button>
+        <button id="quick-capture-btn" title="Quick capture memory" style="background:none;border:none;cursor:pointer;
+          color:var(--muted);padding:6px;font-size:1rem;transition:color .15s">⚡</button>
         <input type="file" id="file-input" style="display:none" multiple/>
         <textarea id="chat-input" rows="1" placeholder="Message AmpAI…"
           style="flex:1;background:none;border:none;color:var(--text);font-family:inherit;
@@ -89,6 +96,18 @@ function buildChatPage() {
       <div style="display:flex;margin-top:6px;padding:0 2px">
         <span style="font-size:.72rem;color:var(--muted)">Shift+Enter for newline · Enter to send</span>
         <span style="font-size:.72rem;color:var(--muted);margin-left:auto" id="session-cat-badge"></span>
+      </div>
+      <details style="margin-top:8px">
+        <summary style="font-size:.78rem;color:var(--muted);cursor:pointer">Advanced memory retrieval</summary>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <input id="memory-top-k" type="number" min="1" max="20" value="5" class="input" style="max-width:100px" placeholder="Top K"/>
+          <input id="memory-recency-bias" type="number" step="0.1" value="0" class="input" style="max-width:130px" placeholder="Recency bias"/>
+          <input id="memory-category-filter" class="input" style="max-width:180px" placeholder="Category filter"/>
+        </div>
+      </details>
+      <div id="task-suggestions-panel" style="display:none;margin-top:10px;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:10px">
+        <div style="font-size:.8rem;font-weight:600;margin-bottom:8px">Suggested actions</div>
+        <div id="task-suggestions-list" style="display:flex;flex-direction:column;gap:8px"></div>
       </div>
     </div>
   </div>`;
@@ -299,6 +318,31 @@ function buildSettingsPage() {
         </select>
       </div>
       <button id="save-notif-btn" class="btn btn-primary btn-sm">Save Notifications</button>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">🧠 Memory Policy</div>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:10px">
+        <input type="checkbox" id="mem-policy-auto" style="accent-color:var(--accent)"/>
+        <span style="font-size:.875rem">Auto capture memory candidates</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:10px">
+        <input type="checkbox" id="mem-policy-approval" style="accent-color:var(--accent)"/>
+        <span style="font-size:.875rem">Require manual approval before save</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:10px">
+        <input type="checkbox" id="mem-policy-pii" style="accent-color:var(--accent)"/>
+        <span style="font-size:.875rem">Strict PII mode</span>
+      </label>
+      <div style="margin-bottom:10px">
+        <label class="lbl">Retention days</label>
+        <input id="mem-policy-retention" type="number" min="1" value="365" class="input"/>
+      </div>
+      <div style="margin-bottom:12px">
+        <label class="lbl">Allowed categories (comma-separated)</label>
+        <input id="mem-policy-categories" class="input" placeholder="work, personal, planning"/>
+      </div>
+      <button id="save-memory-policy-btn" class="btn btn-primary btn-sm">Save Memory Policy</button>
     </div>
 
     <div class="card">
