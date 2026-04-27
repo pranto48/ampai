@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 from auth import bootstrap_default_admin
 from agent import chat_with_agent, get_llm, get_redis_history
 from database import (
+    add_core_memory,
     add_network_target,
     create_task,
     delete_core_memory,
@@ -41,6 +42,7 @@ from database import (
     get_all_sessions,
     get_config,
     get_core_memories,
+    get_memory_candidate_by_id,
     get_network_targets,
     get_duplicate_message_counts,
     get_user,
@@ -76,6 +78,7 @@ from database import (
     list_chat_messages,
     get_sql_chat_history,
     list_tasks,
+    list_personas,
     migrate_app_config_encryption,
     set_config,
     set_session_archived,
@@ -83,6 +86,7 @@ from database import (
     set_session_pinned,
     touch_session,
     touch_session_updated_at,
+    update_memory_candidate_status,
     update_task,
     log_audit_event,
     apply_retention_policy,
@@ -91,8 +95,13 @@ from database import (
     list_audit_events,
     get_memory_analytics,
     get_effective_notification_preferences,
+    get_effective_memory_policy,
     upsert_user_notification_preferences,
+    upsert_user_memory_policy,
     enqueue_pending_reply_notification,
+    create_persona,
+    update_persona,
+    delete_persona,
     engine,
 )
 from integrations.gmail_api import (
@@ -159,6 +168,9 @@ class ChatRequest(BaseModel):
     memory_mode: str = "full"
     use_web_search: bool = False
     attachments: List[Attachment] = []
+    memory_top_k: Optional[int] = None
+    recency_bias: Optional[float] = None
+    category_filter: Optional[str] = None
 
 
 class CategoryRequest(BaseModel):
@@ -192,6 +204,11 @@ class MemoryExplorerQuery(BaseModel):
     date_to: Optional[str] = ""
     limit: int = 50
     offset: int = 0
+
+
+class MemoryInboxUpdateRequest(BaseModel):
+    status: str
+    edited_text: Optional[str] = None
 
 
 class AdminPasswordChangeRequest(BaseModel):
@@ -231,6 +248,14 @@ class NotificationPreferencesUpdateRequest(BaseModel):
     minimum_notify_interval_seconds: int = 300
     digest_mode: str = "immediate"
     digest_interval_minutes: int = 30
+
+
+class MemoryPolicyUpdateRequest(BaseModel):
+    auto_capture_enabled: bool = True
+    require_approval: bool = False
+    pii_strict_mode: bool = False
+    retention_days: int = 365
+    allowed_categories: List[str] = []
 
 
 class TaskCreateRequest(BaseModel):
@@ -713,10 +738,60 @@ def _insight_worker() -> None:
             INSIGHT_QUEUE.task_done()
 
 
+@app.get("/api/personas")
+def api_list_personas(user: UserContext = Depends(require_authenticated_user)):
+    personas = list_personas(user.username, include_global=True)
+    return {"personas": personas}
+
+
+@app.post("/api/personas")
+def api_create_persona(request: PersonaCreateRequest, user: UserContext = Depends(require_authenticated_user)):
+    owner_username = None if (request.is_global and user.role == "admin") else user.username
+    persona = create_persona(
+        username=owner_username,
+        name=request.name,
+        system_prompt=request.system_prompt,
+        tags=request.tags or "",
+        is_default=bool(request.is_default),
+    )
+    if not persona:
+        raise HTTPException(status_code=500, detail="Failed to create persona")
+    return persona
+
+
+@app.patch("/api/personas/{persona_id}")
+def api_update_persona(persona_id: int, request: PersonaUpdateRequest, user: UserContext = Depends(require_authenticated_user)):
+    updated = update_persona(
+        persona_id=persona_id,
+        actor_username=user.username,
+        is_admin=(user.role == "admin"),
+        updates=request.model_dump(exclude_none=True),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Persona not found or not editable")
+    return updated
+
+
+@app.delete("/api/personas/{persona_id}")
+def api_delete_persona(persona_id: int, user: UserContext = Depends(require_authenticated_user)):
+    deleted = delete_persona(persona_id=persona_id, actor_username=user.username, is_admin=(user.role == "admin"))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Persona not found or not deletable")
+    return {"status": "success"}
+
+
 @app.post("/api/chat")
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
         _ensure_session_owner_for_user(request.session_id, user)
+        memory_top_k = int(request.memory_top_k if request.memory_top_k is not None else 5)
+        memory_top_k = max(1, min(20, memory_top_k))
+        recency_bias = float(request.recency_bias if request.recency_bias is not None else 0.35)
+        recency_bias = max(0.0, min(1.0, recency_bias))
+        category_filter = (request.category_filter or "").strip() or None
+        if category_filter and len(category_filter) > 64:
+            category_filter = category_filter[:64]
+
         result = chat_with_agent(
             session_id=request.session_id,
             message=request.message,
@@ -726,10 +801,17 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             memory_mode=request.memory_mode,
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
+            memory_top_k=memory_top_k,
+            recency_bias=recency_bias,
+            category_filter=category_filter,
         )
         ensure_session_owner(request.session_id, user.username)
-        touch_session(request.session_id)
-        log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={request.model_type}")
+        if bool(memory_policy.get("auto_capture_enabled", True)):
+            touch_session(request.session_id)
+            apply_retention_policy(max_age_days=int(memory_policy.get("retention_days", 365)), archive_only=True)
+            log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={request.model_type}")
+        else:
+            log_audit_event(username=user.username, action="memory.skip.chat", session_id=request.session_id, details="auto_capture_disabled")
         try:
             INSIGHT_QUEUE.put_nowait(request.session_id)
         except Exception:
@@ -791,6 +873,32 @@ def update_my_notification_preferences(
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to save notification preferences")
     return {"status": "success", "preferences": get_effective_notification_preferences(current_user.username)}
+
+
+@app.get("/api/users/me/memory-policy")
+def get_my_memory_policy(current_user: UserContext = Depends(require_authenticated_user)):
+    return get_effective_memory_policy(current_user.username)
+
+
+@app.put("/api/users/me/memory-policy")
+def update_my_memory_policy(
+    request: MemoryPolicyUpdateRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    if request.retention_days < 1 or request.retention_days > 3650:
+        raise HTTPException(status_code=400, detail="retention_days must be between 1 and 3650")
+    allowed = [c.strip() for c in request.allowed_categories if (c or "").strip()]
+    ok = upsert_user_memory_policy(
+        username=current_user.username,
+        auto_capture_enabled=bool(request.auto_capture_enabled),
+        require_approval=bool(request.require_approval),
+        pii_strict_mode=bool(request.pii_strict_mode),
+        retention_days=int(request.retention_days),
+        allowed_categories=allowed,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save memory policy")
+    return {"status": "success", "policy": get_effective_memory_policy(current_user.username)}
 
 
 @app.post("/api/integrations/email/summary-today")
@@ -998,6 +1106,13 @@ def get_sessions(
 def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _classify_tier(updated_at_raw: Optional[str]) -> str:
@@ -1015,13 +1130,6 @@ def _classify_tier(updated_at_raw: Optional[str]) -> str:
     if age_days <= warm_days:
         return "warm"
     return "cold"
-    raw = value.strip()
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except Exception:
-        return None
 
 
 @app.post("/api/memory/explorer")
@@ -1098,6 +1206,79 @@ def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = De
         "has_more": (offset + limit) < total,
         "categories": category_counts,
     }
+
+
+@app.get("/api/memory/inbox")
+def memory_inbox_list(
+    status: str = Query(default="pending"),
+    session_id: str = Query(default=""),
+    date_from: str = Query(default=""),
+    date_to: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    user=Depends(require_authenticated_user),
+):
+    records = list_memory_candidates(
+        username=user.username,
+        status=(status or "").strip().lower(),
+        limit=limit,
+        offset=offset,
+    )
+    filtered = records
+    cleaned_session = (session_id or "").strip()
+    if cleaned_session:
+        filtered = [row for row in filtered if (row.get("session_id") or "") == cleaned_session]
+
+    from_dt = _parse_iso_dt(date_from)
+    to_dt = _parse_iso_dt(date_to)
+    if from_dt:
+        filtered = [row for row in filtered if row.get("created_at") and row["created_at"] >= from_dt]
+    if to_dt:
+        filtered = [row for row in filtered if row.get("created_at") and row["created_at"] <= to_dt]
+
+    return {"candidates": filtered, "status": status, "offset": offset, "limit": limit}
+
+
+@app.patch("/api/memory/inbox/{candidate_id}")
+def memory_inbox_update(candidate_id: int, request: MemoryInboxUpdateRequest, user=Depends(require_authenticated_user)):
+    existing = get_memory_candidate_by_id(candidate_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Memory candidate not found")
+    if (existing.get("username") or "") != user.username:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    status_value = (request.status or "").strip().lower()
+    if status_value == "approved":
+        approved_text = (request.edited_text or existing.get("candidate_text") or "").strip()
+        if not approved_text:
+            raise HTTPException(status_code=400, detail="Cannot approve empty candidate")
+        if not add_core_memory(approved_text):
+            raise HTTPException(status_code=500, detail="Failed writing approved memory")
+        updated = update_memory_candidate_status(candidate_id, status_value, approved_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        log_audit_event(
+            username=user.username,
+            action="memory.review.approve",
+            session_id=updated.get("session_id"),
+            details=f"id={candidate_id}",
+        )
+    elif status_value == "rejected":
+        updated = update_memory_candidate_status(candidate_id, status_value, request.edited_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        log_audit_event(
+            username=user.username,
+            action="memory.review.reject",
+            session_id=updated.get("session_id"),
+            details=f"id={candidate_id}",
+        )
+    else:
+        updated = update_memory_candidate_status(candidate_id, status_value, request.edited_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+
+    return {"candidate": updated}
 
 
 @app.get("/api/history/{session_id}")

@@ -39,10 +39,16 @@ function buildChatPage() {
         <option value="anythingllm">🏠 AnythingLLM</option>
         <option value="openrouter">🔀 OpenRouter</option>
       </select>
+      <select id="persona-select" title="Persona"
+        style="padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.25);
+        border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.82rem;outline:none;min-width:170px">
+        <option value="">🧩 Default Persona</option>
+      </select>
       <select id="memory-mode-select" title="Memory mode"
         style="padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.25);
         border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.82rem;outline:none">
         <option value="full">🧠 Full Memory</option>
+        <option value="indexed">📚 Indexed Retrieval</option>
         <option value="context_only">💬 Context Only</option>
         <option value="none">⛔ No Memory</option>
       </select>
@@ -50,6 +56,42 @@ function buildChatPage() {
         font-size:.8rem;color:var(--muted);cursor:pointer">
         <input type="checkbox" id="web-search-toggle" style="accent-color:var(--accent)"/> 🌐
       </label>
+      <span id="memory-policy-badge" style="font-size:.72rem;color:var(--muted);padding:4px 8px;border:1px solid var(--border);border-radius:999px">
+        Memory: Loading…
+      </span>
+    </div>
+
+    <div style="padding:10px 18px;border-bottom:1px solid var(--border);background:rgba(0,0,0,.12)">
+      <details id="advanced-retrieval-panel">
+        <summary style="cursor:pointer;font-size:.82rem;color:var(--muted);font-weight:600">
+          Advanced Memory Retrieval
+        </summary>
+        <div style="margin-top:10px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;align-items:end">
+          <div>
+            <label style="display:block;font-size:.75rem;color:var(--muted);margin-bottom:4px">Top K</label>
+            <input id="memory-top-k" type="number" min="1" max="20" value="5"
+              style="width:100%;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.25);border:1px solid var(--border);color:var(--text)"/>
+          </div>
+          <div>
+            <label style="display:block;font-size:.75rem;color:var(--muted);margin-bottom:4px">Recency bias</label>
+            <input id="recency-bias" type="number" min="0" max="1" step="0.05" value="0.35"
+              style="width:100%;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.25);border:1px solid var(--border);color:var(--text)"/>
+          </div>
+          <div>
+            <label style="display:block;font-size:.75rem;color:var(--muted);margin-bottom:4px">Category filter</label>
+            <input id="category-filter" type="text" placeholder="optional"
+              style="width:100%;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.25);border:1px solid var(--border);color:var(--text)"/>
+          </div>
+          <div>
+            <label style="display:block;font-size:.75rem;color:var(--muted);margin-bottom:4px">Quick presets</label>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <button id="retrieval-preset-balanced" type="button" class="btn btn-secondary btn-sm">Balanced</button>
+              <button id="retrieval-preset-recent" type="button" class="btn btn-secondary btn-sm">Recent-first</button>
+              <button id="retrieval-preset-deep" type="button" class="btn btn-secondary btn-sm">Deep context</button>
+            </div>
+          </div>
+        </div>
+      </details>
     </div>
 
     <!-- Messages -->
@@ -367,6 +409,31 @@ function buildSettingsPage() {
         </select>
       </div>
       <button id="save-notif-btn" class="btn btn-primary btn-sm">Save Notifications</button>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">🧠 Memory Policy</div>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px">
+        <input type="checkbox" id="memory-auto-capture" style="accent-color:var(--accent)"/>
+        <span style="font-size:.875rem">Auto-capture conversation memory</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px">
+        <input type="checkbox" id="memory-require-approval" style="accent-color:var(--accent)"/>
+        <span style="font-size:.875rem">Require approval before memory writes</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px">
+        <input type="checkbox" id="memory-pii-strict" style="accent-color:var(--accent)"/>
+        <span style="font-size:.875rem">Strict PII redaction</span>
+      </label>
+      <div style="margin-bottom:12px">
+        <label class="lbl">Retention (days)</label>
+        <input id="memory-retention-days" type="number" min="1" max="3650" class="input" value="365"/>
+      </div>
+      <div style="margin-bottom:14px">
+        <label class="lbl">Allowed categories (comma-separated)</label>
+        <input id="memory-allowed-categories" class="input" placeholder="preferences,projects,tasks"/>
+      </div>
+      <button id="save-memory-policy-btn" class="btn btn-primary btn-sm">Save Memory Policy</button>
     </div>
 
     <div class="card">
