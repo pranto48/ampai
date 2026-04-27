@@ -11,7 +11,8 @@ function chatInit() {
   loadSessions();
   loadPersonaOptions();
   _updateChatSessionDisplay();
-  _hideSuggestedActions();
+  _loadPersonaOptions();
+  _loadSessionTaskSuggestions(State.sessionId);
   if (!_chatHandlersBound) {
     _chatHandlersBound = true;
     _bindChatHandlers();
@@ -193,6 +194,7 @@ async function loadSessions(query = '') {
       localStorage.setItem('ampai_session_id', State.sessionId);
       _updateChatSessionDisplay();
       _loadSessionHistory(State.sessionId);
+      _loadSessionTaskSuggestions(State.sessionId);
       list.querySelectorAll('.session-item').forEach(i => {
         i.classList.remove('active');
         i.style.background = '';
@@ -260,61 +262,82 @@ async function _sendChat() {
 
   const { ok, data } = await apiJSON('/api/chat', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      session_id:   State.sessionId,
+      message:      message || 'Please review the attached files.',
+      model_type:   document.getElementById('model-select')?.value        || 'ollama',
+      memory_mode:  document.getElementById('memory-mode-select')?.value  || 'full',
+      memory_top_k: Number(document.getElementById('memory-top-k')?.value || 5),
+      memory_recency_bias: Number(document.getElementById('memory-recency-bias')?.value || 0),
+      memory_category_filter: document.getElementById('memory-category-filter')?.value || '',
+      persona_id: document.getElementById('persona-select')?.value || null,
+      use_web_search: !!(document.getElementById('web-search-toggle')?.checked),
+      attachments:  atts,
+    }),
   });
 
   _removeTyping(typId);
 
   if (ok) {
     _appendMsg('ai', data.response || data.detail || 'No response');
-    _renderSuggestedActions(data.task_suggestions || []);
+    _renderTaskSuggestions(data.task_suggestions || []);
     loadSessions(); // refresh sidebar
+    _loadSessionTaskSuggestions(State.sessionId);
   } else {
     _appendMsg('ai', '⚠️ ' + (data.detail || 'Something went wrong. Check your AI model config.'));
   }
 }
 
-function _hideSuggestedActions() {
-  const panel = document.getElementById('suggested-actions-panel');
-  if (!panel) return;
-  panel.style.display = 'none';
-  panel.innerHTML = '';
+async function _loadPersonaOptions() {
+  const sel = document.getElementById('persona-select');
+  if (!sel) return;
+  const prev = sel.value;
+  const { ok, data } = await apiJSON('/api/personas');
+  if (!ok) return;
+  const personas = data.personas || [];
+  sel.innerHTML = '<option value="">🎭 Persona (None)</option>' + personas.map(p =>
+    `<option value="${p.id}">${(p.is_default ? '★ ' : '') + (p.name || 'Unnamed')}</option>`
+  ).join('');
+  if (prev && [...sel.options].some(o => o.value === prev)) {
+    sel.value = prev;
+  } else {
+    const def = personas.find(p => p.is_default);
+    if (def) sel.value = def.id;
+  }
 }
 
-function _renderSuggestedActions(suggestions) {
-  const panel = document.getElementById('suggested-actions-panel');
-  if (!panel) return;
-  if (!Array.isArray(suggestions) || !suggestions.length) {
-    _hideSuggestedActions();
+function _renderTaskSuggestions(suggestions) {
+  const panel = document.getElementById('task-suggestions-panel');
+  const list = document.getElementById('task-suggestions-list');
+  if (!panel || !list) return;
+  if (!suggestions.length) {
+    panel.style.display = 'none';
+    list.innerHTML = '';
     return;
   }
-  panel.style.display = '';
-  panel.innerHTML = `
-    <div style="font-size:.82rem;color:var(--muted);margin-bottom:8px;font-weight:600">Suggested actions</div>
-    <div style="display:flex;flex-direction:column;gap:8px">
-      ${suggestions.map(s => `
-        <div style="background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:10px 12px">
-          <div style="font-size:.88rem;font-weight:600">${(s.title || 'Untitled').replace(/</g,'&lt;')}</div>
-          <div style="font-size:.78rem;color:var(--muted);margin-top:4px">${(s.description || '').replace(/</g,'&lt;').slice(0,180)}</div>
-          <div style="margin-top:8px">
-            <button class="btn btn-secondary btn-sm" onclick="createTaskFromSuggestion('${s.id}')">Create Task</button>
-          </div>
-        </div>`).join('')}
-    </div>`;
+  panel.style.display = 'block';
+  list.innerHTML = suggestions.map(s => `
+    <div style="display:flex;align-items:center;gap:8px;background:var(--bg-3);border:1px solid var(--border);padding:8px;border-radius:8px">
+      <div style="flex:1">
+        <div style="font-size:.82rem;font-weight:600">${(s.title || 'Suggested task')}</div>
+        <div style="font-size:.75rem;color:var(--muted)">${(s.description || '').slice(0,120)}</div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="_convertTaskSuggestion('${s.id}')">Create Task</button>
+    </div>
+  `).join('');
 }
 
-async function createTaskFromSuggestion(suggestionId, sessionId = State.sessionId) {
-  const { ok, data } = await apiJSON(`/api/tasks/from-suggestion/${encodeURIComponent(suggestionId)}`, {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sessionId }),
-  });
-  if (!ok) {
-    toast(data.detail || 'Failed to create task', 'error');
-    return;
-  }
-  toast('Task created from suggestion', 'success');
-  const btn = document.querySelector(`button[onclick="createTaskFromSuggestion('${suggestionId}')"]`);
-  if (btn) { btn.disabled = true; btn.textContent = 'Created'; }
+async function _loadSessionTaskSuggestions(sessionId) {
+  const { ok, data } = await apiJSON(`/api/sessions/${encodeURIComponent(sessionId)}/task-suggestions`);
+  if (!ok) return;
+  const pending = (data.suggestions || []).filter(s => s.status === 'pending');
+  _renderTaskSuggestions(pending);
+}
+
+async function _convertTaskSuggestion(id) {
+  const { ok } = await apiJSON(`/api/tasks/from-suggestion/${encodeURIComponent(id)}`, { method: 'POST' });
+  toast(ok ? 'Task created from suggestion' : 'Failed to create task', ok ? 'success' : 'error');
+  _loadSessionTaskSuggestions(State.sessionId);
 }
 
 // ── DOM helpers ────────────────────────────────────

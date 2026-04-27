@@ -89,29 +89,27 @@ async function viewChatLog(sessionId) {
     </div>`).join('')
     : '<div style="text-align:center;color:var(--muted)">No messages found</div>';
 
-  const suggRes = await apiJSON(`/api/sessions/${encodeURIComponent(sessionId)}/task-suggestions`);
-  if (sugEl) {
-    if (!suggRes.ok) {
-      sugEl.innerHTML = '<div style="font-size:.8rem;color:var(--muted)">Suggested actions unavailable.</div>';
-    } else {
-      const unresolved = suggRes.data.suggestions || [];
-      sugEl.innerHTML = unresolved.length ? `
-        <div style="border-top:1px solid var(--border);padding-top:10px">
-          <div style="font-size:.85rem;font-weight:600;margin-bottom:8px">Unresolved suggested actions</div>
-          <div style="display:flex;flex-direction:column;gap:8px">
-            ${unresolved.map(s => `
-              <div style="background:var(--bg-3);border:1px solid var(--border);border-radius:8px;padding:10px">
-                <div style="font-size:.84rem;font-weight:600">${(s.title || 'Untitled').replace(/</g,'&lt;')}</div>
-                <div class="text-xs text-muted" style="margin-top:3px">${(s.description || '').replace(/</g,'&lt;').slice(0,160)}</div>
-                <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="createTaskFromSuggestion('${s.id}','${sessionId}')">Create Task</button>
-              </div>`).join('')}
-          </div>
-        </div>`
-        : '<div style="font-size:.8rem;color:var(--muted)">No unresolved suggested actions.</div>';
+  const sug = await apiJSON(`/api/sessions/${encodeURIComponent(sessionId)}/task-suggestions`);
+  if (sug.ok && (sug.data.suggestions || []).length) {
+    const pending = (sug.data.suggestions || []).filter(s => s.status === 'pending').slice(0, 8);
+    if (pending.length) {
+      body.innerHTML += `<div style="margin-top:12px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2)">
+        <div style="font-size:.78rem;font-weight:700;margin-bottom:8px">Suggested Tasks</div>
+        ${pending.map(s => `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <div style="flex:1;font-size:.82rem">${s.title || 'Suggested task'}</div>
+          <button class="btn btn-secondary btn-sm" onclick="convertTaskSuggestion('${s.id}','${sessionId}')">Create Task</button>
+        </div>`).join('')}
+      </div>`;
     }
   }
 
   document.getElementById('modal-export-btn').onclick = () => exportSession(sessionId);
+}
+
+async function convertTaskSuggestion(id, sessionId) {
+  const { ok } = await apiJSON(`/api/tasks/from-suggestion/${encodeURIComponent(id)}`, { method: 'POST' });
+  toast(ok ? 'Task created' : 'Failed to create task', ok ? 'success' : 'error');
+  if (ok) viewChatLog(sessionId);
 }
 
 async function exportSession(sessionId) {
@@ -620,16 +618,14 @@ async function _loadSettingsValues() {
     const intv = document.getElementById('notif-interval');  if (intv) intv.value   = p.minimum_notify_interval_seconds ?? 300;
     const dg   = document.getElementById('notif-digest');    if (dg)   dg.value     = p.digest_mode || 'immediate';
   }
-  const policyRes = await apiJSON('/api/users/me/memory-policy');
-  if (policyRes.ok) {
-    const p = policyRes.data || {};
-    const ac = document.getElementById('memory-auto-capture'); if (ac) ac.checked = !!p.auto_capture_enabled;
-    const ra = document.getElementById('memory-require-approval'); if (ra) ra.checked = !!p.require_approval;
-    const ps = document.getElementById('memory-pii-strict'); if (ps) ps.checked = !!p.pii_strict_mode;
-    const rd = document.getElementById('memory-retention-days'); if (rd) rd.value = Number(p.retention_days || 365);
-    const cat = document.getElementById('memory-allowed-categories');
-    if (cat) cat.value = Array.isArray(p.allowed_categories) ? p.allowed_categories.join(', ') : '';
-    if (typeof window.updateMemoryPolicyBadge === 'function') window.updateMemoryPolicyBadge(p);
+  const mpRes = await apiJSON('/api/users/me/memory-policy');
+  if (mpRes.ok) {
+    const p = mpRes.data || {};
+    const a = document.getElementById('mem-policy-auto'); if (a) a.checked = !!p.auto_capture_enabled;
+    const r = document.getElementById('mem-policy-approval'); if (r) r.checked = !!p.require_approval;
+    const pii = document.getElementById('mem-policy-pii'); if (pii) pii.checked = !!p.pii_strict_mode;
+    const rd = document.getElementById('mem-policy-retention'); if (rd) rd.value = p.retention_days ?? 365;
+    const c = document.getElementById('mem-policy-categories'); if (c) c.value = (p.allowed_categories || []).join(', ');
   }
 }
 
@@ -671,6 +667,18 @@ async function settingsLoad() {
     };
     const { ok } = await apiJSON('/api/users/me/notification-preferences', { method:'PUT', body: JSON.stringify(payload) });
     toast(ok ? 'Notification preferences saved' : 'Failed', ok ? 'success' : 'error');
+  });
+
+  document.getElementById('save-memory-policy-btn')?.addEventListener('click', async () => {
+    const payload = {
+      auto_capture_enabled: !!document.getElementById('mem-policy-auto')?.checked,
+      require_approval: !!document.getElementById('mem-policy-approval')?.checked,
+      pii_strict_mode: !!document.getElementById('mem-policy-pii')?.checked,
+      retention_days: Number(document.getElementById('mem-policy-retention')?.value || 365),
+      allowed_categories: (document.getElementById('mem-policy-categories')?.value || '').split(',').map(s => s.trim()).filter(Boolean),
+    };
+    const { ok } = await apiJSON('/api/users/me/memory-policy', { method: 'PUT', body: JSON.stringify(payload) });
+    toast(ok ? 'Memory policy saved' : 'Failed to save memory policy', ok ? 'success' : 'error');
   });
 
   document.getElementById('save-email-cfg-btn')?.addEventListener('click', async () => {
