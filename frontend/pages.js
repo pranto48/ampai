@@ -151,6 +151,53 @@ function buildMemoryPage() {
 </div>`;
 }
 
+function buildMemoryInboxPage() {
+  return `
+<div class="section-head" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+  <h2 style="font-size:1.15rem;font-weight:700">📥 Memory Inbox</h2>
+  <button id="mi-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+</div>
+
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;
+  background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:20px">
+  <div style="flex:1;min-width:160px">
+    <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:6px;font-weight:500">Status</label>
+    <select id="mi-status" class="input">
+      <option value="pending">Pending</option>
+      <option value="approved">Approved</option>
+      <option value="rejected">Rejected</option>
+      <option value="">All</option>
+    </select>
+  </div>
+  <div style="flex:1;min-width:180px">
+    <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:6px;font-weight:500">Session</label>
+    <input id="mi-session" class="input" placeholder="Filter by session id"/>
+  </div>
+  <div style="flex:1;min-width:150px">
+    <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:6px;font-weight:500">From</label>
+    <input id="mi-date-from" type="date" class="input"/>
+  </div>
+  <div style="flex:1;min-width:150px">
+    <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:6px;font-weight:500">To</label>
+    <input id="mi-date-to" type="date" class="input"/>
+  </div>
+  <button id="mi-apply" class="btn btn-primary">Apply</button>
+</div>
+
+<div class="card" style="overflow-x:auto">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>ID</th><th>Session</th><th>Candidate</th><th>Confidence</th><th>Status</th><th>Created</th><th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="mi-body">
+      <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:32px">Loading…</td></tr>
+    </tbody>
+  </table>
+</div>`;
+}
+
 // ── AI Models inner HTML ───────────────────────────
 function buildModelsPage() {
   return `
