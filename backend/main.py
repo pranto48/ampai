@@ -42,6 +42,7 @@ from database import (
     get_all_sessions,
     get_config,
     get_core_memories,
+    get_memory_candidate_by_id,
     get_network_targets,
     get_duplicate_message_counts,
     get_user,
@@ -77,6 +78,7 @@ from database import (
     list_chat_messages,
     get_sql_chat_history,
     list_tasks,
+    list_personas,
     migrate_app_config_encryption,
     set_config,
     set_session_archived,
@@ -84,15 +86,22 @@ from database import (
     set_session_pinned,
     touch_session,
     touch_session_updated_at,
+    update_memory_candidate_status,
     update_task,
     log_audit_event,
     apply_retention_policy,
     upsert_session_insight,
     get_session_insight,
     list_audit_events,
+    get_memory_analytics,
     get_effective_notification_preferences,
+    get_effective_memory_policy,
     upsert_user_notification_preferences,
+    upsert_user_memory_policy,
     enqueue_pending_reply_notification,
+    create_persona,
+    update_persona,
+    delete_persona,
     engine,
 )
 from integrations.gmail_api import (
@@ -163,6 +172,36 @@ class ChatRequest(BaseModel):
     persona_id: Optional[str] = None
     use_web_search: bool = False
     attachments: List[Attachment] = []
+    memory_top_k: Optional[int] = None
+    recency_bias: Optional[float] = None
+    category_filter: Optional[str] = None
+
+
+class MemoryInboxUpdateRequest(BaseModel):
+    status: str
+    edited_text: Optional[str] = ""
+
+
+class MemoryPolicyRequest(BaseModel):
+    auto_capture_enabled: bool = True
+    require_approval: bool = True
+    pii_strict_mode: bool = True
+    retention_days: int = 365
+    allowed_categories: List[str] = []
+
+
+class PersonaCreateRequest(BaseModel):
+    name: str
+    system_prompt: str
+    tags: List[str] = []
+    is_default: bool = False
+
+
+class PersonaUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    system_prompt: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_default: Optional[bool] = None
 
 
 class MemoryInboxUpdateRequest(BaseModel):
@@ -239,6 +278,11 @@ class MemoryExplorerQuery(BaseModel):
     offset: int = 0
 
 
+class MemoryInboxUpdateRequest(BaseModel):
+    status: str
+    edited_text: Optional[str] = None
+
+
 class AdminPasswordChangeRequest(BaseModel):
     current_password: str
     new_password: str
@@ -278,6 +322,14 @@ class NotificationPreferencesUpdateRequest(BaseModel):
     digest_interval_minutes: int = 30
 
 
+class MemoryPolicyUpdateRequest(BaseModel):
+    auto_capture_enabled: bool = True
+    require_approval: bool = False
+    pii_strict_mode: bool = False
+    retention_days: int = 365
+    allowed_categories: List[str] = []
+
+
 class TaskCreateRequest(BaseModel):
     title: str
     description: str = ""
@@ -292,6 +344,10 @@ class TaskUpdateRequest(BaseModel):
     status: Optional[str] = None
     priority: Optional[str] = None
     due_at: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class SuggestionTaskCreateRequest(BaseModel):
     session_id: Optional[str] = None
 
 
@@ -829,6 +885,48 @@ def _insight_worker() -> None:
             INSIGHT_QUEUE.task_done()
 
 
+@app.get("/api/personas")
+def api_list_personas(user: UserContext = Depends(require_authenticated_user)):
+    personas = list_personas(user.username, include_global=True)
+    return {"personas": personas}
+
+
+@app.post("/api/personas")
+def api_create_persona(request: PersonaCreateRequest, user: UserContext = Depends(require_authenticated_user)):
+    owner_username = None if (request.is_global and user.role == "admin") else user.username
+    persona = create_persona(
+        username=owner_username,
+        name=request.name,
+        system_prompt=request.system_prompt,
+        tags=request.tags or "",
+        is_default=bool(request.is_default),
+    )
+    if not persona:
+        raise HTTPException(status_code=500, detail="Failed to create persona")
+    return persona
+
+
+@app.patch("/api/personas/{persona_id}")
+def api_update_persona(persona_id: int, request: PersonaUpdateRequest, user: UserContext = Depends(require_authenticated_user)):
+    updated = update_persona(
+        persona_id=persona_id,
+        actor_username=user.username,
+        is_admin=(user.role == "admin"),
+        updates=request.model_dump(exclude_none=True),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Persona not found or not editable")
+    return updated
+
+
+@app.delete("/api/personas/{persona_id}")
+def api_delete_persona(persona_id: int, user: UserContext = Depends(require_authenticated_user)):
+    deleted = delete_persona(persona_id=persona_id, actor_username=user.username, is_admin=(user.role == "admin"))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Persona not found or not deletable")
+    return {"status": "success"}
+
+
 @app.post("/api/chat")
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
@@ -854,6 +952,9 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             category_filter=(request.memory_category_filter or "").strip(),
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
+            memory_top_k=memory_top_k,
+            recency_bias=recency_bias,
+            category_filter=category_filter,
         )
         response_text = str(result.get("response") or "")
         suggestions: List[Dict[str, Any]] = []
@@ -893,7 +994,16 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                 _create_memory_candidate(user.username, request.session_id, user_msg, confidence=0.65)
         ensure_session_owner(request.session_id, user.username)
         touch_session(request.session_id)
+        created_suggestions = _append_session_suggestions(request.session_id, result.get("task_suggestions") or [])
+        result["task_suggestions"] = created_suggestions
         log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={request.model_type}")
+        if created_suggestions:
+            log_audit_event(
+                username=user.username,
+                action="task.suggestion.detected",
+                session_id=request.session_id,
+                details=f"count={len(created_suggestions)}",
+            )
         try:
             INSIGHT_QUEUE.put_nowait(request.session_id)
         except Exception:
@@ -1460,6 +1570,80 @@ def _can_access_session(session_id: str, current_user: UserContext) -> bool:
     return session_id in get_accessible_session_ids(username=current_user.username, is_admin=False)
 
 
+def _ensure_task_suggestion_column() -> None:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS task_suggestions TEXT"))
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to ensure task_suggestions column")
+
+
+def _load_session_suggestions(session_id: str) -> List[Dict]:
+    _ensure_task_suggestion_column()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT task_suggestions FROM session_metadata WHERE session_id = :session_id"),
+                {"session_id": session_id},
+            ).first()
+            raw = row[0] if row else None
+            parsed = json.loads(raw) if raw else []
+            return parsed if isinstance(parsed, list) else []
+    except Exception:
+        logger.exception("Failed to load suggestions", extra={"session_id": session_id})
+        return []
+
+
+def _save_session_suggestions(session_id: str, suggestions: List[Dict]) -> bool:
+    _ensure_task_suggestion_column()
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at, task_suggestions) "
+                    "VALUES (:session_id, 'Uncategorized', FALSE, FALSE, NOW()::text, :task_suggestions) "
+                    "ON CONFLICT (session_id) DO UPDATE SET "
+                    "task_suggestions = EXCLUDED.task_suggestions, updated_at = EXCLUDED.updated_at"
+                ),
+                {"session_id": session_id, "task_suggestions": json.dumps(suggestions)},
+            )
+            conn.commit()
+        return True
+    except Exception:
+        logger.exception("Failed to save suggestions", extra={"session_id": session_id})
+        return False
+
+
+def _append_session_suggestions(session_id: str, suggestions: List[Dict]) -> List[Dict]:
+    if not suggestions:
+        return _load_session_suggestions(session_id)
+    existing = _load_session_suggestions(session_id)
+    existing_ids = {str(item.get("id")) for item in existing}
+    now = datetime.now(timezone.utc).isoformat()
+    appended: List[Dict] = []
+    for suggestion in suggestions:
+        sid = str(suggestion.get("id") or uuid.uuid4())
+        if sid in existing_ids:
+            continue
+        payload = {
+            "id": sid,
+            "title": (suggestion.get("title") or "").strip()[:180],
+            "description": (suggestion.get("description") or "").strip(),
+            "priority": (suggestion.get("priority") or "medium").strip().lower(),
+            "due_at": suggestion.get("due_at"),
+            "source": suggestion.get("source") or "unknown",
+            "created_at": now,
+            "resolved": False,
+            "task_id": None,
+            "resolved_at": None,
+        }
+        existing.append(payload)
+        appended.append(payload)
+    _save_session_suggestions(session_id, existing)
+    return appended
+
+
 @app.get("/api/reports/find")
 def find_reports(
     q: Optional[str] = Query(default=None),
@@ -1544,6 +1728,13 @@ def get_sessions(
 def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _classify_tier(updated_at_raw: Optional[str]) -> str:
@@ -1561,13 +1752,6 @@ def _classify_tier(updated_at_raw: Optional[str]) -> str:
     if age_days <= warm_days:
         return "warm"
     return "cold"
-    raw = value.strip()
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except Exception:
-        return None
 
 
 @app.post("/api/memory/explorer")
@@ -1646,6 +1830,79 @@ def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = De
     }
 
 
+@app.get("/api/memory/inbox")
+def memory_inbox_list(
+    status: str = Query(default="pending"),
+    session_id: str = Query(default=""),
+    date_from: str = Query(default=""),
+    date_to: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    user=Depends(require_authenticated_user),
+):
+    records = list_memory_candidates(
+        username=user.username,
+        status=(status or "").strip().lower(),
+        limit=limit,
+        offset=offset,
+    )
+    filtered = records
+    cleaned_session = (session_id or "").strip()
+    if cleaned_session:
+        filtered = [row for row in filtered if (row.get("session_id") or "") == cleaned_session]
+
+    from_dt = _parse_iso_dt(date_from)
+    to_dt = _parse_iso_dt(date_to)
+    if from_dt:
+        filtered = [row for row in filtered if row.get("created_at") and row["created_at"] >= from_dt]
+    if to_dt:
+        filtered = [row for row in filtered if row.get("created_at") and row["created_at"] <= to_dt]
+
+    return {"candidates": filtered, "status": status, "offset": offset, "limit": limit}
+
+
+@app.patch("/api/memory/inbox/{candidate_id}")
+def memory_inbox_update(candidate_id: int, request: MemoryInboxUpdateRequest, user=Depends(require_authenticated_user)):
+    existing = get_memory_candidate_by_id(candidate_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Memory candidate not found")
+    if (existing.get("username") or "") != user.username:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    status_value = (request.status or "").strip().lower()
+    if status_value == "approved":
+        approved_text = (request.edited_text or existing.get("candidate_text") or "").strip()
+        if not approved_text:
+            raise HTTPException(status_code=400, detail="Cannot approve empty candidate")
+        if not add_core_memory(approved_text):
+            raise HTTPException(status_code=500, detail="Failed writing approved memory")
+        updated = update_memory_candidate_status(candidate_id, status_value, approved_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        log_audit_event(
+            username=user.username,
+            action="memory.review.approve",
+            session_id=updated.get("session_id"),
+            details=f"id={candidate_id}",
+        )
+    elif status_value == "rejected":
+        updated = update_memory_candidate_status(candidate_id, status_value, request.edited_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        log_audit_event(
+            username=user.username,
+            action="memory.review.reject",
+            session_id=updated.get("session_id"),
+            details=f"id={candidate_id}",
+        )
+    else:
+        updated = update_memory_candidate_status(candidate_id, status_value, request.edited_text)
+        if not updated:
+            raise HTTPException(status_code=400, detail="Invalid status")
+
+    return {"candidate": updated}
+
+
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str, user=Depends(require_authenticated_user)):
     if not _can_access_session(session_id, user):
@@ -1657,6 +1914,57 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
         return {"messages": messages}
     except Exception as e:
         return {"messages": [], "error": str(e)}
+
+
+@app.get("/api/sessions/{session_id}/task-suggestions")
+def get_session_task_suggestions(session_id: str, user=Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
+    suggestions = _load_session_suggestions(session_id)
+    unresolved = [s for s in suggestions if not bool(s.get("resolved"))]
+    return {"session_id": session_id, "suggestions": unresolved}
+
+
+@app.post("/api/tasks/from-suggestion/{suggestion_id}")
+def create_task_from_suggestion(
+    suggestion_id: str,
+    request: SuggestionTaskCreateRequest,
+    user=Depends(require_authenticated_user),
+):
+    search_sessions = [request.session_id] if request.session_id else [
+        s.get("session_id") for s in get_all_sessions() if s.get("session_id")
+    ]
+    search_sessions = [sid for sid in search_sessions if sid]
+    for session_id in search_sessions:
+        if not _can_access_session(session_id, user):
+            continue
+        suggestions = _load_session_suggestions(session_id)
+        for idx, item in enumerate(suggestions):
+            if str(item.get("id")) != str(suggestion_id):
+                continue
+            if bool(item.get("resolved")):
+                raise HTTPException(status_code=409, detail="Suggestion already resolved")
+            task_id = create_task(
+                title=item.get("title") or "Untitled task",
+                description=item.get("description") or "",
+                priority=item.get("priority") or "medium",
+                due_at=item.get("due_at"),
+                session_id=session_id,
+            )
+            if not task_id:
+                raise HTTPException(status_code=500, detail="Failed to create task")
+            suggestions[idx]["resolved"] = True
+            suggestions[idx]["task_id"] = task_id
+            suggestions[idx]["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            _save_session_suggestions(session_id, suggestions)
+            log_audit_event(
+                username=user.username,
+                action="task.create.from_suggestion",
+                session_id=session_id,
+                details=f"suggestion_id={suggestion_id};task_id={task_id}",
+            )
+            return {"status": "success", "task_id": task_id, "session_id": session_id}
+    raise HTTPException(status_code=404, detail="Suggestion not found")
 
 
 @app.post("/api/sessions/{session_id}/category")
@@ -2585,6 +2893,76 @@ def analytics_summary(user=Depends(require_authenticated_user)):
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+def _memory_analytics_to_csv(payload: Dict[str, Any]) -> str:
+    lines: List[str] = []
+    lines.append("section,key,value")
+    kpis = payload.get("kpis") or {}
+    for key in ["memory_writes_total", "retrieval_hits_total", "stale_memories_count"]:
+        lines.append(f"kpi,{key},{kpis.get(key, 0)}")
+
+    lines.append("")
+    lines.append("memory_writes_per_day,day,count")
+    for row in payload.get("memory_writes_per_day") or []:
+        lines.append(f"memory_writes_per_day,{row.get('day','')},{row.get('count',0)}")
+
+    lines.append("")
+    lines.append("retrieval_hits_per_day,day,count")
+    for row in payload.get("retrieval_hits_per_day") or []:
+        lines.append(f"retrieval_hits_per_day,{row.get('day','')},{row.get('count',0)}")
+
+    lines.append("")
+    lines.append("top_categories,category,count")
+    for row in payload.get("top_categories") or []:
+        category = str(row.get("category", "")).replace('"', '""')
+        lines.append(f'top_categories,"{category}",{row.get("count",0)}')
+
+    lines.append("")
+    lines.append("stale_memories,session_id,category,owner,updated_at,last_retrieval_at")
+    for row in payload.get("stale_memories") or []:
+        category = str(row.get("category", "")).replace('"', '""')
+        owner = str(row.get("owner", "")).replace('"', '""')
+        lines.append(
+            f'stale_memories,{row.get("session_id","")},"{category}","{owner}",{row.get("updated_at","")},{row.get("last_retrieval_at","") or ""}'
+        )
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/api/memory/analytics")
+def memory_analytics(
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    owner_scope: str = Query(default="mine"),
+    stale_days: int = Query(default=30, ge=1, le=3650),
+    top_n: int = Query(default=8, ge=1, le=20),
+    export: Optional[str] = Query(default=None),
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    normalized_scope = (owner_scope or "mine").strip().lower()
+    if normalized_scope not in {"mine", "shared", "all"}:
+        raise HTTPException(status_code=400, detail="owner_scope must be mine, shared, or all")
+    if current_user.role != "admin" and normalized_scope == "all":
+        normalized_scope = "mine"
+
+    payload = get_memory_analytics(
+        username=current_user.username,
+        is_admin=current_user.role == "admin",
+        date_from=date_from,
+        date_to=date_to,
+        owner_scope=normalized_scope,
+        stale_days=stale_days,
+        top_n=top_n,
+    )
+
+    if (export or "").strip().lower() == "csv":
+        csv_body = _memory_analytics_to_csv(payload)
+        return Response(
+            content=csv_body,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=memory-analytics.csv"},
+        )
+    return payload
 
 
 

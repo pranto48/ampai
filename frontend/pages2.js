@@ -286,69 +286,38 @@ function buildNotesPage() {
 // ── Analytics Page ─────────────────────────────────
 function buildAnalyticsPage() {
   return `
-<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
-  <h2 style="font-size:1.15rem;font-weight:700">📊 Analytics & Insights</h2>
-  <div style="display:flex;gap:8px">
-    <select id="analytics-range" class="input" style="width:auto;padding:6px 10px">
-      <option value="7">Last 7 days</option>
-      <option value="30" selected>Last 30 days</option>
-      <option value="90">Last 90 days</option>
-    </select>
-    <button id="refresh-analytics-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px">
+  <h2 style="font-size:1.15rem;font-weight:700">📊 Memory Analytics</h2>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button id="analytics-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+    <button id="analytics-export-csv-btn" class="btn btn-secondary btn-sm">⬇ Export CSV</button>
   </div>
 </div>
-
-<!-- KPI row -->
-<div class="grid-4" style="gap:14px;margin-bottom:24px" id="analytics-kpis">
-  <div class="stat-card" id="kpi-messages">
-    <div class="stat-value" style="background:linear-gradient(90deg,#818cf8,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent">—</div>
-    <div class="stat-label">Total Messages</div>
-  </div>
-  <div class="stat-card" id="kpi-sessions">
-    <div class="stat-value" style="background:linear-gradient(90deg,#10b981,#3b82f6);-webkit-background-clip:text;-webkit-text-fill-color:transparent">—</div>
-    <div class="stat-label">Active Sessions</div>
-  </div>
-  <div class="stat-card" id="kpi-memories">
-    <div class="stat-value" style="background:linear-gradient(90deg,#f59e0b,#ef4444);-webkit-background-clip:text;-webkit-text-fill-color:transparent">—</div>
-    <div class="stat-label">Core Memories</div>
-  </div>
-  <div class="stat-card" id="kpi-tasks">
-    <div class="stat-value" style="background:linear-gradient(90deg,#06b6d4,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent">—</div>
-    <div class="stat-label">Tasks Done</div>
-  </div>
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:18px">
+  <div style="min-width:140px"><label class="lbl">From</label><input id="analytics-date-from" type="date" class="input"/></div>
+  <div style="min-width:140px"><label class="lbl">To</label><input id="analytics-date-to" type="date" class="input"/></div>
+  <div style="min-width:130px"><label class="lbl">Scope</label><select id="analytics-owner-scope" class="input"><option value="mine">Mine</option><option value="shared">Shared</option><option value="all">All</option></select></div>
+  <div style="min-width:120px"><label class="lbl">Stale days</label><input id="analytics-stale-days" type="number" min="1" value="30" class="input"/></div>
+  <button id="analytics-apply-btn" class="btn btn-primary">Apply</button>
 </div>
-
-<div class="grid-2" style="gap:16px;margin-bottom:20px">
-  <!-- Activity Chart -->
-  <div class="card">
-    <div class="card-title">💬 Chat Activity (by day)</div>
-    <div id="activity-chart" style="height:180px;display:flex;align-items:flex-end;gap:4px;padding:12px 0">
-      <div style="color:var(--muted);font-size:.8rem;align-self:center">Loading…</div>
-    </div>
-  </div>
-  <!-- Category distribution -->
-  <div class="card">
-    <div class="card-title">📂 Session Categories</div>
-    <div id="category-chart" style="display:flex;flex-direction:column;gap:8px;padding:8px 0">
-      <div style="color:var(--muted);font-size:.8rem">Loading…</div>
-    </div>
-  </div>
+<div class="grid-4" style="gap:14px;margin-bottom:18px">
+  <div class="stat-card"><div id="kpi-memory-writes" class="stat-value">—</div><div class="stat-label">Memory Writes</div></div>
+  <div class="stat-card"><div id="kpi-retrieval-hits" class="stat-value">—</div><div class="stat-label">Retrieval Hits</div></div>
+  <div class="stat-card"><div id="kpi-stale-count" class="stat-value">—</div><div class="stat-label">Stale Memories</div></div>
+  <div class="stat-card"><div id="kpi-top-category" class="stat-value">—</div><div class="stat-label">Top Category</div></div>
 </div>
-
+<div class="grid-2" style="gap:16px;margin-bottom:18px">
+  <div class="card"><div class="card-title">Memory Writes per Day</div><div id="analytics-writes-trend"></div></div>
+  <div class="card"><div class="card-title">Retrieval Hits per Day</div><div id="analytics-retrieval-trend"></div></div>
+</div>
 <div class="grid-2" style="gap:16px">
-  <!-- Model usage -->
-  <div class="card">
-    <div class="card-title">🤖 Model Usage</div>
-    <div id="model-usage-list" style="display:flex;flex-direction:column;gap:8px;padding:4px 0">
-      <div style="color:var(--muted);font-size:.8rem">Loading…</div>
-    </div>
-  </div>
-  <!-- Top memories -->
-  <div class="card">
-    <div class="card-title">🧠 Recent Core Memories</div>
-    <div id="recent-memories-list" style="display:flex;flex-direction:column;gap:8px;padding:4px 0">
-      <div style="color:var(--muted);font-size:.8rem">Loading…</div>
-    </div>
+  <div class="card"><div class="card-title">Top Categories</div><div id="analytics-top-categories"></div></div>
+  <div class="card" style="overflow:auto">
+    <div class="card-title">Stale Memories</div>
+    <table class="tbl">
+      <thead><tr><th>Session</th><th>Category</th><th>Owner</th><th>Updated</th><th>Last Retrieval</th></tr></thead>
+      <tbody id="analytics-stale-body"><tr><td colspan="5" style="text-align:center;color:var(--muted)">Loading…</td></tr></tbody>
+    </table>
   </div>
 </div>`;
 }
