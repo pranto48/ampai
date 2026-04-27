@@ -53,6 +53,21 @@ core_memories = Table(
     Column('fact', String)
 )
 
+memory_candidates = Table(
+    "memory_candidates",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("session_id", String, nullable=True),
+    Column("candidate_text", String, nullable=False),
+    Column("source_message_id", String, nullable=True),
+    Column("source_offset", Integer, nullable=True),
+    Column("confidence", String, nullable=True),
+    Column("status", String, nullable=False, default="pending"),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("reviewed_at", DateTime(timezone=True), nullable=True),
+)
+
 network_targets = Table(
     'network_targets', metadata,
     Column('id', Integer, primary_key=True, autoincrement=True),
@@ -187,6 +202,18 @@ users = Table(
     Column("password_hash", String, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
+persona_presets = Table(
+    "persona_presets",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=True),
+    Column("name", String, nullable=False),
+    Column("system_prompt", String, nullable=False),
+    Column("tags", String, nullable=True),
+    Column("is_default", Boolean, nullable=False, default=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
 
 try:
@@ -1740,6 +1767,61 @@ def _as_bool(value, default: bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def get_default_memory_policy() -> Dict[str, object]:
+    categories_raw = get_config("memory_policy_default_allowed_categories", "")
+    categories = [c.strip() for c in str(categories_raw or "").split(",") if c.strip()]
+    return {
+        "auto_capture_enabled": _as_bool(get_config("memory_policy_default_auto_capture_enabled", "true"), True),
+        "require_approval": _as_bool(get_config("memory_policy_default_require_approval", "false"), False),
+        "pii_strict_mode": _as_bool(get_config("memory_policy_default_pii_strict_mode", "false"), False),
+        "retention_days": max(1, int(get_config("memory_policy_default_retention_days", "365") or 365)),
+        "allowed_categories": categories,
+    }
+
+
+def get_effective_memory_policy(username: str) -> Dict[str, object]:
+    defaults = get_default_memory_policy()
+    raw = get_config(f"user:{username}:memory_policy", "")
+    if not raw:
+        return defaults
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return defaults
+        merged = {**defaults, **parsed}
+        merged["auto_capture_enabled"] = bool(merged.get("auto_capture_enabled", defaults["auto_capture_enabled"]))
+        merged["require_approval"] = bool(merged.get("require_approval", defaults["require_approval"]))
+        merged["pii_strict_mode"] = bool(merged.get("pii_strict_mode", defaults["pii_strict_mode"]))
+        merged["retention_days"] = max(1, int(merged.get("retention_days", defaults["retention_days"])))
+        categories = merged.get("allowed_categories")
+        if isinstance(categories, list):
+            merged["allowed_categories"] = [str(c).strip() for c in categories if str(c).strip()]
+        else:
+            merged["allowed_categories"] = defaults["allowed_categories"]
+        return merged
+    except Exception as exc:
+        logger.warning(f"Error loading memory policy for user {username}: {exc}")
+        return defaults
+
+
+def upsert_user_memory_policy(
+    username: str,
+    auto_capture_enabled: bool,
+    require_approval: bool,
+    pii_strict_mode: bool,
+    retention_days: int,
+    allowed_categories: List[str],
+) -> bool:
+    payload = {
+        "auto_capture_enabled": bool(auto_capture_enabled),
+        "require_approval": bool(require_approval),
+        "pii_strict_mode": bool(pii_strict_mode),
+        "retention_days": max(1, int(retention_days)),
+        "allowed_categories": [str(c).strip() for c in (allowed_categories or []) if str(c).strip()],
+    }
+    return set_config(f"user:{username}:memory_policy", json.dumps(payload))
+
+
 def get_effective_notification_preferences(username: str) -> Dict[str, object]:
     defaults = {
         "browser_notify_on_away_replies": _as_bool(get_config("notification_default_browser_notify_on_away_replies", "true"), True),
@@ -1907,6 +1989,178 @@ def mark_pending_reply_notifications_delivered(ids: List[int]) -> int:
         return 0
 
 
+def list_personas(username: str, include_global: bool = True) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            if include_global:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT id, username, name, system_prompt, tags, is_default, created_at
+                        FROM persona_presets
+                        WHERE username = :username OR username IS NULL
+                        ORDER BY is_default DESC, created_at DESC, id DESC
+                        """
+                    ),
+                    {"username": username},
+                ).mappings().all()
+            else:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT id, username, name, system_prompt, tags, is_default, created_at
+                        FROM persona_presets
+                        WHERE username = :username
+                        ORDER BY is_default DESC, created_at DESC, id DESC
+                        """
+                    ),
+                    {"username": username},
+                ).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as exc:
+        logger.exception("Error listing personas", exc_info=exc)
+        return []
+
+
+def create_persona(username: Optional[str], name: str, system_prompt: str, tags: str = "", is_default: bool = False) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    owner = username if username else None
+    try:
+        with engine.connect() as conn:
+            if is_default:
+                conn.execute(
+                    text("UPDATE persona_presets SET is_default = FALSE WHERE username IS NOT DISTINCT FROM :owner"),
+                    {"owner": owner},
+                )
+            row = conn.execute(
+                text(
+                    """
+                    INSERT INTO persona_presets (username, name, system_prompt, tags, is_default, created_at)
+                    VALUES (:username, :name, :system_prompt, :tags, :is_default, NOW())
+                    RETURNING id, username, name, system_prompt, tags, is_default, created_at
+                    """
+                ),
+                {
+                    "username": owner,
+                    "name": (name or "").strip()[:120],
+                    "system_prompt": (system_prompt or "").strip()[:8000],
+                    "tags": (tags or "").strip()[:500],
+                    "is_default": bool(is_default),
+                },
+            ).mappings().first()
+            conn.commit()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error creating persona", exc_info=exc)
+        return None
+
+
+def update_persona(persona_id: int, actor_username: str, is_admin: bool, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    allowed = {"name", "system_prompt", "tags", "is_default"}
+    payload = {k: v for k, v in (updates or {}).items() if k in allowed and v is not None}
+    if not payload:
+        return None
+    try:
+        with engine.connect() as conn:
+            existing = conn.execute(
+                text("SELECT id, username FROM persona_presets WHERE id = :id"),
+                {"id": int(persona_id)},
+            ).mappings().first()
+            if not existing:
+                return None
+            owner = existing.get("username")
+            if not is_admin and owner != actor_username:
+                return None
+            if payload.get("is_default") is True:
+                conn.execute(
+                    text("UPDATE persona_presets SET is_default = FALSE WHERE username IS NOT DISTINCT FROM :owner"),
+                    {"owner": owner},
+                )
+            set_clauses = []
+            params: Dict[str, Any] = {"id": int(persona_id)}
+            for key, value in payload.items():
+                set_clauses.append(f"{key} = :{key}")
+                if key == "name":
+                    params[key] = str(value).strip()[:120]
+                elif key == "system_prompt":
+                    params[key] = str(value).strip()[:8000]
+                elif key == "tags":
+                    params[key] = str(value).strip()[:500]
+                elif key == "is_default":
+                    params[key] = bool(value)
+                else:
+                    params[key] = value
+            row = conn.execute(
+                text(
+                    f"""
+                    UPDATE persona_presets
+                    SET {', '.join(set_clauses)}
+                    WHERE id = :id
+                    RETURNING id, username, name, system_prompt, tags, is_default, created_at
+                    """
+                ),
+                params,
+            ).mappings().first()
+            conn.commit()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error updating persona", exc_info=exc)
+        return None
+
+
+def delete_persona(persona_id: int, actor_username: str, is_admin: bool) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            existing = conn.execute(
+                text("SELECT username FROM persona_presets WHERE id = :id"),
+                {"id": int(persona_id)},
+            ).mappings().first()
+            if not existing:
+                return False
+            owner = existing.get("username")
+            if not is_admin and owner != actor_username:
+                return False
+            result = conn.execute(text("DELETE FROM persona_presets WHERE id = :id"), {"id": int(persona_id)})
+            conn.commit()
+            return bool(result.rowcount)
+    except Exception as exc:
+        logger.exception("Error deleting persona", exc_info=exc)
+        return False
+
+
+def get_persona_for_user(persona_id: int, username: str, is_admin: bool = False) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, username, name, system_prompt, tags, is_default, created_at
+                    FROM persona_presets
+                    WHERE id = :id
+                    """
+                ),
+                {"id": int(persona_id)},
+            ).mappings().first()
+            if not row:
+                return None
+            data = dict(row)
+            owner = data.get("username")
+            if is_admin or owner is None or owner == username:
+                return data
+            return None
+    except Exception:
+        return None
+
+
 def ensure_enterprise_tables() -> None:
     if not engine:
         return
@@ -1939,9 +2193,115 @@ def ensure_enterprise_tables() -> None:
                     """
                 )
             )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS persona_presets (
+                        id BIGSERIAL PRIMARY KEY,
+                        username VARCHAR NULL,
+                        name VARCHAR NOT NULL,
+                        system_prompt TEXT NOT NULL,
+                        tags TEXT,
+                        is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
             conn.commit()
     except Exception as exc:
         logger.exception("Error ensuring enterprise tables", exc_info=exc)
+
+
+def list_memory_candidates(
+    username: str,
+    status: Optional[str] = "pending",
+    limit: int = 50,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    safe_limit = max(1, min(int(limit), 500))
+    safe_offset = max(0, int(offset))
+    cleaned_status = (status or "").strip().lower()
+    try:
+        with engine.connect() as conn:
+            where_sql = "WHERE username = :username"
+            params: Dict[str, Any] = {"username": username, "limit": safe_limit, "offset": safe_offset}
+            if cleaned_status:
+                where_sql += " AND status = :status"
+                params["status"] = cleaned_status
+            rows = conn.execute(
+                text(
+                    f"""
+                    SELECT id, username, session_id, candidate_text, source_message_id, source_offset,
+                           confidence, status, created_at, reviewed_at
+                    FROM memory_candidates
+                    {where_sql}
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                params,
+            ).mappings().all()
+            return [dict(row) for row in rows]
+    except Exception as exc:
+        logger.exception("Error listing memory candidates", exc_info=exc)
+        return []
+
+
+def update_memory_candidate_status(id: int, status: str, edited_text: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    clean_status = (status or "").strip().lower()
+    if clean_status not in {"pending", "approved", "rejected"}:
+        return None
+    try:
+        with engine.connect() as conn:
+            params: Dict[str, Any] = {"id": int(id), "status": clean_status}
+            set_sql = "status = :status, reviewed_at = NOW()"
+            if edited_text is not None and edited_text.strip():
+                params["candidate_text"] = edited_text.strip()
+                set_sql += ", candidate_text = :candidate_text"
+            row = conn.execute(
+                text(
+                    f"""
+                    UPDATE memory_candidates
+                    SET {set_sql}
+                    WHERE id = :id
+                    RETURNING id, username, session_id, candidate_text, source_message_id, source_offset,
+                              confidence, status, created_at, reviewed_at
+                    """
+                ),
+                params,
+            ).mappings().first()
+            conn.commit()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error updating memory candidate status", exc_info=exc)
+        return None
+
+
+def get_memory_candidate_by_id(id: int) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, username, session_id, candidate_text, source_message_id, source_offset,
+                           confidence, status, created_at, reviewed_at
+                    FROM memory_candidates
+                    WHERE id = :id
+                    """
+                ),
+                {"id": int(id)},
+            ).mappings().first()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.exception("Error getting memory candidate", exc_info=exc)
+        return None
 
 
 def log_audit_event(username: str, action: str, session_id: Optional[str] = None, category: Optional[str] = None, details: Optional[str] = None) -> None:

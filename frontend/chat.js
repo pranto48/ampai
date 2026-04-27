@@ -4,14 +4,25 @@
 
 let chatAttachments = [];
 let _chatHandlersBound = false;
+const PERSONA_PREF_KEY = 'ampai_persona_id';
 
 function chatInit() {
   // Only load sessions each time; bind handlers only once
   loadSessions();
+  loadPersonaOptions();
   _updateChatSessionDisplay();
+  loadMemoryPolicyBadge();
   if (!_chatHandlersBound) {
     _chatHandlersBound = true;
     _bindChatHandlers();
+  }
+}
+
+async function loadMemoryPolicyBadge() {
+  const { ok, data } = await apiJSON('/api/users/me/memory-policy');
+  if (!ok) return;
+  if (typeof window.updateMemoryPolicyBadge === 'function') {
+    window.updateMemoryPolicyBadge(data || {});
   }
 }
 
@@ -51,6 +62,9 @@ function _bindChatHandlers() {
   });
 
   sendBtn?.addEventListener('click', _sendChat);
+  document.getElementById('persona-select')?.addEventListener('change', (e) => {
+    localStorage.setItem(PERSONA_PREF_KEY, e.target.value || '');
+  });
 
   // File attach
   document.getElementById('attach-btn')?.addEventListener('click', () => {
@@ -255,6 +269,26 @@ async function _sendChat() {
     loadSessions(); // refresh sidebar
   } else {
     _appendMsg('ai', '⚠️ ' + (data.detail || 'Something went wrong. Check your AI model config.'));
+  }
+}
+
+async function loadPersonaOptions() {
+  const select = document.getElementById('persona-select');
+  if (!select) return;
+  const saved = localStorage.getItem(PERSONA_PREF_KEY) || '';
+  const { ok, data } = await apiJSON('/api/personas');
+  if (!ok) return;
+  const personas = data.personas || [];
+  select.innerHTML = '<option value="">🧩 Default Persona</option>' + personas.map((p) => {
+    const scope = p.username ? '👤' : '🌐';
+    const marker = p.is_default ? ' • default' : '';
+    return `<option value="${p.id}">${scope} ${p.name}${marker}</option>`;
+  }).join('');
+  if (saved && [...select.options].some((o) => o.value === saved)) {
+    select.value = saved;
+  } else {
+    const fallback = personas.find((p) => p.is_default);
+    if (fallback) select.value = String(fallback.id);
   }
 }
 
