@@ -151,6 +151,74 @@ function buildMemoryPage() {
 </div>`;
 }
 
+// ── Analytics inner HTML ───────────────────────────
+function buildAnalyticsPage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px">
+  <h2 style="font-size:1.15rem;font-weight:700">📊 Memory Analytics</h2>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button id="analytics-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+    <button id="analytics-export-csv-btn" class="btn btn-secondary btn-sm">⬇ Export CSV</button>
+  </div>
+</div>
+
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:18px">
+  <div style="min-width:140px">
+    <label class="lbl">From</label>
+    <input id="analytics-date-from" type="date" class="input"/>
+  </div>
+  <div style="min-width:140px">
+    <label class="lbl">To</label>
+    <input id="analytics-date-to" type="date" class="input"/>
+  </div>
+  <div style="min-width:130px">
+    <label class="lbl">Scope</label>
+    <select id="analytics-owner-scope" class="input">
+      <option value="mine">Mine</option>
+      <option value="shared">Shared</option>
+      <option value="all">All</option>
+    </select>
+  </div>
+  <div style="min-width:120px">
+    <label class="lbl">Stale days</label>
+    <input id="analytics-stale-days" type="number" min="1" value="30" class="input"/>
+  </div>
+  <button id="analytics-apply-btn" class="btn btn-primary">Apply</button>
+</div>
+
+<div class="grid-4" style="gap:14px;margin-bottom:18px">
+  <div class="stat-card"><div id="kpi-memory-writes" class="stat-value">—</div><div class="stat-label">Memory Writes</div></div>
+  <div class="stat-card"><div id="kpi-retrieval-hits" class="stat-value">—</div><div class="stat-label">Retrieval Hits</div></div>
+  <div class="stat-card"><div id="kpi-stale-count" class="stat-value">—</div><div class="stat-label">Stale Memories</div></div>
+  <div class="stat-card"><div id="kpi-top-category" class="stat-value">—</div><div class="stat-label">Top Category</div></div>
+</div>
+
+<div class="grid-2" style="gap:16px;margin-bottom:18px">
+  <div class="card">
+    <div class="card-title">Memory Writes per Day</div>
+    <div id="analytics-writes-trend"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Retrieval Hits per Day</div>
+    <div id="analytics-retrieval-trend"></div>
+  </div>
+</div>
+
+<div class="grid-2" style="gap:16px">
+  <div class="card">
+    <div class="card-title">Top Categories</div>
+    <div id="analytics-top-categories"></div>
+  </div>
+  <div class="card" style="overflow:auto">
+    <div class="card-title">Stale Memories</div>
+    <table class="tbl">
+      <thead><tr><th>Session</th><th>Category</th><th>Owner</th><th>Updated</th><th>Last Retrieval</th></tr></thead>
+      <tbody id="analytics-stale-body"><tr><td colspan="5" style="text-align:center;color:var(--muted)">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>`;
+}
+
 // ── AI Models inner HTML ───────────────────────────
 function buildModelsPage() {
   return `

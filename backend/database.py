@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional, Dict, Tuple
 from sqlalchemy import create_engine, MetaData, Table as SATable, Column, Integer, String, DateTime, Boolean, select, inspect, text
 from cryptography.fernet import Fernet, InvalidToken
@@ -1990,6 +1990,252 @@ def list_audit_events(limit: int = 200) -> List[Dict[str, Any]]:
             return [dict(r) for r in rows]
     except Exception:
         return []
+
+
+def _normalize_analytics_scope(scope: Optional[str]) -> str:
+    normalized = (scope or "mine").strip().lower()
+    return normalized if normalized in {"mine", "shared", "all"} else "mine"
+
+
+def _parse_analytics_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception:
+        return None
+
+
+def get_memory_analytics(
+    username: str,
+    is_admin: bool,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    owner_scope: str = "mine",
+    stale_days: int = 30,
+    top_n: int = 8,
+) -> Dict[str, Any]:
+    if not engine:
+        return {
+            "kpis": {"memory_writes_total": 0, "retrieval_hits_total": 0, "stale_memories_count": 0},
+            "memory_writes_per_day": [],
+            "retrieval_hits_per_day": [],
+            "top_categories": [],
+            "stale_memories": [],
+        }
+
+    scope = _normalize_analytics_scope(owner_scope)
+    if not is_admin and scope == "all":
+        scope = "mine"
+
+    from_dt = _parse_analytics_dt(date_from)
+    to_dt = _parse_analytics_dt(date_to)
+    if not to_dt:
+        to_dt = datetime.now(timezone.utc)
+    if not from_dt:
+        from_dt = to_dt - timedelta(days=30)
+    if from_dt > to_dt:
+        from_dt, to_dt = to_dt, from_dt
+
+    stale_days = max(1, int(stale_days))
+    top_n = max(1, min(int(top_n), 20))
+
+    accessible_ids = set(get_accessible_session_ids(username=username, is_admin=is_admin))
+    shared_ids = set(list_shared_sessions_for_user(username))
+    if not is_admin and not accessible_ids:
+        return {
+            "kpis": {"memory_writes_total": 0, "retrieval_hits_total": 0, "stale_memories_count": 0},
+            "memory_writes_per_day": [],
+            "retrieval_hits_per_day": [],
+            "top_categories": [],
+            "stale_memories": [],
+            "scope": scope,
+            "date_from": from_dt.isoformat(),
+            "date_to": to_dt.isoformat(),
+            "stale_days": stale_days,
+        }
+
+    audit_scope_sql = ""
+    metadata_scope_sql = ""
+    params: Dict[str, Any] = {
+        "from_dt": from_dt,
+        "to_dt": to_dt,
+        "stale_days": stale_days,
+        "top_n": top_n,
+    }
+
+    if is_admin:
+        if scope == "mine":
+            audit_scope_sql = "AND ae.username = :username"
+            metadata_scope_sql = "AND sa.owner_username = :username"
+            params["username"] = username
+    else:
+        session_ids = sorted(accessible_ids)
+        if scope == "mine":
+            session_ids = [sid for sid in session_ids if sid not in shared_ids]
+        elif scope == "shared":
+            session_ids = [sid for sid in session_ids if sid in shared_ids]
+        params["session_ids"] = session_ids
+        if not session_ids:
+            return {
+                "kpis": {"memory_writes_total": 0, "retrieval_hits_total": 0, "stale_memories_count": 0},
+                "memory_writes_per_day": [],
+                "retrieval_hits_per_day": [],
+                "top_categories": [],
+                "stale_memories": [],
+                "scope": scope,
+                "date_from": from_dt.isoformat(),
+                "date_to": to_dt.isoformat(),
+                "stale_days": stale_days,
+            }
+        audit_scope_sql = "AND (ae.session_id = ANY(:session_ids) OR ae.username = :username)"
+        metadata_scope_sql = "AND sm.session_id = ANY(:session_ids)"
+        params["username"] = username
+
+    try:
+        with engine.connect() as conn:
+            writes_rows = conn.execute(
+                text(
+                    f"""
+                    SELECT DATE_TRUNC('day', ae.created_at) AS day, COUNT(*) AS count
+                    FROM audit_events ae
+                    LEFT JOIN session_access sa ON sa.session_id = ae.session_id
+                    WHERE ae.action = 'memory.write.chat'
+                      AND ae.created_at >= :from_dt
+                      AND ae.created_at <= :to_dt
+                      {audit_scope_sql}
+                    GROUP BY 1
+                    ORDER BY 1 ASC
+                    """
+                ),
+                params,
+            ).mappings().all()
+
+            retrieval_rows = conn.execute(
+                text(
+                    f"""
+                    SELECT DATE_TRUNC('day', ae.created_at) AS day, COUNT(*) AS count
+                    FROM audit_events ae
+                    LEFT JOIN session_access sa ON sa.session_id = ae.session_id
+                    WHERE ae.action IN ('memory.read.history', 'memory.read.explorer')
+                      AND ae.created_at >= :from_dt
+                      AND ae.created_at <= :to_dt
+                      {audit_scope_sql}
+                    GROUP BY 1
+                    ORDER BY 1 ASC
+                    """
+                ),
+                params,
+            ).mappings().all()
+
+            categories_rows = conn.execute(
+                text(
+                    f"""
+                    SELECT COALESCE(sm.category, 'Uncategorized') AS category, COUNT(*) AS count
+                    FROM session_metadata sm
+                    LEFT JOIN session_access sa ON sa.session_id = sm.session_id
+                    WHERE 1=1
+                      {metadata_scope_sql}
+                    GROUP BY 1
+                    ORDER BY count DESC, category ASC
+                    LIMIT :top_n
+                    """
+                ),
+                params,
+            ).mappings().all()
+
+            stale_rows = conn.execute(
+                text(
+                    f"""
+                    SELECT
+                        sm.session_id,
+                        COALESCE(sm.category, 'Uncategorized') AS category,
+                        COALESCE(sa.owner_username, 'unknown') AS owner,
+                        sm.updated_at,
+                        (
+                            SELECT MAX(ae.created_at)
+                            FROM audit_events ae
+                            WHERE ae.session_id = sm.session_id
+                              AND ae.action IN ('memory.read.history', 'memory.read.explorer')
+                        ) AS last_retrieval_at
+                    FROM session_metadata sm
+                    LEFT JOIN session_access sa ON sa.session_id = sm.session_id
+                    WHERE sm.updated_at IS NOT NULL
+                      AND sm.updated_at::timestamptz <= NOW() - make_interval(days => :stale_days)
+                      AND (
+                          (
+                              SELECT MAX(ae.created_at)
+                              FROM audit_events ae
+                              WHERE ae.session_id = sm.session_id
+                                AND ae.action IN ('memory.read.history', 'memory.read.explorer')
+                          ) IS NULL
+                          OR
+                          (
+                              SELECT MAX(ae.created_at)
+                              FROM audit_events ae
+                              WHERE ae.session_id = sm.session_id
+                                AND ae.action IN ('memory.read.history', 'memory.read.explorer')
+                          ) <= NOW() - make_interval(days => :stale_days)
+                      )
+                      {metadata_scope_sql}
+                    ORDER BY sm.updated_at ASC
+                    LIMIT 200
+                    """
+                ),
+                params,
+            ).mappings().all()
+    except Exception as exc:
+        logger.exception("Error building memory analytics", exc_info=exc)
+        return {
+            "kpis": {"memory_writes_total": 0, "retrieval_hits_total": 0, "stale_memories_count": 0},
+            "memory_writes_per_day": [],
+            "retrieval_hits_per_day": [],
+            "top_categories": [],
+            "stale_memories": [],
+            "scope": scope,
+            "date_from": from_dt.isoformat(),
+            "date_to": to_dt.isoformat(),
+            "stale_days": stale_days,
+        }
+
+    writes = [{"day": r["day"].date().isoformat(), "count": int(r["count"] or 0)} for r in writes_rows]
+    retrieval = [{"day": r["day"].date().isoformat(), "count": int(r["count"] or 0)} for r in retrieval_rows]
+    top_categories_rows = [{"category": r["category"], "count": int(r["count"] or 0)} for r in categories_rows]
+    stale_memories = []
+    for row in stale_rows:
+        updated_at = row.get("updated_at")
+        last_retrieval = row.get("last_retrieval_at")
+        stale_memories.append(
+            {
+                "session_id": row.get("session_id"),
+                "category": row.get("category") or "Uncategorized",
+                "owner": row.get("owner") or "unknown",
+                "updated_at": updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or ""),
+                "last_retrieval_at": last_retrieval.isoformat() if hasattr(last_retrieval, "isoformat") else (str(last_retrieval) if last_retrieval else None),
+            }
+        )
+
+    return {
+        "kpis": {
+            "memory_writes_total": sum(item["count"] for item in writes),
+            "retrieval_hits_total": sum(item["count"] for item in retrieval),
+            "stale_memories_count": len(stale_memories),
+        },
+        "memory_writes_per_day": writes,
+        "retrieval_hits_per_day": retrieval,
+        "top_categories": top_categories_rows,
+        "stale_memories": stale_memories,
+        "scope": scope,
+        "date_from": from_dt.isoformat(),
+        "date_to": to_dt.isoformat(),
+        "stale_days": stale_days,
+    }
 
 
 def upsert_session_insight(session_id: str, summary: str, tags: List[str]) -> bool:

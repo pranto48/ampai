@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import json
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 from datetime import datetime, timedelta, timezone
 import shutil
 import uuid
@@ -89,6 +89,7 @@ from database import (
     upsert_session_insight,
     get_session_insight,
     list_audit_events,
+    get_memory_analytics,
     get_effective_notification_preferences,
     upsert_user_notification_preferences,
     enqueue_pending_reply_notification,
@@ -2038,6 +2039,76 @@ def analytics_summary(user=Depends(require_authenticated_user)):
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+def _memory_analytics_to_csv(payload: Dict[str, Any]) -> str:
+    lines: List[str] = []
+    lines.append("section,key,value")
+    kpis = payload.get("kpis") or {}
+    for key in ["memory_writes_total", "retrieval_hits_total", "stale_memories_count"]:
+        lines.append(f"kpi,{key},{kpis.get(key, 0)}")
+
+    lines.append("")
+    lines.append("memory_writes_per_day,day,count")
+    for row in payload.get("memory_writes_per_day") or []:
+        lines.append(f"memory_writes_per_day,{row.get('day','')},{row.get('count',0)}")
+
+    lines.append("")
+    lines.append("retrieval_hits_per_day,day,count")
+    for row in payload.get("retrieval_hits_per_day") or []:
+        lines.append(f"retrieval_hits_per_day,{row.get('day','')},{row.get('count',0)}")
+
+    lines.append("")
+    lines.append("top_categories,category,count")
+    for row in payload.get("top_categories") or []:
+        category = str(row.get("category", "")).replace('"', '""')
+        lines.append(f'top_categories,"{category}",{row.get("count",0)}')
+
+    lines.append("")
+    lines.append("stale_memories,session_id,category,owner,updated_at,last_retrieval_at")
+    for row in payload.get("stale_memories") or []:
+        category = str(row.get("category", "")).replace('"', '""')
+        owner = str(row.get("owner", "")).replace('"', '""')
+        lines.append(
+            f'stale_memories,{row.get("session_id","")},"{category}","{owner}",{row.get("updated_at","")},{row.get("last_retrieval_at","") or ""}'
+        )
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/api/memory/analytics")
+def memory_analytics(
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    owner_scope: str = Query(default="mine"),
+    stale_days: int = Query(default=30, ge=1, le=3650),
+    top_n: int = Query(default=8, ge=1, le=20),
+    export: Optional[str] = Query(default=None),
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    normalized_scope = (owner_scope or "mine").strip().lower()
+    if normalized_scope not in {"mine", "shared", "all"}:
+        raise HTTPException(status_code=400, detail="owner_scope must be mine, shared, or all")
+    if current_user.role != "admin" and normalized_scope == "all":
+        normalized_scope = "mine"
+
+    payload = get_memory_analytics(
+        username=current_user.username,
+        is_admin=current_user.role == "admin",
+        date_from=date_from,
+        date_to=date_to,
+        owner_scope=normalized_scope,
+        stale_days=stale_days,
+        top_n=top_n,
+    )
+
+    if (export or "").strip().lower() == "csv":
+        csv_body = _memory_analytics_to_csv(payload)
+        return Response(
+            content=csv_body,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=memory-analytics.csv"},
+        )
+    return payload
 
 
 

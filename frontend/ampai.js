@@ -51,7 +51,7 @@ function closeModal(id) { document.getElementById(id)?.classList.remove('open');
 const SUBPAGES = ['chat','memory','tasks','notes','analytics','network','models','settings','admin'];
 const PAGE_TITLES = {
   chat:'Chat', memory:'Memory Explorer', tasks:'Task Manager',
-  notes:'Notes', analytics:'Analytics', network:'Network Monitor',
+  notes:'Notes', analytics:'Memory Analytics', network:'Network Monitor',
   models:'AI Models', settings:'Settings', admin:'Admin Panel'
 };
 
