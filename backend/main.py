@@ -168,23 +168,9 @@ class ChatRequest(BaseModel):
     memory_mode: str = "full"
     use_web_search: bool = False
     attachments: List[Attachment] = []
-    persona_id: Optional[int] = None
-    system_prompt_override: Optional[str] = None
-
-
-class PersonaCreateRequest(BaseModel):
-    name: str
-    system_prompt: str
-    tags: Optional[str] = ""
-    is_default: bool = False
-    is_global: bool = False
-
-
-class PersonaUpdateRequest(BaseModel):
-    name: Optional[str] = None
-    system_prompt: Optional[str] = None
-    tags: Optional[str] = None
-    is_default: Optional[bool] = None
+    memory_top_k: Optional[int] = None
+    recency_bias: Optional[float] = None
+    category_filter: Optional[str] = None
 
 
 class CategoryRequest(BaseModel):
@@ -798,7 +784,14 @@ def api_delete_persona(persona_id: int, user: UserContext = Depends(require_auth
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
         _ensure_session_owner_for_user(request.session_id, user)
-        memory_policy = get_effective_memory_policy(user.username)
+        memory_top_k = int(request.memory_top_k if request.memory_top_k is not None else 5)
+        memory_top_k = max(1, min(20, memory_top_k))
+        recency_bias = float(request.recency_bias if request.recency_bias is not None else 0.35)
+        recency_bias = max(0.0, min(1.0, recency_bias))
+        category_filter = (request.category_filter or "").strip() or None
+        if category_filter and len(category_filter) > 64:
+            category_filter = category_filter[:64]
+
         result = chat_with_agent(
             session_id=request.session_id,
             message=request.message,
@@ -808,10 +801,9 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             memory_mode=request.memory_mode,
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
-            persona_id=request.persona_id,
-            persona_prompt_override=request.system_prompt_override,
-            username=user.username,
-            is_admin=(user.role == "admin"),
+            memory_top_k=memory_top_k,
+            recency_bias=recency_bias,
+            category_filter=category_filter,
         )
         ensure_session_owner(request.session_id, user.username)
         if bool(memory_policy.get("auto_capture_enabled", True)):
