@@ -9,9 +9,18 @@ function chatInit() {
   // Only load sessions each time; bind handlers only once
   loadSessions();
   _updateChatSessionDisplay();
+  loadMemoryPolicyBadge();
   if (!_chatHandlersBound) {
     _chatHandlersBound = true;
     _bindChatHandlers();
+  }
+}
+
+async function loadMemoryPolicyBadge() {
+  const { ok, data } = await apiJSON('/api/users/me/memory-policy');
+  if (!ok) return;
+  if (typeof window.updateMemoryPolicyBadge === 'function') {
+    window.updateMemoryPolicyBadge(data || {});
   }
 }
 

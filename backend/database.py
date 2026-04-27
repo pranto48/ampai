@@ -1755,6 +1755,61 @@ def _as_bool(value, default: bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def get_default_memory_policy() -> Dict[str, object]:
+    categories_raw = get_config("memory_policy_default_allowed_categories", "")
+    categories = [c.strip() for c in str(categories_raw or "").split(",") if c.strip()]
+    return {
+        "auto_capture_enabled": _as_bool(get_config("memory_policy_default_auto_capture_enabled", "true"), True),
+        "require_approval": _as_bool(get_config("memory_policy_default_require_approval", "false"), False),
+        "pii_strict_mode": _as_bool(get_config("memory_policy_default_pii_strict_mode", "false"), False),
+        "retention_days": max(1, int(get_config("memory_policy_default_retention_days", "365") or 365)),
+        "allowed_categories": categories,
+    }
+
+
+def get_effective_memory_policy(username: str) -> Dict[str, object]:
+    defaults = get_default_memory_policy()
+    raw = get_config(f"user:{username}:memory_policy", "")
+    if not raw:
+        return defaults
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return defaults
+        merged = {**defaults, **parsed}
+        merged["auto_capture_enabled"] = bool(merged.get("auto_capture_enabled", defaults["auto_capture_enabled"]))
+        merged["require_approval"] = bool(merged.get("require_approval", defaults["require_approval"]))
+        merged["pii_strict_mode"] = bool(merged.get("pii_strict_mode", defaults["pii_strict_mode"]))
+        merged["retention_days"] = max(1, int(merged.get("retention_days", defaults["retention_days"])))
+        categories = merged.get("allowed_categories")
+        if isinstance(categories, list):
+            merged["allowed_categories"] = [str(c).strip() for c in categories if str(c).strip()]
+        else:
+            merged["allowed_categories"] = defaults["allowed_categories"]
+        return merged
+    except Exception as exc:
+        logger.warning(f"Error loading memory policy for user {username}: {exc}")
+        return defaults
+
+
+def upsert_user_memory_policy(
+    username: str,
+    auto_capture_enabled: bool,
+    require_approval: bool,
+    pii_strict_mode: bool,
+    retention_days: int,
+    allowed_categories: List[str],
+) -> bool:
+    payload = {
+        "auto_capture_enabled": bool(auto_capture_enabled),
+        "require_approval": bool(require_approval),
+        "pii_strict_mode": bool(pii_strict_mode),
+        "retention_days": max(1, int(retention_days)),
+        "allowed_categories": [str(c).strip() for c in (allowed_categories or []) if str(c).strip()],
+    }
+    return set_config(f"user:{username}:memory_policy", json.dumps(payload))
+
+
 def get_effective_notification_preferences(username: str) -> Dict[str, object]:
     defaults = {
         "browser_notify_on_away_replies": _as_bool(get_config("notification_default_browser_notify_on_away_replies", "true"), True),

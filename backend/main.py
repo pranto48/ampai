@@ -94,7 +94,9 @@ from database import (
     list_audit_events,
     list_memory_candidates,
     get_effective_notification_preferences,
+    get_effective_memory_policy,
     upsert_user_notification_preferences,
+    upsert_user_memory_policy,
     enqueue_pending_reply_notification,
     engine,
 )
@@ -239,6 +241,14 @@ class NotificationPreferencesUpdateRequest(BaseModel):
     minimum_notify_interval_seconds: int = 300
     digest_mode: str = "immediate"
     digest_interval_minutes: int = 30
+
+
+class MemoryPolicyUpdateRequest(BaseModel):
+    auto_capture_enabled: bool = True
+    require_approval: bool = False
+    pii_strict_mode: bool = False
+    retention_days: int = 365
+    allowed_categories: List[str] = []
 
 
 class TaskCreateRequest(BaseModel):
@@ -725,6 +735,7 @@ def _insight_worker() -> None:
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
         _ensure_session_owner_for_user(request.session_id, user)
+        memory_policy = get_effective_memory_policy(user.username)
         result = chat_with_agent(
             session_id=request.session_id,
             message=request.message,
@@ -734,10 +745,18 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             memory_mode=request.memory_mode,
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
+            persist_memory=bool(memory_policy.get("auto_capture_enabled", True)),
+            require_memory_approval=bool(memory_policy.get("require_approval", False)),
+            pii_strict_mode=bool(memory_policy.get("pii_strict_mode", False)),
+            allowed_memory_categories=memory_policy.get("allowed_categories", []),
         )
         ensure_session_owner(request.session_id, user.username)
-        touch_session(request.session_id)
-        log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={request.model_type}")
+        if bool(memory_policy.get("auto_capture_enabled", True)):
+            touch_session(request.session_id)
+            apply_retention_policy(max_age_days=int(memory_policy.get("retention_days", 365)), archive_only=True)
+            log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={request.model_type}")
+        else:
+            log_audit_event(username=user.username, action="memory.skip.chat", session_id=request.session_id, details="auto_capture_disabled")
         try:
             INSIGHT_QUEUE.put_nowait(request.session_id)
         except Exception:
@@ -799,6 +818,32 @@ def update_my_notification_preferences(
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to save notification preferences")
     return {"status": "success", "preferences": get_effective_notification_preferences(current_user.username)}
+
+
+@app.get("/api/users/me/memory-policy")
+def get_my_memory_policy(current_user: UserContext = Depends(require_authenticated_user)):
+    return get_effective_memory_policy(current_user.username)
+
+
+@app.put("/api/users/me/memory-policy")
+def update_my_memory_policy(
+    request: MemoryPolicyUpdateRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    if request.retention_days < 1 or request.retention_days > 3650:
+        raise HTTPException(status_code=400, detail="retention_days must be between 1 and 3650")
+    allowed = [c.strip() for c in request.allowed_categories if (c or "").strip()]
+    ok = upsert_user_memory_policy(
+        username=current_user.username,
+        auto_capture_enabled=bool(request.auto_capture_enabled),
+        require_approval=bool(request.require_approval),
+        pii_strict_mode=bool(request.pii_strict_mode),
+        retention_days=int(request.retention_days),
+        allowed_categories=allowed,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save memory policy")
+    return {"status": "success", "policy": get_effective_memory_policy(current_user.username)}
 
 
 @app.post("/api/integrations/email/summary-today")

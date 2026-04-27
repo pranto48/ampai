@@ -511,6 +511,17 @@ async function _loadSettingsValues() {
     const intv = document.getElementById('notif-interval');  if (intv) intv.value   = p.minimum_notify_interval_seconds ?? 300;
     const dg   = document.getElementById('notif-digest');    if (dg)   dg.value     = p.digest_mode || 'immediate';
   }
+  const policyRes = await apiJSON('/api/users/me/memory-policy');
+  if (policyRes.ok) {
+    const p = policyRes.data || {};
+    const ac = document.getElementById('memory-auto-capture'); if (ac) ac.checked = !!p.auto_capture_enabled;
+    const ra = document.getElementById('memory-require-approval'); if (ra) ra.checked = !!p.require_approval;
+    const ps = document.getElementById('memory-pii-strict'); if (ps) ps.checked = !!p.pii_strict_mode;
+    const rd = document.getElementById('memory-retention-days'); if (rd) rd.value = Number(p.retention_days || 365);
+    const cat = document.getElementById('memory-allowed-categories');
+    if (cat) cat.value = Array.isArray(p.allowed_categories) ? p.allowed_categories.join(', ') : '';
+    if (typeof window.updateMemoryPolicyBadge === 'function') window.updateMemoryPolicyBadge(p);
+  }
 }
 
 async function settingsLoad() {
@@ -562,7 +573,38 @@ async function settingsLoad() {
     const { ok } = await apiJSON('/api/admin/configs', { method:'POST', body: JSON.stringify({configs}) });
     toast(ok ? 'Email config saved' : 'Failed', ok ? 'success' : 'error');
   });
+
+  document.getElementById('save-memory-policy-btn')?.addEventListener('click', async () => {
+    const retentionDays = Number(document.getElementById('memory-retention-days')?.value || 365);
+    if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) {
+      toast('Retention days must be between 1 and 3650', 'error');
+      return;
+    }
+    const categories = (document.getElementById('memory-allowed-categories')?.value || '')
+      .split(',')
+      .map(v => v.trim())
+      .filter(Boolean);
+    const payload = {
+      auto_capture_enabled: !!document.getElementById('memory-auto-capture')?.checked,
+      require_approval: !!document.getElementById('memory-require-approval')?.checked,
+      pii_strict_mode: !!document.getElementById('memory-pii-strict')?.checked,
+      retention_days: retentionDays,
+      allowed_categories: categories,
+    };
+    const { ok, data } = await apiJSON('/api/users/me/memory-policy', { method:'PUT', body: JSON.stringify(payload) });
+    toast(ok ? 'Memory policy saved' : (data.detail || 'Failed to save memory policy'), ok ? 'success' : 'error');
+    if (ok && typeof window.updateMemoryPolicyBadge === 'function') window.updateMemoryPolicyBadge(payload);
+  });
 }
+
+window.updateMemoryPolicyBadge = function updateMemoryPolicyBadge(policy = {}) {
+  const badge = document.getElementById('memory-policy-badge');
+  if (!badge) return;
+  const autoCapture = !!policy.auto_capture_enabled;
+  const requireApproval = !!policy.require_approval;
+  const label = !autoCapture ? 'Memory: Off' : (requireApproval ? 'Memory: Manual Approval' : 'Memory: Auto Capture');
+  badge.textContent = label;
+};
 
 // ── Utility ────────────────────────────────────────
 function fmtDate(v) {
