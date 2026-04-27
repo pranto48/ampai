@@ -71,6 +71,7 @@ function _bindChatHandlers() {
   document.getElementById('attach-btn')?.addEventListener('click', () => {
     document.getElementById('file-input')?.click();
   });
+  document.getElementById('quick-capture-btn')?.addEventListener('click', _quickCaptureMemory);
 
   document.getElementById('file-input')?.addEventListener('change', async e => {
     const files = Array.from(e.target.files || []);
@@ -338,6 +339,17 @@ async function _convertTaskSuggestion(id) {
   const { ok } = await apiJSON(`/api/tasks/from-suggestion/${encodeURIComponent(id)}`, { method: 'POST' });
   toast(ok ? 'Task created from suggestion' : 'Failed to create task', ok ? 'success' : 'error');
   _loadSessionTaskSuggestions(State.sessionId);
+}
+
+async function _quickCaptureMemory() {
+  const text = prompt('Quick capture: what should AmpAI remember?') || '';
+  const clean = text.trim();
+  if (!clean) return;
+  const { ok } = await apiJSON('/api/quick-capture', {
+    method: 'POST',
+    body: JSON.stringify({ text: clean, session_id: State.sessionId }),
+  });
+  toast(ok ? 'Captured to Memory Inbox' : 'Failed to capture', ok ? 'success' : 'error');
 }
 
 // ── DOM helpers ────────────────────────────────────

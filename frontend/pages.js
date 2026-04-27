@@ -124,6 +124,8 @@ function buildChatPage() {
         id="input-box">
         <button id="attach-btn" title="Attach file" style="background:none;border:none;cursor:pointer;
           color:var(--muted);padding:6px;font-size:1.1rem;transition:color .15s">📎</button>
+        <button id="quick-capture-btn" title="Quick capture memory" style="background:none;border:none;cursor:pointer;
+          color:var(--muted);padding:6px;font-size:1rem;transition:color .15s">⚡</button>
         <input type="file" id="file-input" style="display:none" multiple/>
         <textarea id="chat-input" rows="1" placeholder="Message AmpAI…"
           style="flex:1;background:none;border:none;color:var(--text);font-family:inherit;

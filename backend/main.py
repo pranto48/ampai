@@ -204,6 +204,47 @@ class PersonaUpdateRequest(BaseModel):
     is_default: Optional[bool] = None
 
 
+class MemoryInboxUpdateRequest(BaseModel):
+    status: str
+    edited_text: Optional[str] = ""
+
+
+class MemoryPolicyRequest(BaseModel):
+    auto_capture_enabled: bool = True
+    require_approval: bool = True
+    pii_strict_mode: bool = True
+    retention_days: int = 365
+    allowed_categories: List[str] = []
+
+
+class PersonaCreateRequest(BaseModel):
+    name: str
+    system_prompt: str
+    tags: List[str] = []
+    is_default: bool = False
+
+
+class PersonaUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    system_prompt: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_default: Optional[bool] = None
+
+
+class WorkspaceCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    members: List[Dict[str, str]] = []
+
+
+class WorkspaceMemberUpdateRequest(BaseModel):
+    role: str
+
+
+class WorkspaceShareSessionRequest(BaseModel):
+    session_id: str
+
+
 class CategoryRequest(BaseModel):
     category: str
 
@@ -385,6 +426,23 @@ def _append_config_item(key: str, item: Dict[str, Any]) -> Dict[str, Any]:
     rows.insert(0, item)
     _save_config_list(key, rows[:500])
     return item
+
+
+def _workspace_store() -> List[Dict[str, Any]]:
+    return _load_config_list("team_workspaces")
+
+
+def _save_workspace_store(rows: List[Dict[str, Any]]) -> None:
+    _save_config_list("team_workspaces", rows[:300])
+
+
+def _can_manage_workspace(user: UserContext, workspace: Dict[str, Any]) -> bool:
+    if user.role == "admin":
+        return True
+    for member in workspace.get("members", []):
+        if member.get("username") == user.username and member.get("role") in {"owner", "admin"}:
+            return True
+    return False
 
 
 def _get_memory_policy(username: str) -> Dict[str, Any]:
@@ -1155,6 +1213,160 @@ def delete_persona(persona_id: str, current_user: UserContext = Depends(require_
     _save_config_list("personas_library", next_rows)
     return {"status": "success"}
 
+
+@app.get("/api/workspaces")
+def list_workspaces(current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _workspace_store()
+    scoped = []
+    for row in rows:
+        members = row.get("members", [])
+        if current_user.role == "admin" or any(m.get("username") == current_user.username for m in members):
+            scoped.append(row)
+    return {"workspaces": scoped[:200]}
+
+
+@app.post("/api/workspaces")
+def create_workspace(request: WorkspaceCreateRequest, current_user: UserContext = Depends(require_authenticated_user)):
+    name = (request.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    rows = _workspace_store()
+    workspace = {
+        "id": str(uuid.uuid4()),
+        "name": name[:120],
+        "description": (request.description or "")[:400],
+        "members": [{"username": current_user.username, "role": "owner"}],
+        "session_ids": [],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    for member in request.members or []:
+        username = (member.get("username") or "").strip()
+        role = (member.get("role") or "viewer").strip().lower()
+        if not username or role not in {"owner", "admin", "editor", "viewer"}:
+            continue
+        if any(m.get("username") == username for m in workspace["members"]):
+            continue
+        workspace["members"].append({"username": username, "role": role})
+    rows.insert(0, workspace)
+    _save_workspace_store(rows)
+    return {"status": "success", "workspace": workspace}
+
+
+@app.post("/api/workspaces/{workspace_id}/members/{username}")
+def upsert_workspace_member(workspace_id: str, username: str, request: WorkspaceMemberUpdateRequest, current_user: UserContext = Depends(require_authenticated_user)):
+    role = (request.role or "").strip().lower()
+    if role not in {"owner", "admin", "editor", "viewer"}:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    rows = _workspace_store()
+    target = None
+    for row in rows:
+        if row.get("id") == workspace_id:
+            target = row
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not _can_manage_workspace(current_user, target):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    clean_username = username.strip()
+    members = target.setdefault("members", [])
+    existing = next((m for m in members if m.get("username") == clean_username), None)
+    if existing:
+        existing["role"] = role
+    else:
+        members.append({"username": clean_username, "role": role})
+    _save_workspace_store(rows)
+    return {"status": "success", "workspace": target}
+
+
+@app.delete("/api/workspaces/{workspace_id}/members/{username}")
+def remove_workspace_member(workspace_id: str, username: str, current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _workspace_store()
+    target = None
+    for row in rows:
+        if row.get("id") == workspace_id:
+            target = row
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not _can_manage_workspace(current_user, target):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    members = target.get("members", [])
+    target["members"] = [m for m in members if m.get("username") != username.strip()]
+    _save_workspace_store(rows)
+    return {"status": "success", "workspace": target}
+
+
+@app.post("/api/workspaces/{workspace_id}/share-session")
+def share_session_to_workspace(workspace_id: str, request: WorkspaceShareSessionRequest, current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _workspace_store()
+    target = None
+    for row in rows:
+        if row.get("id") == workspace_id:
+            target = row
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not _can_manage_workspace(current_user, target):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    session_id = (request.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    session_ids = target.setdefault("session_ids", [])
+    if session_id not in session_ids:
+        session_ids.append(session_id)
+    _save_workspace_store(rows)
+    return {"status": "success", "workspace": target}
+
+
+@app.get("/api/daily-brief")
+def get_daily_brief(current_user: UserContext = Depends(require_authenticated_user)):
+    all_tasks = list_tasks()
+    open_tasks = [t for t in all_tasks if (t.get("status") or "todo") != "done"][:10]
+    memories = get_core_memories()[:8]
+    pending_replies_raw = get_config(f"pending_reply_notifications_{current_user.username}", "[]") or "[]"
+    try:
+        pending_replies = json.loads(pending_replies_raw)
+        if not isinstance(pending_replies, list):
+            pending_replies = []
+    except Exception:
+        pending_replies = []
+    candidates = _load_config_list("memory_inbox_candidates")
+    pending_candidates = [c for c in candidates if c.get("username") == current_user.username and c.get("status") == "pending"][:8]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "open_tasks": open_tasks,
+        "recent_memories": memories,
+        "pending_replies": pending_replies[:10],
+        "pending_memory_candidates": pending_candidates,
+    }
+
+
+@app.post("/api/integrations/context/pull")
+def pull_external_context(payload: Dict[str, Any], current_user: UserContext = Depends(require_authenticated_user)):
+    provider = (payload.get("provider") or "email").strip().lower()
+    if provider not in {"email", "calendar"}:
+        raise HTTPException(status_code=400, detail="provider must be email or calendar")
+    summary = ""
+    if provider == "email":
+        timezone_name = (payload.get("timezone") or "UTC").strip() or "UTC"
+        messages = _fetch_todays_email_messages(provider="outlook", timezone_name=timezone_name, max_results=20)
+        summary = "\n".join([f"- {(m.get('subject') or '(no subject)')} | {(m.get('from') or '')}" for m in messages[:15]])
+    else:
+        calendar_feed = (get_config("calendar_feed_url") or "").strip()
+        summary = f"Calendar connector configured: {'yes' if calendar_feed else 'no'}; events sync placeholder."
+    session_id = (payload.get("session_id") or "external_context").strip()
+    created = _create_memory_candidate(current_user.username, session_id, f"[{provider.upper()} CONTEXT]\n{summary}", confidence=0.7)
+    return {"status": "success", "provider": provider, "candidate": created}
+
+
+@app.post("/api/quick-capture")
+def quick_capture(payload: Dict[str, str], current_user: UserContext = Depends(require_authenticated_user)):
+    text = (payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    session_id = (payload.get("session_id") or "quick_capture").strip()
+    item = _create_memory_candidate(current_user.username, session_id, text, confidence=0.9)
+    return {"status": "success", "item": item}
 
 @app.get("/api/sessions/{session_id}/task-suggestions")
 def list_session_task_suggestions(session_id: str, current_user: UserContext = Depends(require_authenticated_user)):

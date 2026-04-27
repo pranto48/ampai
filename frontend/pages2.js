@@ -162,6 +162,49 @@ function buildPersonasPage() {
 </div>`;
 }
 
+function buildDailyBriefPage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+  <h2 style="font-size:1.15rem;font-weight:700">📰 Daily Brief</h2>
+  <div style="display:flex;gap:8px">
+    <button id="pull-email-context-btn" class="btn btn-secondary btn-sm">📧 Pull Email Context</button>
+    <button id="pull-calendar-context-btn" class="btn btn-secondary btn-sm">📅 Pull Calendar Context</button>
+    <button id="brief-refresh-btn" class="btn btn-primary btn-sm">↻ Refresh</button>
+  </div>
+</div>
+<div class="grid-2" style="gap:16px">
+  <div class="card"><div class="card-title">Open Tasks</div><div id="brief-open-tasks"></div></div>
+  <div class="card"><div class="card-title">Pending Replies</div><div id="brief-pending-replies"></div></div>
+  <div class="card"><div class="card-title">Recent Important Memories</div><div id="brief-memories"></div></div>
+  <div class="card"><div class="card-title">Pending Memory Candidates</div><div id="brief-candidates"></div></div>
+</div>`;
+}
+
+function buildWorkspacePage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+  <h2 style="font-size:1.15rem;font-weight:700">👥 Team Workspaces</h2>
+  <button id="workspace-new-btn" class="btn btn-primary btn-sm">＋ New Workspace</button>
+</div>
+<div id="workspace-list" class="grid-2" style="gap:12px"></div>
+
+<div id="modal-workspace" class="modal-overlay">
+  <div class="modal-box" style="max-width:620px">
+    <div class="modal-header">
+      <div class="modal-title">New Workspace</div>
+      <button class="modal-close" data-close-modal="modal-workspace">✕</button>
+    </div>
+    <div class="fg"><label class="lbl">Name</label><input id="workspace-name" class="input"/></div>
+    <div class="fg"><label class="lbl">Description</label><input id="workspace-description" class="input"/></div>
+    <div class="fg"><label class="lbl">Members (username:role, comma separated)</label><input id="workspace-members" class="input" placeholder="alice:editor, bob:viewer"/></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-ghost btn-sm" data-close-modal="modal-workspace">Cancel</button>
+      <button id="workspace-save-btn" class="btn btn-primary btn-sm">Create</button>
+    </div>
+  </div>
+</div>`;
+}
+
 // ── Notes Page ─────────────────────────────────────
 function buildNotesPage() {
   return `

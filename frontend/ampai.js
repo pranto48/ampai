@@ -48,10 +48,10 @@ function closeModal(id) { document.getElementById(id)?.classList.remove('open');
 // ── Navigation ─────────────────────────────────────
 // Two top-level pages: #page-login and #page-shell.
 // Sub-pages live inside #page-shell as .subpage divs.
-const SUBPAGES = ['chat','memory','inbox','tasks','personas','analytics','network','models','settings','admin'];
+const SUBPAGES = ['chat','memory','inbox','brief','tasks','personas','workspace','analytics','network','models','settings','admin'];
 const PAGE_TITLES = {
-  chat:'Chat', memory:'Memory Explorer', inbox:'Memory Inbox', tasks:'Task Manager',
-  personas:'Persona Library', analytics:'Analytics', network:'Network Monitor',
+  chat:'Chat', memory:'Memory Explorer', inbox:'Memory Inbox', brief:'Daily Brief', tasks:'Task Manager',
+  personas:'Persona Library', workspace:'Workspaces', analytics:'Analytics', network:'Network Monitor',
   models:'AI Models', settings:'Settings', admin:'Admin Panel'
 };
 
@@ -107,8 +107,10 @@ function _onPageEnter(page) {
   if (page === 'chat')      chatInit();
   if (page === 'memory')    memoryLoad();
   if (page === 'inbox')     memoryInboxLoad();
+  if (page === 'brief')     dailyBriefLoad();
   if (page === 'tasks')     tasksLoad();
   if (page === 'personas')  personasLoad();
+  if (page === 'workspace') workspaceLoad();
   if (page === 'analytics') analyticsLoad();
   if (page === 'network')   networkLoad();
   if (page === 'personas')  personasLoad();
@@ -287,11 +289,17 @@ function _shellHTML() {
         <button class="nav-item" data-page="inbox">
           <span class="icon">📥</span><span class="sidebar-label">Memory Inbox</span>
         </button>
+        <button class="nav-item" data-page="brief">
+          <span class="icon">📰</span><span class="sidebar-label">Daily Brief</span>
+        </button>
         <button class="nav-item" data-page="tasks">
           <span class="icon">✅</span><span class="sidebar-label">Tasks</span>
         </button>
         <button class="nav-item" data-page="personas">
           <span class="icon">🎭</span><span class="sidebar-label">Personas</span>
+        </button>
+        <button class="nav-item" data-page="workspace">
+          <span class="icon">👥</span><span class="sidebar-label">Workspaces</span>
         </button>
         <button class="nav-item" data-page="analytics">
           <span class="icon">📊</span><span class="sidebar-label">Analytics</span>
@@ -357,8 +365,10 @@ function _shellHTML() {
       </div>
       <div id="sp-memory"   class="subpage hidden page-content">${buildMemoryPage()}</div>
       <div id="sp-inbox"    class="subpage hidden page-content">${buildMemoryInboxPage()}</div>
+      <div id="sp-brief"    class="subpage hidden page-content">${buildDailyBriefPage()}</div>
       <div id="sp-tasks"    class="subpage hidden page-content">${buildTasksPage()}</div>
       <div id="sp-personas" class="subpage hidden page-content">${buildPersonasPage()}</div>
+      <div id="sp-workspace" class="subpage hidden page-content">${buildWorkspacePage()}</div>
       <div id="sp-analytics" class="subpage hidden page-content">${buildAnalyticsPage()}</div>
       <div id="sp-network"  class="subpage hidden page-content">${buildNetworkPage()}</div>
       <div id="sp-personas" class="subpage hidden page-content">${buildPersonasPage()}</div>

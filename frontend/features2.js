@@ -4,6 +4,8 @@
 
 let _memoryInboxBound = false;
 let _personasBound = false;
+let _dailyBriefBound = false;
+let _workspaceBound = false;
 
 async function memoryInboxLoad() {
   await _fetchMemoryInbox();
@@ -141,6 +143,105 @@ async function _deletePersona(id) {
   } else {
     toast('Failed to delete persona', 'error');
   }
+}
+
+async function dailyBriefLoad() {
+  await _fetchDailyBrief();
+  if (_dailyBriefBound) return;
+  _dailyBriefBound = true;
+  document.getElementById('brief-refresh-btn')?.addEventListener('click', _fetchDailyBrief);
+  document.getElementById('pull-email-context-btn')?.addEventListener('click', () => _pullContext('email'));
+  document.getElementById('pull-calendar-context-btn')?.addEventListener('click', () => _pullContext('calendar'));
+}
+
+async function _pullContext(provider) {
+  const { ok } = await apiJSON('/api/integrations/context/pull', {
+    method: 'POST',
+    body: JSON.stringify({ provider, session_id: State.sessionId }),
+  });
+  toast(ok ? `${provider} context pulled to Memory Inbox` : `Failed to pull ${provider} context`, ok ? 'success' : 'error');
+  if (ok) _fetchDailyBrief();
+}
+
+function _renderBriefList(id, items, renderer) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (!items.length) {
+    el.innerHTML = '<div style="font-size:.8rem;color:var(--muted)">Nothing to show.</div>';
+    return;
+  }
+  el.innerHTML = items.map(renderer).join('');
+}
+
+async function _fetchDailyBrief() {
+  const { ok, data } = await apiJSON('/api/daily-brief');
+  if (!ok) return;
+  _renderBriefList('brief-open-tasks', data.open_tasks || [], t => `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:.84rem">${_esc(t.title || 'Untitled')} <span style="color:var(--muted);font-size:.74rem">(${_esc(t.priority||'medium')})</span></div>`);
+  _renderBriefList('brief-pending-replies', data.pending_replies || [], r => `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:.84rem">${_esc(r.reply_preview || r.preview || 'Pending reply')}</div>`);
+  _renderBriefList('brief-memories', data.recent_memories || [], m => `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:.84rem">${_esc(m.fact || '')}</div>`);
+  _renderBriefList('brief-candidates', data.pending_memory_candidates || [], c => `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:.84rem">${_esc(c.candidate_text || '')}</div>`);
+}
+
+async function workspaceLoad() {
+  await _fetchWorkspaces();
+  if (_workspaceBound) return;
+  _workspaceBound = true;
+  document.getElementById('workspace-new-btn')?.addEventListener('click', () => openModal('modal-workspace'));
+  document.getElementById('workspace-save-btn')?.addEventListener('click', _createWorkspace);
+}
+
+async function _fetchWorkspaces() {
+  const { ok, data } = await apiJSON('/api/workspaces');
+  const list = document.getElementById('workspace-list');
+  if (!list) return;
+  if (!ok) {
+    list.innerHTML = '<div class="card" style="color:var(--red)">Failed to load workspaces.</div>';
+    return;
+  }
+  const rows = data.workspaces || [];
+  list.innerHTML = rows.length ? rows.map(w => `
+    <div class="card">
+      <div style="font-weight:700">${_esc(w.name || 'Untitled')}</div>
+      <div style="font-size:.78rem;color:var(--muted);margin:6px 0">${_esc(w.description || '')}</div>
+      <div style="font-size:.75rem;color:var(--muted)">Members: ${(w.members||[]).map(m => `${_esc(m.username)} (${_esc(m.role)})`).join(', ') || '-'}</div>
+      <div style="font-size:.75rem;color:var(--muted);margin-top:4px">Shared sessions: ${(w.session_ids||[]).length}</div>
+      <div style="display:flex;gap:6px;margin-top:10px">
+        <button class="btn btn-secondary btn-sm" onclick="_shareCurrentSessionToWorkspace('${w.id}')">Share current session</button>
+      </div>
+    </div>
+  `).join('') : '<div class="card" style="color:var(--muted)">No workspaces yet.</div>';
+}
+
+async function _createWorkspace() {
+  const name = document.getElementById('workspace-name')?.value.trim() || '';
+  if (!name) return toast('Workspace name is required', 'error');
+  const description = document.getElementById('workspace-description')?.value.trim() || '';
+  const rawMembers = document.getElementById('workspace-members')?.value || '';
+  const members = rawMembers.split(',').map(s => s.trim()).filter(Boolean).map(pair => {
+    const [username, role] = pair.split(':').map(v => (v || '').trim());
+    return { username, role: role || 'viewer' };
+  }).filter(m => m.username);
+  const { ok } = await apiJSON('/api/workspaces', {
+    method: 'POST',
+    body: JSON.stringify({ name, description, members }),
+  });
+  toast(ok ? 'Workspace created' : 'Failed to create workspace', ok ? 'success' : 'error');
+  if (ok) {
+    closeModal('modal-workspace');
+    document.getElementById('workspace-name').value = '';
+    document.getElementById('workspace-description').value = '';
+    document.getElementById('workspace-members').value = '';
+    _fetchWorkspaces();
+  }
+}
+
+async function _shareCurrentSessionToWorkspace(workspaceId) {
+  const { ok } = await apiJSON(`/api/workspaces/${encodeURIComponent(workspaceId)}/share-session`, {
+    method: 'POST',
+    body: JSON.stringify({ session_id: State.sessionId }),
+  });
+  toast(ok ? 'Session shared to workspace' : 'Failed to share session', ok ? 'success' : 'error');
+  if (ok) _fetchWorkspaces();
 }
 
 // ═══════════════════════════════════════════════════
