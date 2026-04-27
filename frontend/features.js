@@ -336,6 +336,91 @@ const MODEL_CFG_MAP = {
   'cfg-default-model':    'default_model',
 };
 
+async function personasLoad() {
+  await personasFetch();
+  if (window._personasBound) return;
+  window._personasBound = true;
+  document.getElementById('personas-refresh-btn')?.addEventListener('click', personasFetch);
+  document.getElementById('create-persona-btn')?.addEventListener('click', createPersonaPreset);
+}
+
+async function personasFetch() {
+  const body = document.getElementById('personas-body');
+  if (body) body.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:22px;color:var(--muted)">Loading…</td></tr>';
+  const { ok, data } = await apiJSON('/api/personas');
+  if (!ok) {
+    if (body) body.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:22px;color:var(--red)">Failed to load personas.</td></tr>';
+    return;
+  }
+  const personas = data.personas || [];
+  if (!personas.length) {
+    if (body) body.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:22px;color:var(--muted)">No personas yet.</td></tr>';
+    return;
+  }
+  if (body) {
+    body.innerHTML = personas.map(p => `
+      <tr>
+        <td><input id="persona-name-${p.id}" class="input" value="${(p.name || '').replace(/"/g, '&quot;')}" /></td>
+        <td>${p.username ? `👤 ${p.username}` : '🌐 Global'}</td>
+        <td><input id="persona-tags-${p.id}" class="input" value="${(p.tags || '').replace(/"/g, '&quot;')}" /></td>
+        <td><input type="checkbox" id="persona-default-${p.id}" ${p.is_default ? 'checked' : ''}/></td>
+        <td><textarea id="persona-prompt-${p.id}" class="input" rows="3">${(p.system_prompt || '').replace(/</g, '&lt;')}</textarea></td>
+        <td style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-secondary btn-sm" onclick="savePersonaPreset(${p.id})">Save</button>
+          <button class="btn btn-danger btn-sm" onclick="removePersonaPreset(${p.id})">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+  }
+}
+
+async function createPersonaPreset() {
+  const status = document.getElementById('persona-create-status');
+  const payload = {
+    name: document.getElementById('persona-name')?.value.trim() || '',
+    tags: document.getElementById('persona-tags')?.value.trim() || '',
+    system_prompt: document.getElementById('persona-system-prompt')?.value.trim() || '',
+    is_default: !!document.getElementById('persona-is-default')?.checked,
+    is_global: !!document.getElementById('persona-is-global')?.checked,
+  };
+  if (!payload.name || !payload.system_prompt) {
+    if (status) { status.textContent = 'Name and prompt are required.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  const { ok, data } = await apiJSON('/api/personas', { method: 'POST', body: JSON.stringify(payload) });
+  if (!ok) {
+    if (status) { status.textContent = data.detail || 'Failed to create persona.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  if (status) { status.textContent = 'Persona created.'; status.style.color = 'var(--green)'; }
+  ['persona-name','persona-tags','persona-system-prompt'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  const isDef = document.getElementById('persona-is-default');
+  if (isDef) isDef.checked = false;
+  await personasFetch();
+}
+
+async function savePersonaPreset(personaId) {
+  const payload = {
+    name: document.getElementById(`persona-name-${personaId}`)?.value.trim() || '',
+    tags: document.getElementById(`persona-tags-${personaId}`)?.value.trim() || '',
+    system_prompt: document.getElementById(`persona-prompt-${personaId}`)?.value.trim() || '',
+    is_default: !!document.getElementById(`persona-default-${personaId}`)?.checked,
+  };
+  const { ok, data } = await apiJSON(`/api/personas/${personaId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+  toast(ok ? 'Persona updated' : (data.detail || 'Update failed'), ok ? 'success' : 'error');
+  if (ok) await personasFetch();
+}
+
+async function removePersonaPreset(personaId) {
+  if (!confirm('Delete this persona?')) return;
+  const { ok, data } = await apiJSON(`/api/personas/${personaId}`, { method: 'DELETE' });
+  toast(ok ? 'Persona deleted' : (data.detail || 'Delete failed'), ok ? 'success' : 'error');
+  if (ok) await personasFetch();
+}
+
 async function modelsLoad() {
   if (State.role !== 'admin') return;
   // Always reload config values on page visit

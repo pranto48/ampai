@@ -39,6 +39,11 @@ function buildChatPage() {
         <option value="anythingllm">🏠 AnythingLLM</option>
         <option value="openrouter">🔀 OpenRouter</option>
       </select>
+      <select id="persona-select" title="Persona"
+        style="padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.25);
+        border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.82rem;outline:none;min-width:170px">
+        <option value="">🧩 Default Persona</option>
+      </select>
       <select id="memory-mode-select" title="Memory mode"
         style="padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.25);
         border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.82rem;outline:none">
@@ -148,6 +153,54 @@ function buildMemoryPage() {
     <span id="mx-page" style="font-size:.75rem;color:var(--muted)">—</span>
     <button id="mx-next" class="btn btn-secondary btn-sm">Next →</button>
   </div>
+</div>`;
+}
+
+function buildPersonasPage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+  <h2 style="font-size:1.15rem;font-weight:700">🧩 Personas</h2>
+  <button id="personas-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <div class="card-title">Create Persona</div>
+  <div class="grid-2" style="gap:12px">
+    <div>
+      <label class="lbl">Name</label>
+      <input id="persona-name" class="input" placeholder="Helpful Technical Mentor"/>
+    </div>
+    <div>
+      <label class="lbl">Tags (comma separated)</label>
+      <input id="persona-tags" class="input" placeholder="coding, concise"/>
+    </div>
+  </div>
+  <div style="margin-top:10px">
+    <label class="lbl">System Prompt</label>
+    <textarea id="persona-system-prompt" class="input" rows="5" placeholder="You are a concise assistant..."></textarea>
+  </div>
+  <div style="display:flex;gap:12px;margin-top:10px;align-items:center;flex-wrap:wrap">
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      <input type="checkbox" id="persona-is-default" style="accent-color:var(--accent)"/>
+      <span style="font-size:.86rem">Set as default</span>
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      <input type="checkbox" id="persona-is-global" style="accent-color:var(--accent)"/>
+      <span style="font-size:.86rem">Global (admin only)</span>
+    </label>
+    <button id="create-persona-btn" class="btn btn-primary btn-sm">Create Persona</button>
+    <span id="persona-create-status" style="font-size:.82rem;color:var(--muted)"></span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Saved Personas</div>
+  <table class="tbl">
+    <thead><tr><th>Name</th><th>Scope</th><th>Tags</th><th>Default</th><th>Prompt</th><th>Actions</th></tr></thead>
+    <tbody id="personas-body">
+      <tr><td colspan="6" style="text-align:center;padding:22px;color:var(--muted)">Loading…</td></tr>
+    </tbody>
+  </table>
 </div>`;
 }
 
