@@ -275,6 +275,10 @@ class TaskUpdateRequest(BaseModel):
     session_id: Optional[str] = None
 
 
+class SuggestionTaskCreateRequest(BaseModel):
+    session_id: Optional[str] = None
+
+
 class EmailSummaryRequest(BaseModel):
     model_type: str = "ollama"
     api_key: Optional[str] = None
@@ -806,12 +810,17 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             category_filter=category_filter,
         )
         ensure_session_owner(request.session_id, user.username)
-        if bool(memory_policy.get("auto_capture_enabled", True)):
-            touch_session(request.session_id)
-            apply_retention_policy(max_age_days=int(memory_policy.get("retention_days", 365)), archive_only=True)
-            log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={request.model_type}")
-        else:
-            log_audit_event(username=user.username, action="memory.skip.chat", session_id=request.session_id, details="auto_capture_disabled")
+        touch_session(request.session_id)
+        created_suggestions = _append_session_suggestions(request.session_id, result.get("task_suggestions") or [])
+        result["task_suggestions"] = created_suggestions
+        log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={request.model_type}")
+        if created_suggestions:
+            log_audit_event(
+                username=user.username,
+                action="task.suggestion.detected",
+                session_id=request.session_id,
+                details=f"count={len(created_suggestions)}",
+            )
         try:
             INSIGHT_QUEUE.put_nowait(request.session_id)
         except Exception:
@@ -1020,6 +1029,80 @@ def _can_access_session(session_id: str, current_user: UserContext) -> bool:
     if current_user.role == "admin":
         return True
     return session_id in get_accessible_session_ids(username=current_user.username, is_admin=False)
+
+
+def _ensure_task_suggestion_column() -> None:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS task_suggestions TEXT"))
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to ensure task_suggestions column")
+
+
+def _load_session_suggestions(session_id: str) -> List[Dict]:
+    _ensure_task_suggestion_column()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT task_suggestions FROM session_metadata WHERE session_id = :session_id"),
+                {"session_id": session_id},
+            ).first()
+            raw = row[0] if row else None
+            parsed = json.loads(raw) if raw else []
+            return parsed if isinstance(parsed, list) else []
+    except Exception:
+        logger.exception("Failed to load suggestions", extra={"session_id": session_id})
+        return []
+
+
+def _save_session_suggestions(session_id: str, suggestions: List[Dict]) -> bool:
+    _ensure_task_suggestion_column()
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at, task_suggestions) "
+                    "VALUES (:session_id, 'Uncategorized', FALSE, FALSE, NOW()::text, :task_suggestions) "
+                    "ON CONFLICT (session_id) DO UPDATE SET "
+                    "task_suggestions = EXCLUDED.task_suggestions, updated_at = EXCLUDED.updated_at"
+                ),
+                {"session_id": session_id, "task_suggestions": json.dumps(suggestions)},
+            )
+            conn.commit()
+        return True
+    except Exception:
+        logger.exception("Failed to save suggestions", extra={"session_id": session_id})
+        return False
+
+
+def _append_session_suggestions(session_id: str, suggestions: List[Dict]) -> List[Dict]:
+    if not suggestions:
+        return _load_session_suggestions(session_id)
+    existing = _load_session_suggestions(session_id)
+    existing_ids = {str(item.get("id")) for item in existing}
+    now = datetime.now(timezone.utc).isoformat()
+    appended: List[Dict] = []
+    for suggestion in suggestions:
+        sid = str(suggestion.get("id") or uuid.uuid4())
+        if sid in existing_ids:
+            continue
+        payload = {
+            "id": sid,
+            "title": (suggestion.get("title") or "").strip()[:180],
+            "description": (suggestion.get("description") or "").strip(),
+            "priority": (suggestion.get("priority") or "medium").strip().lower(),
+            "due_at": suggestion.get("due_at"),
+            "source": suggestion.get("source") or "unknown",
+            "created_at": now,
+            "resolved": False,
+            "task_id": None,
+            "resolved_at": None,
+        }
+        existing.append(payload)
+        appended.append(payload)
+    _save_session_suggestions(session_id, existing)
+    return appended
 
 
 @app.get("/api/reports/find")
@@ -1292,6 +1375,57 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
         return {"messages": messages}
     except Exception as e:
         return {"messages": [], "error": str(e)}
+
+
+@app.get("/api/sessions/{session_id}/task-suggestions")
+def get_session_task_suggestions(session_id: str, user=Depends(require_authenticated_user)):
+    if not _can_access_session(session_id, user):
+        raise HTTPException(status_code=403, detail="Forbidden session")
+    suggestions = _load_session_suggestions(session_id)
+    unresolved = [s for s in suggestions if not bool(s.get("resolved"))]
+    return {"session_id": session_id, "suggestions": unresolved}
+
+
+@app.post("/api/tasks/from-suggestion/{suggestion_id}")
+def create_task_from_suggestion(
+    suggestion_id: str,
+    request: SuggestionTaskCreateRequest,
+    user=Depends(require_authenticated_user),
+):
+    search_sessions = [request.session_id] if request.session_id else [
+        s.get("session_id") for s in get_all_sessions() if s.get("session_id")
+    ]
+    search_sessions = [sid for sid in search_sessions if sid]
+    for session_id in search_sessions:
+        if not _can_access_session(session_id, user):
+            continue
+        suggestions = _load_session_suggestions(session_id)
+        for idx, item in enumerate(suggestions):
+            if str(item.get("id")) != str(suggestion_id):
+                continue
+            if bool(item.get("resolved")):
+                raise HTTPException(status_code=409, detail="Suggestion already resolved")
+            task_id = create_task(
+                title=item.get("title") or "Untitled task",
+                description=item.get("description") or "",
+                priority=item.get("priority") or "medium",
+                due_at=item.get("due_at"),
+                session_id=session_id,
+            )
+            if not task_id:
+                raise HTTPException(status_code=500, detail="Failed to create task")
+            suggestions[idx]["resolved"] = True
+            suggestions[idx]["task_id"] = task_id
+            suggestions[idx]["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            _save_session_suggestions(session_id, suggestions)
+            log_audit_event(
+                username=user.username,
+                action="task.create.from_suggestion",
+                session_id=session_id,
+                details=f"suggestion_id={suggestion_id};task_id={task_id}",
+            )
+            return {"status": "success", "task_id": task_id, "session_id": session_id}
+    raise HTTPException(status_code=404, detail="Suggestion not found")
 
 
 @app.post("/api/sessions/{session_id}/category")

@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import uuid
 import urllib.parse
 import urllib.request
 from langchain_community.chat_message_histories import RedisChatMessageHistory
@@ -15,15 +16,8 @@ from logging_utils import get_logger
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.chat_models import ChatOllama
-from database import (
-    get_config,
-    get_core_memories,
-    add_core_memory,
-    create_task,
-    get_sql_chat_history,
-    redact_pii_text,
-    get_persona_for_user,
-)
+from langchain_community.chat_message_histories import SQLChatMessageHistory
+from database import DATABASE_URL, get_config, get_core_memories, add_core_memory, redact_pii_text
 
 from langchain_core.chat_history import BaseChatMessageHistory
 
@@ -60,6 +54,64 @@ class ShortTermRedisMessageHistory(BaseChatMessageHistory):
 
 def get_short_redis_history(session_id: str):
     return ShortTermRedisMessageHistory(session_id=session_id, k=6)
+
+
+TASK_CUE_PATTERNS = [
+    r"\b(todo|to-do|task|tasks)\b",
+    r"\bremind me\b",
+    r"\bfollow up\b",
+    r"\bdeadline\b",
+    r"\baction item\b",
+    r"\bshould I\b",
+    r"\bneed to\b",
+]
+
+
+def _looks_like_task_intent(text: str) -> bool:
+    sample = (text or "").lower()
+    return any(re.search(pattern, sample) for pattern in TASK_CUE_PATTERNS)
+
+
+def _parse_create_task_tags(content: str) -> List[Dict[str, Any]]:
+    matches = re.findall(r"\[CREATE_TASK:\s*(.*?)\]", content or "", flags=re.IGNORECASE | re.DOTALL)
+    suggestions: List[Dict[str, Any]] = []
+    for raw in matches:
+        parsed = {"title": "", "description": "", "priority": "medium", "due_at": None}
+        for part in raw.split("|"):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            k = key.strip().lower()
+            v = value.strip()
+            if k == "title":
+                parsed["title"] = v
+            elif k == "description":
+                parsed["description"] = v
+            elif k == "priority":
+                parsed["priority"] = v.lower() if v else "medium"
+            elif k in {"due", "due_at"}:
+                parsed["due_at"] = v or None
+        if parsed["title"]:
+            parsed["id"] = str(uuid.uuid4())
+            parsed["source"] = "llm_tag"
+            suggestions.append(parsed)
+    return suggestions
+
+
+def _build_fallback_suggestion(message: str, response: str) -> List[Dict[str, Any]]:
+    if not (_looks_like_task_intent(message) or _looks_like_task_intent(response)):
+        return []
+    title = (message or "").strip().split("\n")[0][:120]
+    if not title:
+        title = "Follow up on recent conversation"
+    return [{
+        "id": str(uuid.uuid4()),
+        "title": title,
+        "description": (response or message or "").strip()[:500],
+        "priority": "medium",
+        "due_at": None,
+        "source": "intent_heuristic",
+    }]
 
 
 def _parse_model_list(raw_value: str, defaults: List[str]) -> List[str]:
@@ -299,12 +351,16 @@ def chat_with_agent(
                 print(f"Failed to add fact to PGVector: {e}")
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
 
-    if persist_memory:
-        sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
-        message_log = message
-        if attachments:
-            attachment_names = [a['filename'] for a in attachments]
-            message_log = f"[Attachments: {', '.join(attachment_names)}]\n" + message
+    task_suggestions = _parse_create_task_tags(content)
+    content = re.sub(r"\[CREATE_TASK:\s*.*?\]", "", content, flags=re.IGNORECASE | re.DOTALL).strip()
+    if not task_suggestions:
+        task_suggestions = _build_fallback_suggestion(message, content)
+
+    sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+    message_log = message
+    if attachments:
+        attachment_names = [a['filename'] for a in attachments]
+        message_log = f"[Attachments: {', '.join(attachment_names)}]\n" + message
 
         pii_redaction_enabled = pii_strict_mode or str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
         if pii_redaction_enabled:
@@ -314,4 +370,9 @@ def chat_with_agent(
         sql_history.add_user_message(message_log)
         sql_history.add_ai_message(content)
 
-    return {"response": content, "web_search": web_search, "retrieval_meta": retrieval_meta}
+    return {
+        "response": content,
+        "web_search": web_search,
+        "task_suggestions": task_suggestions,
+        "has_task_cues": bool(task_suggestions),
+    }

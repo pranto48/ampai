@@ -71,7 +71,9 @@ async function mxFetch() {
 async function viewChatLog(sessionId) {
   document.getElementById('modal-session-id-label').textContent = sessionId;
   const body = document.getElementById('modal-chat-body');
+  const sugEl = document.getElementById('modal-task-suggestions');
   body.innerHTML = '<div style="text-align:center;padding:32px;color:var(--muted)">Loading…</div>';
+  if (sugEl) sugEl.innerHTML = '';
   openModal('modal-chat-log');
 
   const { ok, data } = await apiJSON(`/api/history/${sessionId}`);
@@ -86,6 +88,28 @@ async function viewChatLog(sessionId) {
       ${m.content.replace(/</g,'&lt;').replace(/\n/g,'<br>')}
     </div>`).join('')
     : '<div style="text-align:center;color:var(--muted)">No messages found</div>';
+
+  const suggRes = await apiJSON(`/api/sessions/${encodeURIComponent(sessionId)}/task-suggestions`);
+  if (sugEl) {
+    if (!suggRes.ok) {
+      sugEl.innerHTML = '<div style="font-size:.8rem;color:var(--muted)">Suggested actions unavailable.</div>';
+    } else {
+      const unresolved = suggRes.data.suggestions || [];
+      sugEl.innerHTML = unresolved.length ? `
+        <div style="border-top:1px solid var(--border);padding-top:10px">
+          <div style="font-size:.85rem;font-weight:600;margin-bottom:8px">Unresolved suggested actions</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            ${unresolved.map(s => `
+              <div style="background:var(--bg-3);border:1px solid var(--border);border-radius:8px;padding:10px">
+                <div style="font-size:.84rem;font-weight:600">${(s.title || 'Untitled').replace(/</g,'&lt;')}</div>
+                <div class="text-xs text-muted" style="margin-top:3px">${(s.description || '').replace(/</g,'&lt;').slice(0,160)}</div>
+                <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="createTaskFromSuggestion('${s.id}','${sessionId}')">Create Task</button>
+              </div>`).join('')}
+          </div>
+        </div>`
+        : '<div style="font-size:.8rem;color:var(--muted)">No unresolved suggested actions.</div>';
+    }
+  }
 
   document.getElementById('modal-export-btn').onclick = () => exportSession(sessionId);
 }

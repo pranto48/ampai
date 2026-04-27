@@ -11,7 +11,7 @@ function chatInit() {
   loadSessions();
   loadPersonaOptions();
   _updateChatSessionDisplay();
-  loadMemoryPolicyBadge();
+  _hideSuggestedActions();
   if (!_chatHandlersBound) {
     _chatHandlersBound = true;
     _bindChatHandlers();
@@ -216,6 +216,7 @@ async function _loadSessionHistory(sessionId) {
   }
   msgs.innerHTML = '';
   const messages = data.messages || [];
+  _hideSuggestedActions();
   if (!messages.length) {
     msgs.innerHTML = _welcomeMsg();
     return;
@@ -266,30 +267,54 @@ async function _sendChat() {
 
   if (ok) {
     _appendMsg('ai', data.response || data.detail || 'No response');
+    _renderSuggestedActions(data.task_suggestions || []);
     loadSessions(); // refresh sidebar
   } else {
     _appendMsg('ai', '⚠️ ' + (data.detail || 'Something went wrong. Check your AI model config.'));
   }
 }
 
-async function loadPersonaOptions() {
-  const select = document.getElementById('persona-select');
-  if (!select) return;
-  const saved = localStorage.getItem(PERSONA_PREF_KEY) || '';
-  const { ok, data } = await apiJSON('/api/personas');
-  if (!ok) return;
-  const personas = data.personas || [];
-  select.innerHTML = '<option value="">🧩 Default Persona</option>' + personas.map((p) => {
-    const scope = p.username ? '👤' : '🌐';
-    const marker = p.is_default ? ' • default' : '';
-    return `<option value="${p.id}">${scope} ${p.name}${marker}</option>`;
-  }).join('');
-  if (saved && [...select.options].some((o) => o.value === saved)) {
-    select.value = saved;
-  } else {
-    const fallback = personas.find((p) => p.is_default);
-    if (fallback) select.value = String(fallback.id);
+function _hideSuggestedActions() {
+  const panel = document.getElementById('suggested-actions-panel');
+  if (!panel) return;
+  panel.style.display = 'none';
+  panel.innerHTML = '';
+}
+
+function _renderSuggestedActions(suggestions) {
+  const panel = document.getElementById('suggested-actions-panel');
+  if (!panel) return;
+  if (!Array.isArray(suggestions) || !suggestions.length) {
+    _hideSuggestedActions();
+    return;
   }
+  panel.style.display = '';
+  panel.innerHTML = `
+    <div style="font-size:.82rem;color:var(--muted);margin-bottom:8px;font-weight:600">Suggested actions</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${suggestions.map(s => `
+        <div style="background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:10px 12px">
+          <div style="font-size:.88rem;font-weight:600">${(s.title || 'Untitled').replace(/</g,'&lt;')}</div>
+          <div style="font-size:.78rem;color:var(--muted);margin-top:4px">${(s.description || '').replace(/</g,'&lt;').slice(0,180)}</div>
+          <div style="margin-top:8px">
+            <button class="btn btn-secondary btn-sm" onclick="createTaskFromSuggestion('${s.id}')">Create Task</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+}
+
+async function createTaskFromSuggestion(suggestionId, sessionId = State.sessionId) {
+  const { ok, data } = await apiJSON(`/api/tasks/from-suggestion/${encodeURIComponent(suggestionId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (!ok) {
+    toast(data.detail || 'Failed to create task', 'error');
+    return;
+  }
+  toast('Task created from suggestion', 'success');
+  const btn = document.querySelector(`button[onclick="createTaskFromSuggestion('${suggestionId}')"]`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Created'; }
 }
 
 // ── DOM helpers ────────────────────────────────────
