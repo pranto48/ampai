@@ -104,6 +104,7 @@ from database import (
     create_persona,
     update_persona,
     delete_persona,
+    get_memory_rollup_metrics,
     engine,
 )
 from integrations.gmail_api import (
@@ -980,6 +981,15 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             chat_output_mode=requested_mode,
         )
         response_text = str(result.get("response") or "")
+        retrieval_meta = result.get("retrieval") or {}
+        injected_chars = int(retrieval_meta.get("context_chars") or 0)
+        injected_tokens = max(0, injected_chars // 4)
+        log_audit_event(
+            username=user.username,
+            action="memory.read.injected",
+            session_id=request.session_id,
+            details=f"chars={injected_chars},tokens={injected_tokens},mode={effective_memory_mode}",
+        )
         suggestions: List[Dict[str, Any]] = []
         for match in re.finditer(r"\[CREATE_TASK:\s*(.*?)\]", response_text, re.IGNORECASE | re.DOTALL):
             raw = match.group(1)
@@ -2841,10 +2851,15 @@ def analytics_summary(user=Depends(require_authenticated_user)):
                     total_messages = conn.execute(q).scalar() or 0
         except Exception:
             total_messages = len(sessions) * 5
+        rollup_metrics = get_memory_rollup_metrics(None if user.role == "admin" else user.username)
         return {
             "total_sessions": len(sessions),
             "total_messages": total_messages,
             "total_memories": len(get_core_memories()),
+            "raw_memory_count": int(rollup_metrics.get("raw_memory_count", 0)),
+            "summary_node_count": int(rollup_metrics.get("summary_node_count", 0)),
+            "avg_injected_memory_chars": float(rollup_metrics.get("avg_injected_memory_chars", 0)),
+            "avg_injected_memory_tokens": float(rollup_metrics.get("avg_injected_memory_tokens", 0)),
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

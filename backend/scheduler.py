@@ -15,6 +15,7 @@ from database import (
     auto_complete_due_tasks,
     list_pending_reply_notifications_for_digest,
     mark_pending_reply_notifications_delivered,
+    summarize_approved_memories,
 )
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -211,11 +212,26 @@ def run_chat_reply_digest():
         logger.warning("Reply digest email not sent; pending items retained")
 
 
+def run_memory_summarizer():
+    min_age_days = max(7, int(get_config("memory_summarizer_min_age_days", "14") or "14"))
+    min_group_size = max(2, int(get_config("memory_summarizer_min_group_size", "3") or "3"))
+    result = summarize_approved_memories(min_age_days=min_age_days, min_group_size=min_group_size, max_groups=200)
+    logger.info(
+        "Memory summarizer run complete",
+        extra={
+            "groups_created": int(result.get("groups_created", 0)),
+            "sources_marked": int(result.get("sources_marked", 0)),
+        },
+    )
+
+
 def start_scheduler():
     if not scheduler.running:
         scheduler.add_job(run_network_sweep, 'cron', hour=9, minute=0)
         scheduler.add_job(run_task_digest, 'interval', minutes=30)
         scheduler.add_job(run_chat_reply_digest, 'interval', minutes=5)
+        scheduler.add_job(run_memory_summarizer, 'cron', day_of_week='sun', hour=3, minute=0)
+        scheduler.add_job(run_memory_summarizer, 'cron', hour=3, minute=30)
         scheduler.start()
         logger.info("Background scheduler started")
 
@@ -231,4 +247,3 @@ def get_scheduler_diagnostics() -> dict:
         }
     except Exception as exc:
         return {"running": False, "jobs": [], "last_run": {}, "error": str(exc)}
-
