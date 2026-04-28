@@ -247,6 +247,23 @@ def migrate_session_metadata_schema():
 migrate_session_metadata_schema()
 
 
+def migrate_memory_retrieval_indexes():
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_memory_candidates_username ON memory_candidates (username)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_memory_candidates_created_at ON memory_candidates (created_at DESC)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_memory_candidates_status ON memory_candidates (status)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_session_metadata_category ON session_metadata (category)"))
+            conn.commit()
+    except Exception as e:
+        print(f"Error creating memory retrieval indexes: {e}")
+
+
+migrate_memory_retrieval_indexes()
+
+
 def _load_fernet_keys() -> List[Fernet]:
     active_key = os.getenv("CONFIG_ENCRYPTION_KEY")
     previous_keys = os.getenv("CONFIG_ENCRYPTION_PREVIOUS_KEYS", "")
