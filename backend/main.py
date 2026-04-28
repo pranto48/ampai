@@ -952,9 +952,6 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             category_filter=(request.memory_category_filter or "").strip(),
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
-            memory_top_k=memory_top_k,
-            recency_bias=recency_bias,
-            category_filter=category_filter,
         )
         response_text = str(result.get("response") or "")
         suggestions: List[Dict[str, Any]] = []

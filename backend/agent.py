@@ -198,9 +198,6 @@ def chat_with_agent(
     category_filter: str = "",
     use_web_search: bool = False,
     attachments: List[Dict] = None,
-    memory_top_k: int = 5,
-    recency_bias: float = 0.0,
-    category_filter: str = None,
 ):
     if attachments is None:
         attachments = []
