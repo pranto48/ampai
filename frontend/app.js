@@ -82,6 +82,7 @@ document.addEventListener('DOMContentLoaded', () => {
         digest_mode: 'immediate',
         digest_interval_minutes: 30,
     };
+    let chatOutputMode = 'normal';
 
     async function loadNotificationPreferences() {
         try {
@@ -101,6 +102,17 @@ document.addEventListener('DOMContentLoaded', () => {
             if (digestIntervalEl) digestIntervalEl.value = notificationPreferences.digest_interval_minutes ?? 30;
         } catch (error) {
             console.error('Failed to load notification preferences', error);
+        }
+    }
+
+    async function loadChatPreferences() {
+        try {
+            const res = await apiFetch('/api/users/me/chat-preferences');
+            if (!res.ok) return;
+            const prefs = await res.json();
+            chatOutputMode = prefs?.chat_output_mode === 'compact' ? 'compact' : 'normal';
+        } catch (error) {
+            console.error('Failed to load chat preferences', error);
         }
     }
 
@@ -209,6 +221,7 @@ document.addEventListener('DOMContentLoaded', () => {
         await checkGlobalConfigs();
         loadSavedProviderPreferences();
         loadNotificationPreferences();
+        loadChatPreferences();
         initializeApp();
     });
 
@@ -676,6 +689,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     model_name: modelNameSelect?.value || null,
                     api_key: apiKeyInput.value || null,
                     memory_mode: document.getElementById('memory-mode').value,
+                    chat_output_mode: chatOutputMode,
                     use_web_search: webSearchToggle ? webSearchToggle.checked : false,
                     attachments: sentAttachments
                 })

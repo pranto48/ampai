@@ -627,6 +627,12 @@ async function _loadSettingsValues() {
     const rd = document.getElementById('mem-policy-retention'); if (rd) rd.value = p.retention_days ?? 365;
     const c = document.getElementById('mem-policy-categories'); if (c) c.value = (p.allowed_categories || []).join(', ');
   }
+  const chatPrefRes = await apiJSON('/api/users/me/chat-preferences');
+  if (chatPrefRes.ok) {
+    const pref = chatPrefRes.data || {};
+    const compact = document.getElementById('chat-low-token-mode');
+    if (compact) compact.checked = !!pref.low_token_mode;
+  }
 }
 
 async function settingsLoad() {
@@ -667,6 +673,14 @@ async function settingsLoad() {
     };
     const { ok } = await apiJSON('/api/users/me/notification-preferences', { method:'PUT', body: JSON.stringify(payload) });
     toast(ok ? 'Notification preferences saved' : 'Failed', ok ? 'success' : 'error');
+  });
+
+  document.getElementById('save-chat-prefs-btn')?.addEventListener('click', async () => {
+    const payload = {
+      low_token_mode: !!document.getElementById('chat-low-token-mode')?.checked,
+    };
+    const { ok } = await apiJSON('/api/users/me/chat-preferences', { method: 'PUT', body: JSON.stringify(payload) });
+    toast(ok ? 'Chat preferences saved' : 'Failed to save chat preferences', ok ? 'success' : 'error');
   });
 
   document.getElementById('save-memory-policy-btn')?.addEventListener('click', async () => {
