@@ -7,6 +7,7 @@ import json
 import os
 import base64
 import json
+import sqlite3
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta, timezone
 import shutil
@@ -107,6 +108,7 @@ from database import (
     update_backup_job,
     list_backup_jobs,
     get_backup_job,
+    get_backup_verification_kpis,
     create_restore_job,
     update_restore_job,
     list_restore_jobs,
@@ -713,7 +715,7 @@ def _execute_backup(actor: str, trigger: str = "manual", profile: Optional[Dict[
                 "message_count": manifest["message_count"],
             }
         )
-        return {"status": "success", **outcome, "manifest": manifest, "bytes_written": payload_bytes}
+        return {"status": "success", **outcome, "manifest": manifest, "bytes_written": payload_bytes, "serialized_payload": serialized}
     except Exception as exc:
         _record_backup_status(
             {
@@ -727,6 +729,61 @@ def _execute_backup(actor: str, trigger: str = "manual", profile: Optional[Dict[
             }
         )
         raise
+
+
+def _run_backup_verification(serialized_payload: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    payload_checksum = hashlib.sha256(serialized_payload.encode("utf-8")).hexdigest()
+    expected_checksum = (manifest.get("checksum_sha256") or "").strip()
+    if not expected_checksum or payload_checksum != expected_checksum:
+        raise ValueError("checksum verify failed")
+
+    try:
+        archive_json = json.loads(serialized_payload)
+    except Exception as exc:
+        raise ValueError(f"archive open/read test failed: {exc}") from exc
+    if not isinstance(archive_json, dict):
+        raise ValueError("archive open/read test failed: root is not an object")
+
+    if not isinstance(manifest, dict) or not manifest.get("schema_version") or not manifest.get("timestamp"):
+        raise ValueError("manifest parse failed")
+
+    sessions = archive_json.get("sessions")
+    if not isinstance(sessions, list):
+        raise ValueError("restore smoke test failed: sessions is not an array")
+
+    with sqlite3.connect(":memory:") as temp_conn:
+        temp_conn.execute("CREATE TABLE restore_sessions (session_id TEXT PRIMARY KEY, message_count INTEGER NOT NULL)")
+        for row in sessions[:10]:
+            if not isinstance(row, dict):
+                continue
+            session_id = str(row.get("session_id") or "").strip()
+            if not session_id:
+                continue
+            messages = row.get("messages")
+            message_count = len(messages) if isinstance(messages, list) else 0
+            temp_conn.execute(
+                "INSERT OR REPLACE INTO restore_sessions (session_id, message_count) VALUES (?, ?)",
+                (session_id, message_count),
+            )
+        restored_count = int(temp_conn.execute("SELECT COUNT(*) FROM restore_sessions").fetchone()[0] or 0)
+        valid_count = int(temp_conn.execute("SELECT COUNT(*) FROM restore_sessions WHERE message_count >= 0").fetchone()[0] or 0)
+    if restored_count != valid_count:
+        raise ValueError("restore smoke test failed: validation query mismatch")
+    return {"ok": True, "restored_sample_rows": restored_count}
+
+
+def _alert_backup_verification_failure(job_id: int, error_message: str, actor: str) -> None:
+    subject = f"AmpAI Backup Verification Failed (job #{job_id})"
+    body = "\n".join(
+        [
+            "Backup verification failed.",
+            f"job_id: {job_id}",
+            f"actor: {actor}",
+            f"time_utc: {datetime.now(timezone.utc).isoformat()}",
+            f"error: {error_message}",
+        ]
+    )
+    _send_resend_email(subject, body)
 
 
 def _enqueue_backup_job(actor: str, trigger: str, profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -766,12 +823,18 @@ def _backup_job_worker() -> None:
             result = _execute_backup(actor=actor, trigger=trigger, profile=profile)
             artifact_path = result.get("path") or result.get("file") or ""
             bytes_written = int(result.get("bytes_written") or 0)
+            _run_backup_verification(
+                serialized_payload=result.get("serialized_payload", ""),
+                manifest=result.get("manifest") or {},
+            )
             update_backup_job(
                 job_id,
                 status="success",
                 finished_at=datetime.now(timezone.utc),
                 bytes_written=bytes_written,
                 artifact_path=artifact_path,
+                verified=True,
+                verification_error=None,
                 error_message=None,
             )
             log_audit_event(username=actor, action="admin.backup.run.finish", details=f"job_id={job_id} artifact={artifact_path}")
@@ -780,8 +843,11 @@ def _backup_job_worker() -> None:
                 job_id,
                 status="failed",
                 finished_at=datetime.now(timezone.utc),
+                verified=False,
+                verification_error=str(exc),
                 error_message=str(exc),
             )
+            _alert_backup_verification_failure(job_id=job_id, error_message=str(exc), actor=actor)
             log_audit_event(username=actor, action="admin.backup.run.failure", details=f"job_id={job_id} error={exc}")
         finally:
             BACKUP_JOB_QUEUE.task_done()
@@ -2786,6 +2852,11 @@ def run_backup_profile_job(profile_id: int, current_user: UserContext = Depends(
 @app.get("/api/backups/jobs")
 def get_backup_jobs(limit: int = Query(default=20), offset: int = Query(default=0), _: UserContext = Depends(require_admin_user)):
     return {"jobs": list_backup_jobs(limit=limit, offset=offset)}
+
+
+@app.get("/api/backups/kpis")
+def get_backup_kpis(_: UserContext = Depends(require_admin_user)):
+    return {"kpis": get_backup_verification_kpis()}
 
 
 @app.get("/api/backups/jobs/{job_id}")

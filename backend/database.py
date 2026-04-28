@@ -81,6 +81,8 @@ backup_jobs = Table(
     Column("finished_at", DateTime(timezone=True), nullable=True),
     Column("bytes_written", Integer, nullable=False, default=0),
     Column("artifact_path", String, nullable=True),
+    Column("verified", Boolean, nullable=False, default=False),
+    Column("verification_error", String, nullable=True),
     Column("error_message", String, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
@@ -703,12 +705,16 @@ def migrate_backup_jobs_schema() -> None:
                         finished_at TIMESTAMPTZ,
                         bytes_written BIGINT NOT NULL DEFAULT 0,
                         artifact_path VARCHAR,
+                        verified BOOLEAN NOT NULL DEFAULT FALSE,
+                        verification_error VARCHAR,
                         error_message VARCHAR,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                     """
                 )
             )
+            conn.execute(text("ALTER TABLE backup_jobs ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE"))
+            conn.execute(text("ALTER TABLE backup_jobs ADD COLUMN IF NOT EXISTS verification_error VARCHAR"))
             conn.commit()
     except Exception as e:
         logger.warning(f"Error migrating backup jobs schema: {e}")
@@ -904,7 +910,7 @@ def create_backup_job(profile_id: Optional[int], status: str = "queued") -> Opti
 def update_backup_job(job_id: int, **updates: Any) -> bool:
     if not engine:
         return False
-    allowed = {"status", "started_at", "finished_at", "bytes_written", "artifact_path", "error_message"}
+    allowed = {"status", "started_at", "finished_at", "bytes_written", "artifact_path", "verified", "verification_error", "error_message"}
     fields = {k: v for k, v in updates.items() if k in allowed}
     if not fields:
         return False
@@ -933,7 +939,7 @@ def list_backup_jobs(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
                 text(
                     """
                     SELECT id, profile_id, status, started_at, finished_at, bytes_written,
-                           artifact_path, error_message, created_at
+                           artifact_path, verified, verification_error, error_message, created_at
                     FROM backup_jobs
                     ORDER BY id DESC
                     LIMIT :limit OFFSET :offset
@@ -950,8 +956,10 @@ def list_backup_jobs(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
                     "finished_at": row[4].isoformat() if getattr(row[4], "isoformat", None) else None,
                     "bytes_written": int(row[5] or 0),
                     "artifact_path": row[6] or "",
-                    "error_message": row[7] or "",
-                    "created_at": row[8].isoformat() if getattr(row[8], "isoformat", None) else str(row[8] or ""),
+                    "verified": bool(row[7]),
+                    "verification_error": row[8] or "",
+                    "error_message": row[9] or "",
+                    "created_at": row[10].isoformat() if getattr(row[10], "isoformat", None) else str(row[10] or ""),
                 }
                 for row in rows
             ]
@@ -969,7 +977,7 @@ def get_backup_job(job_id: int) -> Optional[Dict[str, Any]]:
                 text(
                     """
                     SELECT id, profile_id, status, started_at, finished_at, bytes_written,
-                           artifact_path, error_message, created_at
+                           artifact_path, verified, verification_error, error_message, created_at
                     FROM backup_jobs
                     WHERE id = :id
                     """
@@ -986,12 +994,72 @@ def get_backup_job(job_id: int) -> Optional[Dict[str, Any]]:
                 "finished_at": row[4].isoformat() if getattr(row[4], "isoformat", None) else None,
                 "bytes_written": int(row[5] or 0),
                 "artifact_path": row[6] or "",
-                "error_message": row[7] or "",
-                "created_at": row[8].isoformat() if getattr(row[8], "isoformat", None) else str(row[8] or ""),
+                "verified": bool(row[7]),
+                "verification_error": row[8] or "",
+                "error_message": row[9] or "",
+                "created_at": row[10].isoformat() if getattr(row[10], "isoformat", None) else str(row[10] or ""),
             }
     except Exception as e:
         logger.warning(f"Error getting backup job {job_id}: {e}")
         return None
+
+
+def get_backup_verification_kpis() -> Dict[str, Any]:
+    if not engine:
+        return {
+            "last_successful_backup": None,
+            "last_successful_restore_test": None,
+            "backup_success_rate_7d": 0.0,
+            "backup_success_rate_30d": 0.0,
+        }
+    try:
+        with engine.connect() as conn:
+            last_successful_backup = conn.execute(
+                text("SELECT MAX(finished_at) FROM backup_jobs WHERE status = 'success'")
+            ).scalar()
+            last_successful_restore_test = conn.execute(
+                text("SELECT MAX(finished_at) FROM backup_jobs WHERE status = 'success' AND verified = TRUE")
+            ).scalar()
+            counts_7d = conn.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+                        COUNT(*) AS total_count
+                    FROM backup_jobs
+                    WHERE created_at >= NOW() - INTERVAL '7 days'
+                    """
+                )
+            ).fetchone()
+            counts_30d = conn.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+                        COUNT(*) AS total_count
+                    FROM backup_jobs
+                    WHERE created_at >= NOW() - INTERVAL '30 days'
+                    """
+                )
+            ).fetchone()
+            s7 = int((counts_7d[0] if counts_7d else 0) or 0)
+            t7 = int((counts_7d[1] if counts_7d else 0) or 0)
+            s30 = int((counts_30d[0] if counts_30d else 0) or 0)
+            t30 = int((counts_30d[1] if counts_30d else 0) or 0)
+            return {
+                "last_successful_backup": last_successful_backup.isoformat() if getattr(last_successful_backup, "isoformat", None) else None,
+                "last_successful_restore_test": last_successful_restore_test.isoformat() if getattr(last_successful_restore_test, "isoformat", None) else None,
+                "backup_success_rate_7d": round((s7 / t7) * 100.0, 2) if t7 else 0.0,
+                "backup_success_rate_30d": round((s30 / t30) * 100.0, 2) if t30 else 0.0,
+            }
+    except Exception as e:
+        logger.warning(f"Error getting backup verification kpis: {e}")
+        return {
+            "last_successful_backup": None,
+            "last_successful_restore_test": None,
+            "backup_success_rate_7d": 0.0,
+            "backup_success_rate_30d": 0.0,
+        }
 
 
 def create_restore_job(created_by: str, preflight_report: Dict[str, Any], status: str = "queued") -> Optional[int]:
