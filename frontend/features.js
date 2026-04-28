@@ -233,6 +233,7 @@ async function adminInit() {
   document.getElementById('backup-profile-save-btn')?.addEventListener('click', saveBackupProfile);
   document.getElementById('backup-profile-reset-btn')?.addEventListener('click', resetBackupProfileForm);
   document.getElementById('backup-monitor-refresh-btn')?.addEventListener('click', () => loadBackupJobs(true));
+  document.getElementById('backup-download-all-btn')?.addEventListener('click', downloadAllBackups);
 }
 
 let restorePreflightId = null;
@@ -257,7 +258,7 @@ function adminTabHandlers() {
       if (name === 'users')    loadAdminUsers();
       if (name === 'sessions') loadAdminSessions();
       if (name === 'memories') loadCoreMemories();
-      if (name === 'backup') { loadBackupHistory(); loadBackupProfiles(); loadBackupJobs(); }
+      if (name === 'backup') { loadBackupHistory(); loadBackupProfiles(); loadBackupJobs(); loadBackupKpis(); }
       if (name === 'audit')    loadAuditLog();
     });
   });
@@ -518,12 +519,35 @@ function backupDurationSeconds(job) {
   return `${Math.round((end - start) / 1000)}s`;
 }
 
+function backupVerifiedBadge(job) {
+  if (job.status !== 'success') return '<span class="badge" style="background:#f59e0b1f;color:#fbbf24;border:1px solid #f59e0b33">pending</span>';
+  if (job.verified) return '<span class="badge badge-green">verified</span>';
+  return '<span class="badge badge-red">failed</span>';
+}
+
+async function loadBackupKpis() {
+  const ids = {
+    lastBackup: document.getElementById('kpi-last-successful-backup'),
+    lastRestore: document.getElementById('kpi-last-successful-restore-test'),
+    rate7d: document.getElementById('kpi-backup-success-rate-7d'),
+    rate30d: document.getElementById('kpi-backup-success-rate-30d'),
+  };
+  if (!ids.lastBackup || !ids.lastRestore || !ids.rate7d || !ids.rate30d) return;
+  const { ok, data } = await apiJSON('/api/backups/kpis');
+  if (!ok) return;
+  const k = data.kpis || {};
+  ids.lastBackup.textContent = k.last_successful_backup ? fmtDate(k.last_successful_backup) : '—';
+  ids.lastRestore.textContent = k.last_successful_restore_test ? fmtDate(k.last_successful_restore_test) : '—';
+  ids.rate7d.textContent = `${Number(k.backup_success_rate_7d || 0).toFixed(2)}%`;
+  ids.rate30d.textContent = `${Number(k.backup_success_rate_30d || 0).toFixed(2)}%`;
+}
+
 async function loadBackupJobs(showToast = false) {
   const tbody = document.getElementById('backup-jobs-tbody');
   if (!tbody) return;
   const { ok, data } = await apiJSON('/api/backups/jobs?limit=25&offset=0');
   if (!ok) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--red)">Failed to load jobs</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--red)">Failed to load jobs</td></tr>';
     if (showToast) toast(data.detail || 'Failed to refresh jobs', 'error');
     return;
   }
@@ -532,14 +556,16 @@ async function loadBackupJobs(showToast = false) {
     <tr>
       <td>#${j.id}</td>
       <td>${backupStatusBadge(j.status)}</td>
+      <td>${backupVerifiedBadge(j)}</td>
       <td>${j.profile_id ?? '-'}</td>
       <td class="text-xs">${j.started_at ? fmtDate(j.started_at) : '-'}</td>
       <td class="text-xs">${backupDurationSeconds(j)}</td>
       <td class="text-xs">${j.bytes_written || 0}</td>
       <td class="text-xs">${j.artifact_path || '-'}</td>
-      <td class="text-xs">${j.error_message ? `<details><summary>View</summary>${j.error_message}</details>` : '-'}</td>
+      <td class="text-xs">${(j.error_message || j.verification_error) ? `<details><summary>View</summary>${j.error_message || j.verification_error}</details>` : '-'}</td>
     </tr>`).join('')
-    : '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">No backup jobs yet</td></tr>';
+    : '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:20px">No backup jobs yet</td></tr>';
+  await loadBackupKpis();
   if (showToast) toast('Backup jobs refreshed', 'success');
 }
 
@@ -625,7 +651,7 @@ async function restoreBackup() {
   restorePollTimer = setInterval(async () => {
     const res = await apiJSON(`/api/restores/jobs/${jobId}`);
     if (!res.ok) return;
-    const job = res.data || {};
+    const job = res.data?.job || {};
     if (progress) progress.textContent = `Step: ${job.current_step || '-'} (${job.progress_percent || 0}%)`;
     if (['success', 'failed'].includes(job.status)) {
       clearInterval(restorePollTimer);
@@ -651,8 +677,52 @@ async function loadBackupHistory() {
       <td><span class="badge ${h.status==='success'?'badge-green':'badge-red'}">${h.status}</span></td>
       <td>${h.session_count||0}</td>
       <td>${h.mode||'-'}</td>
+      <td>${h.target ? `<button class="btn btn-secondary btn-sm" onclick="downloadBackupByPath('${String(h.target).replace(/'/g, '&#39;')}')">Download</button>` : '-'}</td>
     </tr>`).join('')
-    : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:20px">No backup history</td></tr>';
+    : '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No backup history</td></tr>';
+}
+
+async function downloadBackupByPath(path) {
+  const normalized = (path || '').trim();
+  if (!normalized.startsWith('/')) {
+    toast('Download is only available for local backup paths', 'error');
+    return;
+  }
+  await _downloadWithAuth(`/api/backups/download?path=${encodeURIComponent(normalized)}`);
+}
+
+async function downloadAllBackups() {
+  await _downloadWithAuth('/api/backups/download-all');
+}
+
+async function _downloadWithAuth(url) {
+  try {
+    const headers = {};
+    if (State?.token) headers.Authorization = `Bearer ${State.token}`;
+    const res = await fetch(url, { method: 'GET', headers });
+    if (!res.ok) {
+      let detail = 'Download failed';
+      try {
+        const data = await res.json();
+        detail = data.detail || detail;
+      } catch (_) {}
+      toast(detail, 'error');
+      return;
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('content-disposition') || '';
+    const match = cd.match(/filename=\"?([^\";]+)\"?/i);
+    const filename = match?.[1] || 'backup_download';
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+  } catch (err) {
+    toast(`Download failed: ${err?.message || 'Unknown error'}`, 'error');
+  }
 }
 
 async function loadAuditLog() {

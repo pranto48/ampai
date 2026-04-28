@@ -319,39 +319,43 @@ async function _sendChat() {
   };
   if (memoryMode === 'indexed') {
     const topK = parseInt(document.getElementById('memory-top-k')?.value || '5', 10);
-    const recencyBias = parseFloat(document.getElementById('recency-bias')?.value || '0.35');
-    const categoryFilter = (document.getElementById('category-filter')?.value || '').trim();
+    const recencyBias = parseFloat(document.getElementById('memory-recency-bias')?.value || '0.35');
+    const categoryFilter = (document.getElementById('memory-category-filter')?.value || '').trim();
     payload.memory_top_k = Number.isFinite(topK) ? topK : 5;
     payload.recency_bias = Number.isFinite(recencyBias) ? recencyBias : 0.35;
     if (categoryFilter) payload.category_filter = categoryFilter;
   }
 
-  const { ok, data } = await apiJSON('/api/chat', {
-    method: 'POST',
-    body: JSON.stringify({
-      session_id:   State.sessionId,
-      message:      message || 'Please review the attached files.',
-      model_type:   document.getElementById('model-select')?.value        || 'ollama',
-      memory_mode:  document.getElementById('memory-mode-select')?.value  || 'full',
-      memory_top_k: Number(document.getElementById('memory-top-k')?.value || 5),
-      memory_recency_bias: Number(document.getElementById('memory-recency-bias')?.value || 0),
-      memory_category_filter: document.getElementById('memory-category-filter')?.value || '',
-      persona_id: document.getElementById('persona-select')?.value || null,
-      chat_output_mode: chatOutputMode,
-      use_web_search: !!(document.getElementById('web-search-toggle')?.checked),
-      attachments:  atts,
-    }),
-  });
+  try {
+    const { ok, data } = await apiJSON('/api/chat', {
+      method: 'POST',
+      body: JSON.stringify({
+        session_id:   State.sessionId,
+        message:      message || 'Please review the attached files.',
+        model_type:   document.getElementById('model-select')?.value        || 'ollama',
+        memory_mode:  document.getElementById('memory-mode-select')?.value  || 'full',
+        memory_top_k: Number(document.getElementById('memory-top-k')?.value || 5),
+        memory_recency_bias: Number(document.getElementById('memory-recency-bias')?.value || 0),
+        memory_category_filter: document.getElementById('memory-category-filter')?.value || '',
+        persona_id: document.getElementById('persona-select')?.value || null,
+        chat_output_mode: chatOutputMode,
+        use_web_search: !!(document.getElementById('web-search-toggle')?.checked),
+        attachments:  atts,
+      }),
+    });
 
-  _removeTyping(typId);
-
-  if (ok) {
-    _appendMsg('ai', data.response || data.detail || 'No response');
-    _renderTaskSuggestions(data.task_suggestions || []);
-    loadSessions(); // refresh sidebar
-    _loadSessionTaskSuggestions(State.sessionId);
-  } else {
-    _appendMsg('ai', '⚠️ ' + (data.detail || 'Something went wrong. Check your AI model config.'));
+    if (ok) {
+      _appendMsg('ai', data.response || data.detail || 'No response');
+      _renderTaskSuggestions(data.task_suggestions || []);
+      loadSessions(); // refresh sidebar
+      _loadSessionTaskSuggestions(State.sessionId);
+    } else {
+      _appendMsg('ai', '⚠️ ' + (data.detail || 'Something went wrong. Check your AI model config.'));
+    }
+  } catch (err) {
+    _appendMsg('ai', '⚠️ Failed to send message: ' + (err?.message || 'unknown error'));
+  } finally {
+    _removeTyping(typId);
   }
 }
 
