@@ -2247,6 +2247,22 @@ def ensure_enterprise_tables() -> None:
             conn.execute(
                 text(
                     """
+                    CREATE TABLE IF NOT EXISTS memory_summary_nodes (
+                        id BIGSERIAL PRIMARY KEY,
+                        username VARCHAR NOT NULL,
+                        topic VARCHAR NOT NULL,
+                        window_start TIMESTAMPTZ NOT NULL,
+                        window_end TIMESTAMPTZ NOT NULL,
+                        bullet_summary TEXT NOT NULL,
+                        source_count INTEGER NOT NULL DEFAULT 0,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
                     CREATE TABLE IF NOT EXISTS persona_presets (
                         id BIGSERIAL PRIMARY KEY,
                         username VARCHAR NULL,
@@ -2259,6 +2275,11 @@ def ensure_enterprise_tables() -> None:
                     """
                 )
             )
+            conn.execute(text("ALTER TABLE memory_candidates ADD COLUMN IF NOT EXISTS summarized_at TIMESTAMPTZ"))
+            conn.execute(text("ALTER TABLE memory_candidates ADD COLUMN IF NOT EXISTS summary_node_id BIGINT"))
+            conn.execute(text("ALTER TABLE memory_candidates ADD COLUMN IF NOT EXISTS retrieval_priority DOUBLE PRECISION NOT NULL DEFAULT 1.0"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_memory_candidates_summarized_at ON memory_candidates (summarized_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_memory_summary_nodes_username_created_at ON memory_summary_nodes (username, created_at DESC)"))
             conn.commit()
     except Exception as exc:
         logger.exception("Error ensuring enterprise tables", exc_info=exc)
@@ -2690,6 +2711,178 @@ def get_session_insight(session_id: str) -> Dict[str, str]:
             return dict(row) if row else {}
     except Exception:
         return {}
+
+
+def _canonical_bullet_summary(rows: List[Dict[str, Any]], *, max_bullets: int = 10) -> str:
+    ordered = sorted(rows, key=lambda r: str(r.get("created_at") or ""))
+    bullets: List[str] = []
+    seen = set()
+    for row in ordered:
+        raw = " ".join(str(row.get("candidate_text") or "").split())
+        if not raw:
+            continue
+        normalized = raw.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if len(raw) > 180:
+            raw = raw[:177].rstrip() + "..."
+        bullets.append(f"- {raw}")
+        if len(bullets) >= max(5, min(max_bullets, 10)):
+            break
+    return "\n".join(bullets)
+
+
+def summarize_approved_memories(min_age_days: int = 14, min_group_size: int = 3, max_groups: int = 100) -> Dict[str, int]:
+    if not engine:
+        return {"groups_created": 0, "sources_marked": 0}
+    safe_age = max(1, int(min_age_days))
+    safe_group_size = max(2, int(min_group_size))
+    safe_max_groups = max(1, min(int(max_groups), 500))
+    groups_created = 0
+    sources_marked = 0
+    try:
+        with engine.connect() as conn:
+            candidate_groups = conn.execute(
+                text(
+                    """
+                    SELECT
+                        mc.username,
+                        COALESCE(sm.category, 'general') AS topic,
+                        DATE_TRUNC('week', mc.created_at) AS week_start,
+                        COUNT(*) AS memory_count
+                    FROM memory_candidates mc
+                    LEFT JOIN session_metadata sm ON sm.session_id = mc.session_id
+                    WHERE mc.status = 'approved'
+                      AND mc.summarized_at IS NULL
+                      AND mc.created_at <= NOW() - make_interval(days => :min_age_days)
+                    GROUP BY 1, 2, 3
+                    HAVING COUNT(*) >= :min_group_size
+                    ORDER BY week_start ASC, memory_count DESC
+                    LIMIT :max_groups
+                    """
+                ),
+                {"min_age_days": safe_age, "min_group_size": safe_group_size, "max_groups": safe_max_groups},
+            ).mappings().all()
+
+            for group in candidate_groups:
+                username = str(group["username"])
+                topic = str(group["topic"] or "general")
+                week_start = group["week_start"]
+                if not week_start:
+                    continue
+                window_start = week_start
+                window_end = week_start + timedelta(days=7)
+                source_rows = conn.execute(
+                    text(
+                        """
+                        SELECT id, candidate_text, created_at
+                        FROM memory_candidates
+                        WHERE username = :username
+                          AND status = 'approved'
+                          AND summarized_at IS NULL
+                          AND created_at >= :window_start
+                          AND created_at < :window_end
+                        ORDER BY created_at ASC, id ASC
+                        """
+                    ),
+                    {
+                        "username": username,
+                        "window_start": window_start,
+                        "window_end": window_end,
+                    },
+                ).mappings().all()
+                if len(source_rows) < safe_group_size:
+                    continue
+                summary_text = _canonical_bullet_summary([dict(r) for r in source_rows], max_bullets=10)
+                if not summary_text:
+                    continue
+
+                node = conn.execute(
+                    text(
+                        """
+                        INSERT INTO memory_summary_nodes (username, topic, window_start, window_end, bullet_summary, source_count, created_at)
+                        VALUES (:username, :topic, :window_start, :window_end, :bullet_summary, :source_count, NOW())
+                        RETURNING id
+                        """
+                    ),
+                    {
+                        "username": username,
+                        "topic": topic,
+                        "window_start": window_start,
+                        "window_end": window_end,
+                        "bullet_summary": summary_text,
+                        "source_count": len(source_rows),
+                    },
+                ).mappings().first()
+                if not node:
+                    continue
+                summary_node_id = int(node["id"])
+                ids = [int(r["id"]) for r in source_rows]
+                update_result = conn.execute(
+                    text(
+                        """
+                        UPDATE memory_candidates
+                        SET summarized_at = NOW(),
+                            summary_node_id = :summary_node_id,
+                            retrieval_priority = LEAST(COALESCE(retrieval_priority, 1.0), 0.25)
+                        WHERE id = ANY(:ids)
+                        """
+                    ),
+                    {"summary_node_id": summary_node_id, "ids": ids},
+                )
+                groups_created += 1
+                sources_marked += int(update_result.rowcount or 0)
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Error summarizing approved memories", exc_info=exc)
+    return {"groups_created": groups_created, "sources_marked": sources_marked}
+
+
+def get_memory_rollup_metrics(username: Optional[str] = None) -> Dict[str, Any]:
+    if not engine:
+        return {"raw_memory_count": 0, "summary_node_count": 0, "avg_injected_memory_chars": 0, "avg_injected_memory_tokens": 0}
+    try:
+        with engine.connect() as conn:
+            params: Dict[str, Any] = {}
+            user_filter_candidates = ""
+            user_filter_nodes = ""
+            user_filter_audit = ""
+            if username:
+                params["username"] = username
+                user_filter_candidates = "AND username = :username"
+                user_filter_nodes = "AND username = :username"
+                user_filter_audit = "AND username = :username"
+            raw_count = conn.execute(
+                text(f"SELECT COUNT(*) FROM memory_candidates WHERE status = 'approved' {user_filter_candidates}"),
+                params,
+            ).scalar() or 0
+            summary_count = conn.execute(
+                text(f"SELECT COUNT(*) FROM memory_summary_nodes WHERE 1=1 {user_filter_nodes}"),
+                params,
+            ).scalar() or 0
+            averages = conn.execute(
+                text(
+                    f"""
+                    SELECT
+                        COALESCE(AVG(NULLIF(split_part(split_part(details, 'chars=', 2), ',', 1), '')::FLOAT), 0) AS avg_chars,
+                        COALESCE(AVG(NULLIF(split_part(split_part(details, 'tokens=', 2), ',', 1), '')::FLOAT), 0) AS avg_tokens
+                    FROM audit_events
+                    WHERE action = 'memory.read.injected'
+                      {user_filter_audit}
+                    """
+                ),
+                params,
+            ).mappings().first() or {}
+            return {
+                "raw_memory_count": int(raw_count),
+                "summary_node_count": int(summary_count),
+                "avg_injected_memory_chars": round(float(averages.get("avg_chars") or 0), 2),
+                "avg_injected_memory_tokens": round(float(averages.get("avg_tokens") or 0), 2),
+            }
+    except Exception as exc:
+        logger.exception("Error computing memory rollup metrics", exc_info=exc)
+        return {"raw_memory_count": 0, "summary_node_count": 0, "avg_injected_memory_chars": 0, "avg_injected_memory_tokens": 0}
 
 
 def redact_pii_text(text_value: str) -> str:

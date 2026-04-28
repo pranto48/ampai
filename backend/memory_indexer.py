@@ -14,6 +14,7 @@ from database import DATABASE_URL, engine, get_config
 
 EMBED_CACHE_TTL_SECONDS = int(os.getenv("MEMORY_EMBED_CACHE_TTL_SECONDS", "300") or "300")
 CANDIDATE_PREFILTER_LIMIT = 50
+SUMMARY_PREFILTER_LIMIT = 25
 
 
 def get_embedding_model(model_type: str = "ollama"):
@@ -160,12 +161,13 @@ class MemoryIndexer:
                 mc.candidate_text,
                 mc.status,
                 mc.created_at,
+                COALESCE(mc.retrieval_priority, 1.0) AS retrieval_priority,
                 COALESCE(sm.category, 'Uncategorized') AS category,
                 ts_rank_cd(to_tsvector('simple', mc.candidate_text), plainto_tsquery('simple', :query)) AS lex_rank
             FROM memory_candidates mc
             LEFT JOIN session_metadata sm ON sm.session_id = mc.session_id
             WHERE {' AND '.join(where_parts)}
-            ORDER BY lex_rank DESC NULLS LAST, mc.created_at DESC, mc.id DESC
+            ORDER BY retrieval_priority DESC, lex_rank DESC NULLS LAST, mc.created_at DESC, mc.id DESC
             LIMIT :limit
             """
         )
@@ -222,6 +224,68 @@ class MemoryIndexer:
         ranked = [text_value for _score, text_value in sorted(scored, key=lambda item: item[0], reverse=True)[: max(1, k)]]
         return ranked, {"cache_hits": cache_hits, "cache_misses": cache_misses}
 
+    def _rerank_candidate_rows(self, query: str, candidates: List[Dict[str, Any]], k: int) -> Tuple[List[Tuple[float, str]], Dict[str, int]]:
+        if not candidates:
+            return [], {"cache_hits": 0, "cache_misses": 0}
+        cache_hits = 0
+        cache_misses = 0
+        query_key = self._cache_key("query", query)
+        query_embedding = self._get_cached_embedding(query_key)
+        if query_embedding is None:
+            cache_misses += 1
+            query_embedding = self.embedding_model.embed_query(query)
+            self._set_cached_embedding(query_key, query_embedding)
+        else:
+            cache_hits += 1
+        scored_rows: List[Tuple[float, str]] = []
+        for row in candidates:
+            raw_text = (row.get("candidate_text") or row.get("bullet_summary") or "").strip()
+            if not raw_text:
+                continue
+            row_key = self._cache_key("row", f"{row.get('id')}::{raw_text}")
+            emb = self._get_cached_embedding(row_key)
+            if emb is None:
+                cache_misses += 1
+                emb = self.embedding_model.embed_query(raw_text)
+                self._set_cached_embedding(row_key, emb)
+            else:
+                cache_hits += 1
+            scored_rows.append((self._cosine_similarity(query_embedding, emb), raw_text))
+        scored_rows = sorted(scored_rows, key=lambda item: item[0], reverse=True)[: max(1, k)]
+        return scored_rows, {"cache_hits": cache_hits, "cache_misses": cache_misses}
+
+    def _search_summary_nodes(
+        self,
+        query: str,
+        *,
+        username: Optional[str],
+        category_filter: Optional[str],
+        k: int,
+    ) -> List[Dict[str, Any]]:
+        if not engine:
+            return []
+        where_parts = ["bullet_summary IS NOT NULL", "bullet_summary <> ''"]
+        params: Dict[str, Any] = {"query": (query or "").strip(), "limit": max(1, min(int(k), 25))}
+        if username:
+            where_parts.append("username = :username")
+            params["username"] = username
+        if category_filter:
+            where_parts.append("topic = :topic")
+            params["topic"] = category_filter
+        sql = text(
+            f"""
+            SELECT id, username, topic, bullet_summary, source_count, created_at,
+                   ts_rank_cd(to_tsvector('simple', bullet_summary), plainto_tsquery('simple', :query)) AS lex_rank
+            FROM memory_summary_nodes
+            WHERE {' AND '.join(where_parts)}
+            ORDER BY lex_rank DESC NULLS LAST, created_at DESC, id DESC
+            LIMIT :limit
+            """
+        )
+        with engine.begin() as conn:
+            rows = conn.execute(sql, params).mappings().all()
+        return [dict(r) for r in rows]
+
     def search_facts(
         self,
         query: str,
@@ -237,8 +301,27 @@ class MemoryIndexer:
             return []
         started = perf_counter()
         try:
+            top_k = max(1, min(int(k or 5), 5))
+            summary_candidates = self._search_summary_nodes(
+                query,
+                username=username,
+                category_filter=category_filter,
+                k=SUMMARY_PREFILTER_LIMIT,
+            )
+            summary_ranked, summary_cache_stats = self._rerank_candidate_rows(query, summary_candidates, top_k)
+            top_summary_score = summary_ranked[0][0] if summary_ranked else -1.0
+            if summary_ranked and top_summary_score >= 0.45:
+                summary_texts = [text_value for _score, text_value in summary_ranked]
+                self.last_retrieval_stats = {
+                    "pipeline": "summary_first_semantic_rerank",
+                    "latency_ms": int((perf_counter() - started) * 1000),
+                    "prefilter_count": len(summary_candidates),
+                    "rerank_count": len(summary_texts),
+                    "cache_hits": summary_cache_stats.get("cache_hits", 0),
+                    "cache_misses": summary_cache_stats.get("cache_misses", 0),
+                }
+                return summary_texts
             if self._hybrid_enabled():
-                top_k = max(1, min(int(k or 5), 5))
                 candidates = self._prefilter_memory_candidates(
                     query,
                     username=username,
@@ -250,12 +333,12 @@ class MemoryIndexer:
                 )
                 reranked, cache_stats = self._rerank_candidates(query, candidates, top_k)
                 self.last_retrieval_stats = {
-                    "pipeline": "hybrid_prefilter_semantic_rerank",
+                    "pipeline": "summary_then_hybrid_prefilter_semantic_rerank",
                     "latency_ms": int((perf_counter() - started) * 1000),
-                    "prefilter_count": len(candidates),
+                    "prefilter_count": len(summary_candidates) + len(candidates),
                     "rerank_count": len(reranked),
-                    "cache_hits": cache_stats.get("cache_hits", 0),
-                    "cache_misses": cache_stats.get("cache_misses", 0),
+                    "cache_hits": summary_cache_stats.get("cache_hits", 0) + cache_stats.get("cache_hits", 0),
+                    "cache_misses": summary_cache_stats.get("cache_misses", 0) + cache_stats.get("cache_misses", 0),
                 }
                 if reranked:
                     return reranked
