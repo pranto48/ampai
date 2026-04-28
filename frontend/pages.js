@@ -119,6 +119,17 @@ function buildChatPage() {
     <div style="padding:14px 18px;border-top:1px solid var(--border);
       background:linear-gradient(to top,var(--bg) 70%,transparent)">
       <div id="attach-previews" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+      <details style="margin-bottom:8px">
+        <summary style="font-size:.78rem;color:var(--muted);cursor:pointer">Attached media library</summary>
+        <div style="margin-top:8px;border:1px solid var(--border);border-radius:10px;padding:10px;background:var(--bg-2)">
+          <div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+            <button id="media-refresh-btn" type="button" class="btn btn-secondary btn-sm">↻ Refresh files</button>
+          </div>
+          <div id="media-library-list" style="display:flex;flex-direction:column;gap:6px;max-height:180px;overflow:auto;color:var(--muted);font-size:.78rem">
+            Loading uploaded files…
+          </div>
+        </div>
+      </details>
       <div style="display:flex;align-items:flex-end;gap:8px;background:var(--bg-3);
         border:1px solid var(--border);border-radius:14px;padding:8px 12px;transition:border-color .2s"
         id="input-box">
