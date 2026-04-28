@@ -621,15 +621,16 @@ function buildAdminPage() {
       <div id="backup-profile-status" style="font-size:.85rem;margin-top:10px"></div>
     </div>
     <div class="card">
-      <div class="card-title">Restore from JSON</div>
+      <div class="card-title">Restore from Backup</div>
+      <input id="backup-restore-file" class="input" type="file" accept=".json,application/json" />
       <textarea id="backup-restore-json" class="input" rows="4" placeholder="Paste backup JSON here…"
         style="resize:vertical"></textarea>
-      <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
-        <input type="checkbox" id="backup-dry-run" checked style="accent-color:var(--accent)"/>
-        <label style="font-size:.82rem;color:var(--muted)">Dry run (preview only)</label>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button id="backup-preflight-btn" class="btn btn-secondary">Run Preflight</button>
+        <button id="restore-backup-btn" class="btn btn-danger">Confirm Restore</button>
       </div>
-      <button id="restore-backup-btn" class="btn btn-secondary" style="margin-top:10px">Restore</button>
       <div id="restore-status" style="font-size:.85rem;margin-top:8px"></div>
+      <div id="restore-progress" style="font-size:.8rem;color:var(--muted);margin-top:6px"></div>
     </div>
   </div>
   <div class="card">

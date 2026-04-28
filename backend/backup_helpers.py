@@ -10,7 +10,11 @@ from typing import Dict, List, Optional, Tuple
 
 
 def build_backup_payload(sessions: List[Dict], actor: str) -> Tuple[str, Dict]:
+    schema_version = "1.1"
+    app_version = os.getenv("AMPAI_APP_VERSION", "dev")
     payload = {
+        "schema_version": schema_version,
+        "app_version": app_version,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "by": actor,
         "sessions": sessions,
@@ -19,6 +23,8 @@ def build_backup_payload(sessions: List[Dict], actor: str) -> Tuple[str, Dict]:
     message_count = sum(len(s.get("messages", [])) for s in sessions)
     checksum = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     manifest = {
+        "schema_version": schema_version,
+        "app_version": app_version,
         "timestamp": payload["created_at"],
         "session_count": len(sessions),
         "message_count": message_count,
