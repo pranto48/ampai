@@ -25,6 +25,10 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
 logger = get_logger(__name__)
 
+INDEXED_LOW_TOKEN_TOP_K_MAX = 3
+INDEXED_TOP_K_MAX = 5
+INDEXED_CONTEXT_CHAR_BUDGET = 1200
+
 
 
 
@@ -328,18 +332,75 @@ def chat_with_agent(
         "recency_bias": None,
         "category_filter": None,
         "retrieved_count": 0,
+        "truncated_count": 0,
+        "context_chars": 0,
     }
 
     if memory_mode == "indexed":
         indexer = MemoryIndexer(model_type)
-        k = max(1, min(int(memory_top_k or 5), 20))
-        relevant_memories = indexer.search_facts(message, k=k)
-        context_str = "\n---\n".join(relevant_memories) if relevant_memories else "No previous relevant facts found."
+        k = max(1, min(int(memory_top_k or 5), INDEXED_TOP_K_MAX))
+        effective_recency_bias = max(0.0, min(1.0, float(recency_bias if recency_bias is not None else 0.6)))
+        use_low_token_cap = (chat_output_mode or "").strip().lower() == "compact"
+        if use_low_token_cap:
+            k = min(k, INDEXED_LOW_TOKEN_TOP_K_MAX)
+        relevant_memories = indexer.search_facts(
+            message,
+            k=k,
+            recency_bias=effective_recency_bias,
+            category_filter=(category_filter or None),
+        )
+
+        query_terms = {w for w in re.findall(r"\w+", (message or "").lower()) if len(w) > 2}
+
+        def _score_snippet(snippet: str, idx: int) -> float:
+            words = {w for w in re.findall(r"\w+", snippet.lower()) if len(w) > 2}
+            overlap = len(query_terms.intersection(words))
+            date_hits = len(re.findall(r"\b20\d{2}-\d{2}-\d{2}\b", snippet))
+            rank_decay = max(0.0, 1.0 - (0.05 * idx))
+            return (overlap * 2.0) + (date_hits * effective_recency_bias) + rank_decay
+
+        ranked_memories = sorted(
+            [(snippet, _score_snippet(snippet, idx)) for idx, snippet in enumerate(relevant_memories or [])],
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        context_snippets: List[str] = []
+        context_chars = 0
+        truncated_count = 0
+        for snippet, _score in ranked_memories:
+            normalized = (snippet or "").strip()
+            if not normalized:
+                continue
+            if len(normalized) > INDEXED_CONTEXT_CHAR_BUDGET:
+                normalized = normalized[:INDEXED_CONTEXT_CHAR_BUDGET].rstrip() + "…"
+                truncated_count += 1
+            separator_chars = 5 if context_snippets else 0  # "\n---\n"
+            remaining = INDEXED_CONTEXT_CHAR_BUDGET - context_chars - separator_chars
+            if remaining <= 0:
+                truncated_count += 1
+                continue
+            if len(normalized) > remaining:
+                normalized = normalized[:remaining].rstrip() + "…"
+                truncated_count += 1
+            context_snippets.append(normalized)
+            context_chars += len(normalized) + separator_chars
+            if context_chars >= INDEXED_CONTEXT_CHAR_BUDGET:
+                break
+
+        context_str = "\n---\n".join(context_snippets) if context_snippets else "No previous relevant facts found."
+        retrieval_meta.update({
+            "top_k": k,
+            "recency_bias": effective_recency_bias,
+            "category_filter": category_filter or None,
+            "retrieved_count": len(context_snippets),
+            "truncated_count": truncated_count,
+            "context_chars": len(context_str),
+        })
         system_msg = (
             agent_directives +
             "FAST INDEXED MEMORY MODE: Instead of full history, here are the most relevant distilled facts retrieved for this query:\n"
             f"{context_str}\n\n"
-            f"Retrieval tuning: top_k={k}, recency_bias={recency_bias}, category_filter={category_filter or 'none'}.\n"
+            f"Retrieval tuning: top_k={k}, recency_bias={effective_recency_bias}, category_filter={category_filter or 'none'}, context_char_budget={INDEXED_CONTEXT_CHAR_BUDGET}.\n"
             "Use these to provide highly contextual answers."
         )
         prompt = ChatPromptTemplate.from_messages([
@@ -411,4 +472,5 @@ def chat_with_agent(
         "web_search": web_search,
         "task_suggestions": task_suggestions,
         "has_task_cues": bool(task_suggestions),
+        "retrieval": retrieval_meta,
     }

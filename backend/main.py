@@ -167,7 +167,7 @@ class ChatRequest(BaseModel):
     model_type: str = "ollama"
     api_key: Optional[str] = None
     model_name: Optional[str] = None
-    memory_mode: str = "full"
+    memory_mode: str = "indexed"
     memory_top_k: int = 5
     memory_recency_bias: float = 0.0
     memory_category_filter: Optional[str] = ""
@@ -953,16 +953,28 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             requested_mode = str(effective_chat_prefs.get("chat_output_mode") or "normal").strip().lower()
         if requested_mode not in {"compact", "normal"}:
             requested_mode = "normal"
+        low_token_mode = bool(effective_chat_prefs.get("low_token_mode"))
+        requested_memory_mode = (request.memory_mode or "").strip().lower()
+        if requested_memory_mode not in {"indexed", "full"}:
+            requested_memory_mode = "indexed"
+        effective_memory_mode = requested_memory_mode if user.role == "admin" else "indexed"
+        requested_top_k = request.memory_top_k if request.memory_top_k is not None else 5
+        max_top_k = 3 if low_token_mode else 5
+        clamped_top_k = max(1, min(max_top_k, int(requested_top_k or 5)))
+        raw_recency_bias = request.recency_bias if request.recency_bias is not None else request.memory_recency_bias
+        effective_recency_bias = float(raw_recency_bias if raw_recency_bias is not None else 0.6)
+        effective_recency_bias = max(0.0, min(1.0, effective_recency_bias))
+        category_filter_value = (request.category_filter or request.memory_category_filter or "").strip()
         result = chat_with_agent(
             session_id=request.session_id,
             message=message_for_agent,
             model_type=request.model_type,
             api_key=request.api_key,
             model_name=request.model_name,
-            memory_mode=request.memory_mode,
-            memory_top_k=max(1, min(20, int(request.memory_top_k or 5))),
-            recency_bias=float(request.memory_recency_bias or 0.0),
-            category_filter=(request.memory_category_filter or "").strip(),
+            memory_mode=effective_memory_mode,
+            memory_top_k=clamped_top_k,
+            recency_bias=effective_recency_bias,
+            category_filter=category_filter_value,
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
             chat_output_mode=requested_mode,
