@@ -104,6 +104,7 @@ function buildMemoryInboxPage() {
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
   <h2 style="font-size:1.15rem;font-weight:700">📥 Memory Inbox</h2>
   <div style="display:flex;gap:8px">
+    <input id="mi-search" class="input" placeholder="Search memories..." style="min-width:220px"/>
     <select id="mi-status-filter" class="input" style="width:auto;padding:6px 10px">
       <option value="pending">Pending</option>
       <option value="approved">Approved</option>
