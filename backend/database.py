@@ -47,6 +47,30 @@ app_configs = Table(
     Column('config_value', String)
 )
 
+backup_profiles = Table(
+    "backup_profiles",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String, nullable=False),
+    Column("enabled", Boolean, nullable=False, default=True),
+    Column("include_database", Boolean, nullable=False, default=True),
+    Column("include_uploads", Boolean, nullable=False, default=False),
+    Column("include_configs", Boolean, nullable=False, default=False),
+    Column("include_logs", Boolean, nullable=False, default=False),
+    Column("destination_type", String, nullable=False, default="local"),
+    Column("destination_path", String, nullable=True),
+    Column("destination_host", String, nullable=True),
+    Column("destination_port", Integer, nullable=True),
+    Column("destination_username", String, nullable=True),
+    Column("credential_key_ref", String, nullable=True),
+    Column("schedule_cron", String, nullable=True),
+    Column("schedule_interval_minutes", Integer, nullable=True),
+    Column("retention_count", Integer, nullable=True),
+    Column("retention_days", Integer, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
 core_memories = Table(
     'core_memories', metadata,
     Column('id', Integer, primary_key=True, autoincrement=True),
@@ -589,6 +613,174 @@ def set_config(key: str, value: str):
     except Exception as e:
         logger.warning(f"Error setting config {key}: {e}")
         return False
+
+
+def migrate_backup_profiles_schema() -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS backup_profiles (
+                        id SERIAL PRIMARY KEY,
+                        name VARCHAR NOT NULL,
+                        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        include_database BOOLEAN NOT NULL DEFAULT TRUE,
+                        include_uploads BOOLEAN NOT NULL DEFAULT FALSE,
+                        include_configs BOOLEAN NOT NULL DEFAULT FALSE,
+                        include_logs BOOLEAN NOT NULL DEFAULT FALSE,
+                        destination_type VARCHAR NOT NULL DEFAULT 'local',
+                        destination_path VARCHAR,
+                        destination_host VARCHAR,
+                        destination_port INTEGER,
+                        destination_username VARCHAR,
+                        credential_key_ref VARCHAR,
+                        schedule_cron VARCHAR,
+                        schedule_interval_minutes INTEGER,
+                        retention_count INTEGER,
+                        retention_days INTEGER,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Error migrating backup profiles schema: {e}")
+
+
+migrate_backup_profiles_schema()
+
+
+def list_backup_profiles() -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            stmt = text(
+                """
+                SELECT id, name, enabled, include_database, include_uploads, include_configs, include_logs,
+                       destination_type, destination_path, destination_host, destination_port,
+                       destination_username, credential_key_ref, schedule_cron, schedule_interval_minutes,
+                       retention_count, retention_days, created_at, updated_at
+                FROM backup_profiles
+                ORDER BY id DESC
+                """
+            )
+            rows = conn.execute(stmt).fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "enabled": bool(row[2]),
+                    "include_database": bool(row[3]),
+                    "include_uploads": bool(row[4]),
+                    "include_configs": bool(row[5]),
+                    "include_logs": bool(row[6]),
+                    "destination_type": row[7] or "local",
+                    "destination_path": row[8] or "",
+                    "destination_host": row[9] or "",
+                    "destination_port": row[10],
+                    "destination_username": row[11] or "",
+                    "credential_key_ref": row[12] or "",
+                    "schedule_cron": row[13] or "",
+                    "schedule_interval_minutes": row[14],
+                    "retention_count": row[15],
+                    "retention_days": row[16],
+                    "created_at": row[17].isoformat() if getattr(row[17], "isoformat", None) else str(row[17] or ""),
+                    "updated_at": row[18].isoformat() if getattr(row[18], "isoformat", None) else str(row[18] or ""),
+                }
+                for row in rows
+            ]
+    except Exception as e:
+        logger.warning(f"Error listing backup profiles: {e}")
+        return []
+
+
+def create_backup_profile(payload: Dict[str, Any]) -> Optional[int]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            stmt = text(
+                """
+                INSERT INTO backup_profiles (
+                    name, enabled, include_database, include_uploads, include_configs, include_logs,
+                    destination_type, destination_path, destination_host, destination_port,
+                    destination_username, credential_key_ref, schedule_cron, schedule_interval_minutes,
+                    retention_count, retention_days, created_at, updated_at
+                ) VALUES (
+                    :name, :enabled, :include_database, :include_uploads, :include_configs, :include_logs,
+                    :destination_type, :destination_path, :destination_host, :destination_port,
+                    :destination_username, :credential_key_ref, :schedule_cron, :schedule_interval_minutes,
+                    :retention_count, :retention_days, NOW(), NOW()
+                )
+                RETURNING id
+                """
+            )
+            profile_id = conn.execute(stmt, payload).scalar()
+            conn.commit()
+            return int(profile_id) if profile_id is not None else None
+    except Exception as e:
+        logger.warning(f"Error creating backup profile: {e}")
+        return None
+
+
+def update_backup_profile(profile_id: int, payload: Dict[str, Any]) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            stmt = text(
+                """
+                UPDATE backup_profiles
+                SET name=:name,
+                    enabled=:enabled,
+                    include_database=:include_database,
+                    include_uploads=:include_uploads,
+                    include_configs=:include_configs,
+                    include_logs=:include_logs,
+                    destination_type=:destination_type,
+                    destination_path=:destination_path,
+                    destination_host=:destination_host,
+                    destination_port=:destination_port,
+                    destination_username=:destination_username,
+                    credential_key_ref=:credential_key_ref,
+                    schedule_cron=:schedule_cron,
+                    schedule_interval_minutes=:schedule_interval_minutes,
+                    retention_count=:retention_count,
+                    retention_days=:retention_days,
+                    updated_at=NOW()
+                WHERE id=:id
+                """
+            )
+            result = conn.execute(stmt, {**payload, "id": profile_id})
+            conn.commit()
+            return (result.rowcount or 0) > 0
+    except Exception as e:
+        logger.warning(f"Error updating backup profile: {e}")
+        return False
+
+
+def delete_backup_profile(profile_id: int) -> bool:
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("DELETE FROM backup_profiles WHERE id = :id"), {"id": profile_id})
+            conn.commit()
+            return (result.rowcount or 0) > 0
+    except Exception as e:
+        logger.warning(f"Error deleting backup profile: {e}")
+        return False
+
+
+def get_backup_profile(profile_id: int) -> Optional[Dict[str, Any]]:
+    rows = [p for p in list_backup_profiles() if p.get("id") == profile_id]
+    return rows[0] if rows else None
 
 
 def get_all_configs():
