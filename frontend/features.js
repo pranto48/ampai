@@ -227,11 +227,16 @@ async function adminInit() {
   document.getElementById('refresh-health-btn')?.addEventListener('click', loadHealthPanel);
   document.getElementById('create-user-btn')?.addEventListener('click', createUser);
   document.getElementById('run-backup-btn')?.addEventListener('click', runBackup);
+  document.getElementById('backup-preflight-btn')?.addEventListener('click', runRestorePreflight);
   document.getElementById('restore-backup-btn')?.addEventListener('click', restoreBackup);
+  document.getElementById('backup-restore-file')?.addEventListener('change', loadRestoreFile);
   document.getElementById('backup-profile-save-btn')?.addEventListener('click', saveBackupProfile);
   document.getElementById('backup-profile-reset-btn')?.addEventListener('click', resetBackupProfileForm);
   document.getElementById('backup-monitor-refresh-btn')?.addEventListener('click', () => loadBackupJobs(true));
 }
+
+let restorePreflightId = null;
+let restorePollTimer = null;
 
 function adminTabHandlers() {
   if (window._adminTabsBound) return;
@@ -571,13 +576,66 @@ async function loadBackupProfiles() {
   `).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:20px">No profiles</td></tr>';
 }
 
+async function loadRestoreFile(event) {
+  const file = event?.target?.files?.[0];
+  if (!file) return;
+  const txt = await file.text();
+  const box = document.getElementById('backup-restore-json');
+  if (box) box.value = txt;
+}
+
+async function runRestorePreflight() {
+  const json = document.getElementById('backup-restore-json')?.value.trim();
+  const st = document.getElementById('restore-status');
+  const progress = document.getElementById('restore-progress');
+  if (!json) { if(st){st.textContent='Paste backup JSON first.';st.style.color='var(--red)';} return; }
+  const { ok, data } = await apiJSON('/api/restores/preflight', { method:'POST', body: JSON.stringify({backup_json:json}) });
+  if (!ok) {
+    if (st) { st.textContent = data.detail || 'Preflight failed'; st.style.color = 'var(--red)'; }
+    return;
+  }
+  restorePreflightId = data.preflight_id;
+  const checks = data.report?.checks || [];
+  const failing = checks.filter((c) => !c.ok).map((c) => c.name);
+  if (st) {
+    st.textContent = failing.length ? `Preflight failed: ${failing.join(', ')}` : 'Preflight passed. You can confirm restore.';
+    st.style.color = failing.length ? 'var(--red)' : 'var(--green)';
+  }
+  if (progress) progress.textContent = `Preflight ID: ${restorePreflightId}`;
+}
+
 async function restoreBackup() {
   const json = document.getElementById('backup-restore-json')?.value.trim();
-  const dryRun = document.getElementById('backup-dry-run')?.checked ?? true;
   const st = document.getElementById('restore-status');
-  if (!json) { if(st){st.textContent='Paste backup JSON first.';st.style.color='var(--red)';} return; }
-  const { ok, data } = await apiJSON('/api/admin/backup/restore', { method:'POST', body: JSON.stringify({backup_json:json,dry_run:dryRun}) });
-  if (st) { st.textContent = ok ? (dryRun?'Dry run OK — '+JSON.stringify(data):'Restored!') : (data.detail||'Failed'); st.style.color = ok?'var(--green)':'var(--red)'; }
+  const progress = document.getElementById('restore-progress');
+  if (!json || !restorePreflightId) {
+    if (st) { st.textContent = 'Run preflight first.'; st.style.color = 'var(--red)'; }
+    return;
+  }
+  if (!confirm('This will run a destructive restore. Continue?')) return;
+  const { ok, data } = await apiJSON('/api/restores/start', { method:'POST', body: JSON.stringify({backup_json:json, preflight_id:restorePreflightId, confirm_restore:true}) });
+  if (!ok) {
+    if (st) { st.textContent = data.detail || 'Failed to queue restore'; st.style.color = 'var(--red)'; }
+    return;
+  }
+  const jobId = data.job_id;
+  if (st) { st.textContent = `Restore queued (job ${jobId})`; st.style.color = 'var(--green)'; }
+  if (progress) progress.textContent = 'Waiting for restore worker…';
+  if (restorePollTimer) clearInterval(restorePollTimer);
+  restorePollTimer = setInterval(async () => {
+    const res = await apiJSON(`/api/restores/jobs/${jobId}`);
+    if (!res.ok) return;
+    const job = res.data || {};
+    if (progress) progress.textContent = `Step: ${job.current_step || '-'} (${job.progress_percent || 0}%)`;
+    if (['success', 'failed'].includes(job.status)) {
+      clearInterval(restorePollTimer);
+      restorePollTimer = null;
+      if (st) {
+        st.textContent = job.status === 'success' ? 'Restore completed successfully.' : (job.error_message || 'Restore failed');
+        st.style.color = job.status === 'success' ? 'var(--green)' : 'var(--red)';
+      }
+    }
+  }, 1500);
 }
 
 async function loadBackupHistory() {

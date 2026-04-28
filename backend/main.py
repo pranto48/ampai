@@ -5,6 +5,7 @@ import logging
 import hashlib
 import json
 import os
+import base64
 import json
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta, timezone
@@ -106,6 +107,10 @@ from database import (
     update_backup_job,
     list_backup_jobs,
     get_backup_job,
+    create_restore_job,
+    update_restore_job,
+    list_restore_jobs,
+    get_restore_job,
     upsert_user_notification_preferences,
     upsert_user_memory_policy,
     upsert_user_chat_preferences,
@@ -147,6 +152,7 @@ USER_TOKEN = os.getenv("AMPAI_USER_TOKEN", "ampai-user")
 ADMIN_TOKEN = os.getenv("AMPAI_ADMIN_TOKEN", "ampai-admin")
 INSIGHT_QUEUE: "Queue[str]" = Queue(maxsize=1000)
 BACKUP_JOB_QUEUE: "Queue[Dict[str, Any]]" = Queue(maxsize=200)
+RESTORE_JOB_QUEUE: "Queue[Dict[str, Any]]" = Queue(maxsize=50)
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
@@ -158,6 +164,9 @@ SECRET_CONFIG_KEYS = {
     "resend_api_key", "backup_ftp_password", "backup_smb_password",
     "bing_api_key", "generic_api_key",
 }
+RESTORE_PREFLIGHT_CACHE: Dict[str, Dict[str, Any]] = {}
+RESTORE_PREFLIGHT_TTL_SECONDS = 15 * 60
+RESTORE_SCHEMA_VERSION = "1.1"
 
 
 class Attachment(BaseModel):
@@ -388,6 +397,16 @@ class EmailSummaryTodayRequest(BaseModel):
 class BackupRestoreRequest(BaseModel):
     backup_json: str
     dry_run: bool = True
+
+
+class RestorePreflightRequest(BaseModel):
+    backup_json: str
+
+
+class RestoreStartRequest(BaseModel):
+    backup_json: str
+    preflight_id: str
+    confirm_restore: bool = False
 
 
 class BackupConnectionTestRequest(BaseModel):
@@ -768,6 +787,271 @@ def _backup_job_worker() -> None:
             BACKUP_JOB_QUEUE.task_done()
 
 
+def _normalize_restore_archive(raw_payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(raw_payload, dict):
+        return {"manifest": {}, "payload": {}}
+    manifest = raw_payload.get("manifest") or raw_payload.get("_manifest") or {}
+    payload = raw_payload.get("payload")
+    if not isinstance(payload, dict):
+        payload = raw_payload
+    if not isinstance(manifest, dict):
+        manifest = {}
+    return {"manifest": manifest, "payload": payload}
+
+
+def _build_restore_preflight_report(raw_json: str) -> Dict[str, Any]:
+    try:
+        archive_root = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid backup JSON: {exc}") from exc
+
+    normalized = _normalize_restore_archive(archive_root)
+    manifest = normalized["manifest"]
+    payload = normalized["payload"]
+    payload_text = json.dumps(payload, sort_keys=True)
+    payload_checksum = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+    expected_checksum = (manifest.get("checksum_sha256") or payload.get("checksum_sha256") or "").strip()
+    sessions = payload.get("sessions")
+    uploads = payload.get("uploads")
+    configs = payload.get("configs")
+
+    checks: List[Dict[str, Any]] = []
+    checks.append(
+        {
+            "name": "archive_checksum",
+            "ok": bool(expected_checksum) and expected_checksum == payload_checksum,
+            "expected": expected_checksum,
+            "actual": payload_checksum,
+            "detail": "checksum matches manifest",
+        }
+    )
+    checks.append(
+        {
+            "name": "manifest_schema_version",
+            "ok": (manifest.get("schema_version") or payload.get("schema_version")) == RESTORE_SCHEMA_VERSION,
+            "value": manifest.get("schema_version") or payload.get("schema_version"),
+            "expected": RESTORE_SCHEMA_VERSION,
+        }
+    )
+    checks.append(
+        {
+            "name": "manifest_app_version",
+            "ok": bool(manifest.get("app_version") or payload.get("app_version")),
+            "value": manifest.get("app_version") or payload.get("app_version"),
+        }
+    )
+    checks.append(
+        {
+            "name": "manifest_timestamp",
+            "ok": bool(manifest.get("timestamp") or payload.get("created_at")),
+            "value": manifest.get("timestamp") or payload.get("created_at"),
+        }
+    )
+    checks.append(
+        {
+            "name": "sessions_array",
+            "ok": isinstance(sessions, list),
+            "detail": "sessions must be an array",
+        }
+    )
+    db_ok = _check_db_health().get("ok", False)
+    checks.append({"name": "db_connectivity", "ok": bool(db_ok), "detail": "database ping"})
+
+    archive_bytes = len(raw_json.encode("utf-8"))
+    free_bytes = shutil.disk_usage(UPLOAD_DIR).free
+    required_bytes = archive_bytes * 2
+    checks.append(
+        {
+            "name": "destination_free_space",
+            "ok": free_bytes >= required_bytes,
+            "required_bytes": required_bytes,
+            "free_bytes": free_bytes,
+            "detail": "requires at least 2x archive size",
+        }
+    )
+
+    ok = all(bool(c.get("ok")) for c in checks)
+    return {
+        "ok": ok,
+        "checks": checks,
+        "manifest": {
+            "schema_version": manifest.get("schema_version") or payload.get("schema_version"),
+            "app_version": manifest.get("app_version") or payload.get("app_version"),
+            "timestamp": manifest.get("timestamp") or payload.get("created_at"),
+            "checksum_sha256": expected_checksum,
+        },
+        "summary": {
+            "session_count": len(sessions) if isinstance(sessions, list) else 0,
+            "upload_count": len(uploads) if isinstance(uploads, list) else 0,
+            "config_count": len(configs) if isinstance(configs, dict) else 0,
+            "archive_size_bytes": archive_bytes,
+            "restore_order": ["database", "uploads", "configs"],
+        },
+        "payload_checksum_sha256": payload_checksum,
+    }
+
+
+def _store_restore_preflight(report: Dict[str, Any], payload_checksum: str) -> str:
+    preflight_id = uuid.uuid4().hex
+    RESTORE_PREFLIGHT_CACHE[preflight_id] = {
+        "report": report,
+        "payload_checksum": payload_checksum,
+        "expires_at": time.time() + RESTORE_PREFLIGHT_TTL_SECONDS,
+    }
+    return preflight_id
+
+
+def _create_pre_restore_snapshot(actor: str) -> Dict[str, Any]:
+    snapshot_root = os.path.join(os.path.dirname(__file__), "..", "data", "restore_snapshots")
+    os.makedirs(snapshot_root, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    snapshot_path = os.path.join(snapshot_root, f"snapshot_{ts}_{uuid.uuid4().hex[:8]}.json")
+    data = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": actor,
+        "sessions": export_all_sessions_for_backup(),
+        "configs": get_all_configs(),
+    }
+    with open(snapshot_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    return {"snapshot_path": snapshot_path, "bytes_written": os.path.getsize(snapshot_path)}
+
+
+def _append_restore_log(logs: List[Dict[str, Any]], level: str, step: str, message: str) -> None:
+    logs.append(
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "step": step,
+            "message": message,
+        }
+    )
+
+
+def _restore_job_worker() -> None:
+    while True:
+        try:
+            payload = RESTORE_JOB_QUEUE.get(timeout=2)
+        except Empty:
+            continue
+        job_id = int(payload.get("job_id"))
+        actor = payload.get("actor", "system")
+        backup_json = payload.get("backup_json", "")
+        logs: List[Dict[str, Any]] = []
+        snapshot_path = ""
+        try:
+            update_restore_job(job_id, status="running", current_step="maintenance_on", progress_percent=5, started_at=datetime.now(timezone.utc), error_message=None)
+            set_config("maintenance_mode_enabled", "true")
+            _append_restore_log(logs, "info", "maintenance_on", "Maintenance mode enabled")
+            update_restore_job(job_id, log_lines=logs)
+
+            update_restore_job(job_id, current_step="snapshot", progress_percent=20)
+            snapshot = _create_pre_restore_snapshot(actor)
+            snapshot_path = snapshot["snapshot_path"]
+            _append_restore_log(logs, "info", "snapshot", f"Snapshot captured at {snapshot_path}")
+            update_restore_job(job_id, log_lines=logs, snapshot_path=snapshot_path)
+
+            update_restore_job(job_id, current_step="restore_database", progress_percent=40)
+            archive = json.loads(backup_json)
+            normalized = _normalize_restore_archive(archive)
+            restore_payload = normalized["payload"]
+            sessions = restore_payload.get("sessions") if isinstance(restore_payload.get("sessions"), list) else []
+            summary = {"session_count": 0, "message_count": 0, "invalid_sessions": 0}
+            for session in sessions:
+                session_id = (session or {}).get("session_id")
+                messages = (session or {}).get("messages")
+                if not session_id or not isinstance(messages, list):
+                    summary["invalid_sessions"] += 1
+                    continue
+                summary["session_count"] += 1
+                summary["message_count"] += len(messages)
+                history = get_sql_chat_history(session_id)
+                for raw in messages:
+                    if not isinstance(raw, str):
+                        continue
+                    try:
+                        msg = json.loads(raw)
+                        kind = msg.get("type")
+                        content = ((msg.get("data") or {}).get("content")) if isinstance(msg, dict) else None
+                        if kind == "human" and isinstance(content, str):
+                            history.add_user_message(content)
+                        elif kind == "ai" and isinstance(content, str):
+                            history.add_ai_message(content)
+                    except Exception:
+                        continue
+                set_session_category(session_id, "Restored Backup")
+            _append_restore_log(logs, "info", "restore_database", f"Restored {summary['session_count']} sessions")
+            update_restore_job(job_id, log_lines=logs)
+
+            update_restore_job(job_id, current_step="restore_uploads", progress_percent=65)
+            uploads = restore_payload.get("uploads")
+            if isinstance(uploads, list):
+                restored_uploads = 0
+                for item in uploads:
+                    if not isinstance(item, dict):
+                        continue
+                    file_name = (item.get("filename") or "").strip()
+                    content_b64 = item.get("content_base64")
+                    if not file_name or not isinstance(content_b64, str):
+                        continue
+                    try:
+                        file_bytes = base64.b64decode(content_b64.encode("utf-8"))
+                        safe_name = f"{uuid.uuid4().hex}_{os.path.basename(file_name)}"
+                        output_path = os.path.join(UPLOAD_DIR, safe_name)
+                        with open(output_path, "wb") as f:
+                            f.write(file_bytes)
+                        restored_uploads += 1
+                    except Exception:
+                        continue
+                _append_restore_log(logs, "info", "restore_uploads", f"Restored {restored_uploads} uploaded files")
+            else:
+                _append_restore_log(logs, "info", "restore_uploads", "No uploads found in archive")
+            update_restore_job(job_id, log_lines=logs)
+
+            update_restore_job(job_id, current_step="restore_configs", progress_percent=80)
+            configs = restore_payload.get("configs")
+            if isinstance(configs, dict):
+                updated = 0
+                for key, value in sorted(configs.items(), key=lambda kv: kv[0]):
+                    if not isinstance(key, str) or key in {"maintenance_mode_enabled"}:
+                        continue
+                    if value is None:
+                        continue
+                    set_config(key, str(value))
+                    updated += 1
+                _append_restore_log(logs, "info", "restore_configs", f"Restored {updated} config keys")
+            else:
+                _append_restore_log(logs, "info", "restore_configs", "No configs found in archive")
+
+            update_restore_job(
+                job_id,
+                status="success",
+                current_step="completed",
+                progress_percent=100,
+                finished_at=datetime.now(timezone.utc),
+                result_summary=summary,
+                log_lines=logs,
+                error_message=None,
+            )
+            log_audit_event(username=actor, action="admin.restore.run.finish", details=f"job_id={job_id} snapshot={snapshot_path}")
+        except Exception as exc:
+            _append_restore_log(logs, "error", "failed", str(exc))
+            update_restore_job(
+                job_id,
+                status="failed",
+                current_step="failed",
+                progress_percent=100,
+                finished_at=datetime.now(timezone.utc),
+                log_lines=logs,
+                snapshot_path=snapshot_path,
+                error_message=f"{exc}; snapshot preserved at {snapshot_path}" if snapshot_path else str(exc),
+            )
+            log_audit_event(username=actor, action="admin.restore.run.failure", details=f"job_id={job_id} error={exc}")
+        finally:
+            set_config("maintenance_mode_enabled", "false")
+            RESTORE_JOB_QUEUE.task_done()
+
+
 def _ensure_valid_email_access_token(provider: str) -> str:
     credentials = _load_integration_credentials(provider)
     if not credentials:
@@ -993,6 +1277,8 @@ def startup_event():
     worker.start()
     backup_worker = threading.Thread(target=_backup_job_worker, daemon=True, name="ampai-backup-worker")
     backup_worker.start()
+    restore_worker = threading.Thread(target=_restore_job_worker, daemon=True, name="ampai-restore-worker")
+    restore_worker.start()
 
 
 def _enforce_session_access_or_403(session_id: str, current_user: UserContext) -> None:
@@ -2567,52 +2853,67 @@ def test_backup_connection(request: BackupConnectionTestRequest, _: UserContext 
 
 @app.post("/api/admin/backup/restore")
 def restore_backup(request: BackupRestoreRequest, user: UserContext = Depends(require_admin_user)):
+    report = _build_restore_preflight_report(request.backup_json)
+    if request.dry_run:
+        preflight_id = _store_restore_preflight(report, report.get("payload_checksum_sha256", ""))
+        return {"status": "success", "phase": "preflight", "preflight_id": preflight_id, "report": report}
+    if not report.get("ok"):
+        raise HTTPException(status_code=400, detail="Preflight checks failed; run dry-run and fix issues before restore")
+    preflight_id = _store_restore_preflight(report, report.get("payload_checksum_sha256", ""))
+    job_id = create_restore_job(created_by=user.username, preflight_report=report, status="queued")
+    if not job_id:
+        raise HTTPException(status_code=500, detail="Failed to queue restore job")
+    RESTORE_JOB_QUEUE.put_nowait({"job_id": job_id, "actor": user.username, "backup_json": request.backup_json, "preflight_id": preflight_id})
+    return {"status": "queued", "job_id": job_id, "preflight_id": preflight_id}
+
+
+@app.post("/api/restores/preflight")
+def restore_preflight(request: RestorePreflightRequest, _: UserContext = Depends(require_admin_user)):
+    report = _build_restore_preflight_report(request.backup_json)
+    preflight_id = _store_restore_preflight(report, report.get("payload_checksum_sha256", ""))
+    return {"status": "success", "preflight_id": preflight_id, "report": report}
+
+
+@app.post("/api/restores/start")
+def restore_start(request: RestoreStartRequest, user: UserContext = Depends(require_admin_user)):
+    preflight = RESTORE_PREFLIGHT_CACHE.get(request.preflight_id)
+    if not preflight:
+        raise HTTPException(status_code=400, detail="Preflight ID not found or expired")
+    if preflight.get("expires_at", 0) < time.time():
+        RESTORE_PREFLIGHT_CACHE.pop(request.preflight_id, None)
+        raise HTTPException(status_code=400, detail="Preflight ID expired; run preflight again")
+    if not request.confirm_restore:
+        raise HTTPException(status_code=400, detail="confirm_restore must be true")
+    report = preflight.get("report") or {}
+    if not report.get("ok"):
+        raise HTTPException(status_code=400, detail="Preflight checks failed; restore blocked")
+    checksum = hashlib.sha256(json.dumps(_normalize_restore_archive(json.loads(request.backup_json))["payload"], sort_keys=True).encode("utf-8")).hexdigest()
+    if checksum != preflight.get("payload_checksum"):
+        raise HTTPException(status_code=400, detail="Backup payload changed since preflight; re-run preflight")
+
+    job_id = create_restore_job(created_by=user.username, preflight_report=report, status="queued")
+    if not job_id:
+        raise HTTPException(status_code=500, detail="Failed to queue restore job")
     try:
-        payload = json.loads(request.backup_json)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid backup JSON: {exc}") from exc
-    sessions = payload.get("sessions")
-    if not isinstance(sessions, list):
-        raise HTTPException(status_code=400, detail="Backup payload must contain a sessions array")
+        RESTORE_JOB_QUEUE.put_nowait({"job_id": job_id, "actor": user.username, "backup_json": request.backup_json, "preflight_id": request.preflight_id})
+    except Exception as exc:
+        update_restore_job(job_id, status="failed", finished_at=datetime.now(timezone.utc), error_message=f"Queue full: {exc}")
+        raise HTTPException(status_code=503, detail="Restore queue is full; retry shortly") from exc
+    log_audit_event(username=user.username, action="admin.restore.run.start", details=f"job_id={job_id} preflight={request.preflight_id}")
+    return {"status": "queued", "job_id": job_id}
 
-    summary = {"session_count": 0, "message_count": 0, "invalid_sessions": 0}
-    for session in sessions:
-        session_id = (session or {}).get("session_id")
-        messages = (session or {}).get("messages")
-        if not session_id or not isinstance(messages, list):
-            summary["invalid_sessions"] += 1
-            continue
-        summary["session_count"] += 1
-        summary["message_count"] += len(messages)
-        if request.dry_run:
-            continue
-        history = get_sql_chat_history(session_id)
-        for raw in messages:
-            if not isinstance(raw, str):
-                continue
-            try:
-                msg = json.loads(raw)
-                kind = msg.get("type")
-                content = ((msg.get("data") or {}).get("content")) if isinstance(msg, dict) else None
-                if kind == "human" and isinstance(content, str):
-                    history.add_user_message(content)
-                elif kind == "ai" and isinstance(content, str):
-                    history.add_ai_message(content)
-            except Exception:
-                continue
-        set_session_category(session_id, "Restored Backup")
 
-    _record_backup_status(
-        {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "trigger": "restore-dry-run" if request.dry_run else "restore",
-            "status": "success",
-            "mode": "restore",
-            "target": f"uploaded by {user.username}",
-            **summary,
-        }
-    )
-    return {"status": "success", "dry_run": request.dry_run, "summary": summary}
+@app.get("/api/restores/jobs")
+def get_restore_jobs(limit: int = Query(default=20), offset: int = Query(default=0), _: UserContext = Depends(require_admin_user)):
+    return {"jobs": list_restore_jobs(limit=limit, offset=offset)}
+
+
+@app.get("/api/restores/jobs/{job_id}")
+def get_restore_job_details(job_id: int, _: UserContext = Depends(require_admin_user)):
+    job = get_restore_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Restore job not found")
+    return job
 
 @app.post("/api/admin/configs/migrate")
 def migrate_admin_configs():

@@ -85,6 +85,24 @@ backup_jobs = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
 
+restore_jobs = Table(
+    "restore_jobs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("status", String, nullable=False, default="queued"),
+    Column("current_step", String, nullable=True),
+    Column("progress_percent", Integer, nullable=False, default=0),
+    Column("preflight_report", String, nullable=True),
+    Column("snapshot_path", String, nullable=True),
+    Column("result_summary", String, nullable=True),
+    Column("log_lines", String, nullable=True),
+    Column("error_message", String, nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("created_by", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
 core_memories = Table(
     'core_memories', metadata,
     Column('id', Integer, primary_key=True, autoincrement=True),
@@ -699,6 +717,40 @@ def migrate_backup_jobs_schema() -> None:
 migrate_backup_jobs_schema()
 
 
+def migrate_restore_jobs_schema() -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS restore_jobs (
+                        id SERIAL PRIMARY KEY,
+                        status VARCHAR NOT NULL DEFAULT 'queued',
+                        current_step VARCHAR,
+                        progress_percent INTEGER NOT NULL DEFAULT 0,
+                        preflight_report TEXT,
+                        snapshot_path VARCHAR,
+                        result_summary TEXT,
+                        log_lines TEXT,
+                        error_message VARCHAR,
+                        started_at TIMESTAMPTZ,
+                        finished_at TIMESTAMPTZ,
+                        created_by VARCHAR,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Error migrating restore jobs schema: {e}")
+
+
+migrate_restore_jobs_schema()
+
+
 def list_backup_profiles() -> List[Dict[str, Any]]:
     if not engine:
         return []
@@ -939,6 +991,164 @@ def get_backup_job(job_id: int) -> Optional[Dict[str, Any]]:
             }
     except Exception as e:
         logger.warning(f"Error getting backup job {job_id}: {e}")
+        return None
+
+
+def create_restore_job(created_by: str, preflight_report: Dict[str, Any], status: str = "queued") -> Optional[int]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            job_id = conn.execute(
+                text(
+                    """
+                    INSERT INTO restore_jobs (status, current_step, progress_percent, preflight_report, log_lines, created_by, created_at)
+                    VALUES (:status, :current_step, :progress_percent, :preflight_report, :log_lines, :created_by, NOW())
+                    RETURNING id
+                    """
+                ),
+                {
+                    "status": status,
+                    "current_step": "queued",
+                    "progress_percent": 0,
+                    "preflight_report": json.dumps(preflight_report or {}),
+                    "log_lines": json.dumps([]),
+                    "created_by": created_by,
+                },
+            ).scalar()
+            conn.commit()
+            return int(job_id) if job_id is not None else None
+    except Exception as e:
+        logger.warning(f"Error creating restore job: {e}")
+        return None
+
+
+def update_restore_job(job_id: int, **updates: Any) -> bool:
+    if not engine:
+        return False
+    allowed = {
+        "status",
+        "current_step",
+        "progress_percent",
+        "preflight_report",
+        "snapshot_path",
+        "result_summary",
+        "log_lines",
+        "error_message",
+        "started_at",
+        "finished_at",
+    }
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields:
+        return False
+    normalized = {}
+    for key, value in fields.items():
+        if key in {"preflight_report", "result_summary", "log_lines"} and value is not None and not isinstance(value, str):
+            normalized[key] = json.dumps(value)
+        else:
+            normalized[key] = value
+    set_sql = ", ".join([f"{k} = :{k}" for k in normalized.keys()])
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(f"UPDATE restore_jobs SET {set_sql} WHERE id = :id"),
+                {"id": job_id, **normalized},
+            )
+            conn.commit()
+            return (result.rowcount or 0) > 0
+    except Exception as e:
+        logger.warning(f"Error updating restore job {job_id}: {e}")
+        return False
+
+
+def _parse_json_text(raw: Any, fallback: Any):
+    if raw is None:
+        return fallback
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return fallback
+
+
+def list_restore_jobs(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    safe_limit = max(1, min(limit, 200))
+    safe_offset = max(0, offset)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT id, status, current_step, progress_percent, preflight_report, snapshot_path,
+                           result_summary, log_lines, error_message, started_at, finished_at, created_by, created_at
+                    FROM restore_jobs
+                    ORDER BY id DESC
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                {"limit": safe_limit, "offset": safe_offset},
+            ).fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "status": row[1],
+                    "current_step": row[2] or "",
+                    "progress_percent": int(row[3] or 0),
+                    "preflight_report": _parse_json_text(row[4], {}),
+                    "snapshot_path": row[5] or "",
+                    "result_summary": _parse_json_text(row[6], {}),
+                    "log_lines": _parse_json_text(row[7], []),
+                    "error_message": row[8] or "",
+                    "started_at": row[9].isoformat() if getattr(row[9], "isoformat", None) else None,
+                    "finished_at": row[10].isoformat() if getattr(row[10], "isoformat", None) else None,
+                    "created_by": row[11] or "",
+                    "created_at": row[12].isoformat() if getattr(row[12], "isoformat", None) else str(row[12] or ""),
+                }
+                for row in rows
+            ]
+    except Exception as e:
+        logger.warning(f"Error listing restore jobs: {e}")
+        return []
+
+
+def get_restore_job(job_id: int) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, status, current_step, progress_percent, preflight_report, snapshot_path,
+                           result_summary, log_lines, error_message, started_at, finished_at, created_by, created_at
+                    FROM restore_jobs
+                    WHERE id = :id
+                    """
+                ),
+                {"id": job_id},
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "status": row[1],
+                "current_step": row[2] or "",
+                "progress_percent": int(row[3] or 0),
+                "preflight_report": _parse_json_text(row[4], {}),
+                "snapshot_path": row[5] or "",
+                "result_summary": _parse_json_text(row[6], {}),
+                "log_lines": _parse_json_text(row[7], []),
+                "error_message": row[8] or "",
+                "started_at": row[9].isoformat() if getattr(row[9], "isoformat", None) else None,
+                "finished_at": row[10].isoformat() if getattr(row[10], "isoformat", None) else None,
+                "created_by": row[11] or "",
+                "created_at": row[12].isoformat() if getattr(row[12], "isoformat", None) else str(row[12] or ""),
+            }
+    except Exception as e:
+        logger.warning(f"Error getting restore job {job_id}: {e}")
         return None
 
 
