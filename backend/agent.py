@@ -334,6 +334,11 @@ def chat_with_agent(
         "retrieved_count": 0,
         "truncated_count": 0,
         "context_chars": 0,
+        "pipeline": "vector_only",
+        "latency_ms": 0,
+        "prefilter_count": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
     }
 
     if memory_mode == "indexed":
@@ -348,6 +353,8 @@ def chat_with_agent(
             k=k,
             recency_bias=effective_recency_bias,
             category_filter=(category_filter or None),
+            username=username,
+            status="approved",
         )
 
         query_terms = {w for w in re.findall(r"\w+", (message or "").lower()) if len(w) > 2}
@@ -396,6 +403,7 @@ def chat_with_agent(
             "truncated_count": truncated_count,
             "context_chars": len(context_str),
         })
+        retrieval_meta.update(indexer.last_retrieval_stats or {})
         system_msg = (
             agent_directives +
             "FAST INDEXED MEMORY MODE: Instead of full history, here are the most relevant distilled facts retrieved for this query:\n"
