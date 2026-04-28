@@ -1822,6 +1822,40 @@ def upsert_user_memory_policy(
     return set_config(f"user:{username}:memory_policy", json.dumps(payload))
 
 
+def get_effective_chat_preferences(username: str) -> Dict[str, object]:
+    default_mode = (get_config("chat_output_mode", "normal") or "normal").strip().lower()
+    if default_mode not in {"compact", "normal"}:
+        default_mode = "normal"
+    defaults = {
+        "chat_output_mode": default_mode,
+        "low_token_mode": default_mode == "compact",
+    }
+    raw = get_config(f"user:{username}:chat_preferences", "")
+    if not raw:
+        return defaults
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return defaults
+        merged = {**defaults, **parsed}
+        low_token_mode = bool(merged.get("low_token_mode"))
+        mode = "compact" if low_token_mode else "normal"
+        merged["chat_output_mode"] = mode
+        merged["low_token_mode"] = low_token_mode
+        return merged
+    except Exception as exc:
+        logger.warning(f"Error loading chat preferences for user {username}: {exc}")
+        return defaults
+
+
+def upsert_user_chat_preferences(username: str, low_token_mode: bool) -> bool:
+    payload = {
+        "low_token_mode": bool(low_token_mode),
+        "chat_output_mode": "compact" if bool(low_token_mode) else "normal",
+    }
+    return set_config(f"user:{username}:chat_preferences", json.dumps(payload))
+
+
 def get_effective_notification_preferences(username: str) -> Dict[str, object]:
     defaults = {
         "browser_notify_on_away_replies": _as_bool(get_config("notification_default_browser_notify_on_away_replies", "true"), True),

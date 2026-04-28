@@ -96,8 +96,10 @@ from database import (
     get_memory_analytics,
     get_effective_notification_preferences,
     get_effective_memory_policy,
+    get_effective_chat_preferences,
     upsert_user_notification_preferences,
     upsert_user_memory_policy,
+    upsert_user_chat_preferences,
     enqueue_pending_reply_notification,
     create_persona,
     update_persona,
@@ -175,6 +177,7 @@ class ChatRequest(BaseModel):
     memory_top_k: Optional[int] = None
     recency_bias: Optional[float] = None
     category_filter: Optional[str] = None
+    chat_output_mode: Optional[str] = None
 
 
 class MemoryInboxUpdateRequest(BaseModel):
@@ -188,6 +191,10 @@ class MemoryPolicyRequest(BaseModel):
     pii_strict_mode: bool = True
     retention_days: int = 365
     allowed_categories: List[str] = []
+
+
+class ChatPreferencesUpdateRequest(BaseModel):
+    low_token_mode: bool = False
 
 
 class PersonaCreateRequest(BaseModel):
@@ -940,6 +947,12 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         message_for_agent = request.message
         if persona_prompt:
             message_for_agent = f"[Persona Instructions]\n{persona_prompt}\n\n[User Message]\n{request.message}"
+        effective_chat_prefs = get_effective_chat_preferences(user.username)
+        requested_mode = (request.chat_output_mode or "").strip().lower()
+        if requested_mode not in {"compact", "normal"}:
+            requested_mode = str(effective_chat_prefs.get("chat_output_mode") or "normal").strip().lower()
+        if requested_mode not in {"compact", "normal"}:
+            requested_mode = "normal"
         result = chat_with_agent(
             session_id=request.session_id,
             message=message_for_agent,
@@ -952,6 +965,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             category_filter=(request.memory_category_filter or "").strip(),
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
+            chat_output_mode=requested_mode,
         )
         response_text = str(result.get("response") or "")
         suggestions: List[Dict[str, Any]] = []
@@ -1182,6 +1196,25 @@ def update_my_notification_preferences(
 @app.get("/api/users/me/memory-policy")
 def get_my_memory_policy(current_user: UserContext = Depends(require_authenticated_user)):
     return _get_memory_policy(current_user.username)
+
+
+@app.get("/api/users/me/chat-preferences")
+def get_my_chat_preferences(current_user: UserContext = Depends(require_authenticated_user)):
+    return get_effective_chat_preferences(current_user.username)
+
+
+@app.put("/api/users/me/chat-preferences")
+def update_my_chat_preferences(
+    request: ChatPreferencesUpdateRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    ok = upsert_user_chat_preferences(
+        username=current_user.username,
+        low_token_mode=bool(request.low_token_mode),
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save chat preferences")
+    return {"status": "success", "preferences": get_effective_chat_preferences(current_user.username)}
 
 
 @app.put("/api/users/me/memory-policy")

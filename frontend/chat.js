@@ -6,6 +6,7 @@ let chatAttachments = [];
 let _chatHandlersBound = false;
 const PERSONA_PREF_KEY = 'ampai_persona_id';
 const WEB_SEARCH_PREF_KEY = 'ampai_web_search_enabled';
+let chatOutputMode = 'normal';
 
 function chatInit() {
   // Only load sessions each time; bind handlers only once
@@ -15,11 +16,18 @@ function chatInit() {
   _loadPersonaOptions();
   _loadSessionTaskSuggestions(State.sessionId);
   _restoreWebSearchPreference();
+  _loadChatPreferences();
   _loadMediaLibrary();
   if (!_chatHandlersBound) {
     _chatHandlersBound = true;
     _bindChatHandlers();
   }
+}
+
+async function _loadChatPreferences() {
+  const { ok, data } = await apiJSON('/api/users/me/chat-preferences');
+  if (!ok) return;
+  chatOutputMode = (data?.chat_output_mode || 'normal') === 'compact' ? 'compact' : 'normal';
 }
 
 async function loadMemoryPolicyBadge() {
@@ -329,6 +337,7 @@ async function _sendChat() {
       memory_recency_bias: Number(document.getElementById('memory-recency-bias')?.value || 0),
       memory_category_filter: document.getElementById('memory-category-filter')?.value || '',
       persona_id: document.getElementById('persona-select')?.value || null,
+      chat_output_mode: chatOutputMode,
       use_web_search: !!(document.getElementById('web-search-toggle')?.checked),
       attachments:  atts,
     }),

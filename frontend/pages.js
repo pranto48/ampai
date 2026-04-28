@@ -442,6 +442,15 @@ function buildSettingsPage() {
     </div>
 
     <div class="card" style="margin-bottom:16px">
+      <div class="card-title">💬 Chat Reply Style</div>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px">
+        <input type="checkbox" id="chat-low-token-mode" style="accent-color:var(--accent)"/>
+        <span style="font-size:.875rem">Low token mode (compact replies)</span>
+      </label>
+      <button id="save-chat-prefs-btn" class="btn btn-primary btn-sm">Save Chat Preferences</button>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
       <div class="card-title">🧠 Memory Policy</div>
       <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:10px">
         <input type="checkbox" id="mem-policy-auto" style="accent-color:var(--accent)"/>

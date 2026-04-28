@@ -122,7 +122,42 @@ def _parse_model_list(raw_value: str, defaults: List[str]) -> List[str]:
     return cleaned or defaults
 
 
-def get_llm(model_type: str, api_key: str = None, model_name: str = None):
+def _coerce_positive_int(raw: Any, default_value: int) -> int:
+    try:
+        value = int(raw)
+    except Exception:
+        value = int(default_value)
+    return max(1, value)
+
+
+def _resolve_generation_options(model_type: str, chat_output_mode: str = "normal") -> Dict[str, Any]:
+    base_limit = _coerce_positive_int(get_config("chat_max_output_tokens_default", "120"), 120)
+    mode = (chat_output_mode or get_config("chat_output_mode", "normal") or "normal").strip().lower()
+    if mode not in {"compact", "normal"}:
+        mode = "normal"
+    if mode == "compact":
+        base_limit = _coerce_positive_int(get_config("chat_max_output_tokens_compact", base_limit), base_limit)
+
+    override_key_map = {
+        "openai": "openai_max_output_tokens",
+        "generic": "generic_max_output_tokens",
+        "openrouter": "openrouter_max_output_tokens",
+        "anythingllm": "anythingllm_max_output_tokens",
+        "gemini": "gemini_max_output_tokens",
+        "anthropic": "anthropic_max_output_tokens",
+        "ollama": "ollama_num_predict",
+    }
+    provider_limit = _coerce_positive_int(get_config(override_key_map.get(model_type, ""), base_limit), base_limit)
+
+    if model_type == "ollama":
+        return {"num_predict": provider_limit}
+    if model_type == "gemini":
+        return {"max_output_tokens": provider_limit}
+    return {"max_tokens": provider_limit}
+
+
+def get_llm(model_type: str, api_key: str = None, model_name: str = None, generation_options: Dict[str, Any] = None):
+    generation_options = generation_options or {}
     if model_type == "ollama":
         base_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
         configured_models = _parse_model_list(
@@ -130,24 +165,24 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None):
             ["llama3.2", "gemma", "mistral", "qwen2.5"],
         )
         selected_model = (model_name or get_config("ollama_model") or configured_models[0]).strip()
-        return ChatOllama(model=selected_model, base_url=base_url)
+        return ChatOllama(model=selected_model, base_url=base_url, **generation_options)
     elif model_type == "openai":
         key = api_key or get_config("openai_api_key") or os.getenv("OPENAI_API_KEY")
         if not key:
             raise ValueError("OpenAI API key is required")
-        return ChatOpenAI(model="gpt-3.5-turbo", api_key=key)
+        return ChatOpenAI(model="gpt-3.5-turbo", api_key=key, **generation_options)
     elif model_type == "gemini":
         key = api_key or get_config("gemini_api_key") or os.getenv("GOOGLE_API_KEY")
         if not key:
             raise ValueError("Google API key is required")
-        return ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=key)
+        return ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=key, **generation_options)
     elif model_type == "anthropic":
         try:
             from langchain_anthropic import ChatAnthropic
             key = api_key or get_config("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY")
             if not key:
                 raise ValueError("Anthropic API key is required")
-            return ChatAnthropic(model="claude-3-opus-20240229", api_key=key)
+            return ChatAnthropic(model="claude-3-opus-20240229", api_key=key, **generation_options)
         except ImportError:
             raise ValueError("langchain-anthropic is not installed")
     elif model_type == "generic":
@@ -160,7 +195,7 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None):
             ["local-model", "llama-3.1-8b-instruct", "qwen2.5-7b-instruct"],
         )
         selected_model = (model_name or get_config("generic_model") or configured_models[0]).strip()
-        return ChatOpenAI(model=selected_model, api_key=key, base_url=base_url)
+        return ChatOpenAI(model=selected_model, api_key=key, base_url=base_url, **generation_options)
     elif model_type == "openrouter":
         key = api_key or get_config("openrouter_api_key")
         if not key:
@@ -174,14 +209,14 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None):
             ],
         )
         selected_model = (model_name or get_config("openrouter_model") or configured_models[0]).strip()
-        return ChatOpenAI(model=selected_model, api_key=key, base_url="https://openrouter.ai/api/v1")
+        return ChatOpenAI(model=selected_model, api_key=key, base_url="https://openrouter.ai/api/v1", **generation_options)
     elif model_type == "anythingllm":
         base_url = get_config("anythingllm_base_url")
         key = api_key or get_config("anythingllm_api_key") or "not-needed"
         workspace = model_name or get_config("anythingllm_workspace") or "my-workspace"
         if not base_url:
             raise ValueError("AnythingLLM Base URL is required")
-        return ChatOpenAI(model=workspace, api_key=key, base_url=base_url)
+        return ChatOpenAI(model=workspace, api_key=key, base_url=base_url, **generation_options)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 
@@ -198,10 +233,12 @@ def chat_with_agent(
     category_filter: str = "",
     use_web_search: bool = False,
     attachments: List[Dict] = None,
+    chat_output_mode: str = None,
 ):
     if attachments is None:
         attachments = []
-    llm = get_llm(model_type, api_key, model_name=model_name)
+    generation_options = _resolve_generation_options(model_type=model_type, chat_output_mode=chat_output_mode or "normal")
+    llm = get_llm(model_type, api_key, model_name=model_name, generation_options=generation_options)
 
     core_mems = get_core_memories()
     core_facts_str = "\n".join([f"- {m['fact']}" for m in core_mems]) if core_mems else "None yet."
@@ -266,6 +303,14 @@ def chat_with_agent(
         f"{web_context}"
         f"{file_context}"
     )
+    requested_mode = (chat_output_mode or get_config("chat_output_mode", "normal") or "normal").strip().lower()
+    if requested_mode not in {"compact", "normal"}:
+        requested_mode = "normal"
+    if requested_mode == "compact":
+        compact_token_cap = generation_options.get("max_tokens") or generation_options.get("max_output_tokens") or generation_options.get("num_predict") or 120
+        agent_directives += (
+            f"\nAnswer in <= {compact_token_cap} tokens, concise bullets, no extra explanation unless asked.\n"
+        )
     persona_prompt = (persona_prompt_override or "").strip()
     if not persona_prompt and persona_id:
         persona = get_persona_for_user(persona_id=persona_id, username=username, is_admin=is_admin)
