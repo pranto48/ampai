@@ -654,6 +654,20 @@ function buildAdminPage() {
       </table>
     </div>
   </div>
+  <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <div class="card-title">Backup Monitor</div>
+      <button id="backup-monitor-refresh-btn" class="btn btn-secondary btn-sm">Refresh</button>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="tbl">
+        <thead><tr><th>Job ID</th><th>Status</th><th>Profile</th><th>Started</th><th>Duration</th><th>Bytes</th><th>Artifact</th><th>Error</th></tr></thead>
+        <tbody id="backup-jobs-tbody">
+          <tr><td colspan="8" style="text-align:center;padding:20px;color:var(--muted)">No jobs yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <!-- Audit Log panel -->

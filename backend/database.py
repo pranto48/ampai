@@ -71,6 +71,20 @@ backup_profiles = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
 
+backup_jobs = Table(
+    "backup_jobs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("profile_id", Integer, nullable=True),
+    Column("status", String, nullable=False, default="queued"),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("bytes_written", Integer, nullable=False, default=0),
+    Column("artifact_path", String, nullable=True),
+    Column("error_message", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
 core_memories = Table(
     'core_memories', metadata,
     Column('id', Integer, primary_key=True, autoincrement=True),
@@ -655,6 +669,36 @@ def migrate_backup_profiles_schema() -> None:
 migrate_backup_profiles_schema()
 
 
+def migrate_backup_jobs_schema() -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS backup_jobs (
+                        id SERIAL PRIMARY KEY,
+                        profile_id INTEGER,
+                        status VARCHAR NOT NULL DEFAULT 'queued',
+                        started_at TIMESTAMPTZ,
+                        finished_at TIMESTAMPTZ,
+                        bytes_written BIGINT NOT NULL DEFAULT 0,
+                        artifact_path VARCHAR,
+                        error_message VARCHAR,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Error migrating backup jobs schema: {e}")
+
+
+migrate_backup_jobs_schema()
+
+
 def list_backup_profiles() -> List[Dict[str, Any]]:
     if not engine:
         return []
@@ -781,6 +825,121 @@ def delete_backup_profile(profile_id: int) -> bool:
 def get_backup_profile(profile_id: int) -> Optional[Dict[str, Any]]:
     rows = [p for p in list_backup_profiles() if p.get("id") == profile_id]
     return rows[0] if rows else None
+
+
+def create_backup_job(profile_id: Optional[int], status: str = "queued") -> Optional[int]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            job_id = conn.execute(
+                text(
+                    """
+                    INSERT INTO backup_jobs (profile_id, status, created_at)
+                    VALUES (:profile_id, :status, NOW())
+                    RETURNING id
+                    """
+                ),
+                {"profile_id": profile_id, "status": status},
+            ).scalar()
+            conn.commit()
+            return int(job_id) if job_id is not None else None
+    except Exception as e:
+        logger.warning(f"Error creating backup job: {e}")
+        return None
+
+
+def update_backup_job(job_id: int, **updates: Any) -> bool:
+    if not engine:
+        return False
+    allowed = {"status", "started_at", "finished_at", "bytes_written", "artifact_path", "error_message"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields:
+        return False
+    set_sql = ", ".join([f"{k} = :{k}" for k in fields.keys()])
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(f"UPDATE backup_jobs SET {set_sql} WHERE id = :id"),
+                {"id": job_id, **fields},
+            )
+            conn.commit()
+            return (result.rowcount or 0) > 0
+    except Exception as e:
+        logger.warning(f"Error updating backup job {job_id}: {e}")
+        return False
+
+
+def list_backup_jobs(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    safe_limit = max(1, min(limit, 200))
+    safe_offset = max(0, offset)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT id, profile_id, status, started_at, finished_at, bytes_written,
+                           artifact_path, error_message, created_at
+                    FROM backup_jobs
+                    ORDER BY id DESC
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                {"limit": safe_limit, "offset": safe_offset},
+            ).fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "profile_id": row[1],
+                    "status": row[2],
+                    "started_at": row[3].isoformat() if getattr(row[3], "isoformat", None) else None,
+                    "finished_at": row[4].isoformat() if getattr(row[4], "isoformat", None) else None,
+                    "bytes_written": int(row[5] or 0),
+                    "artifact_path": row[6] or "",
+                    "error_message": row[7] or "",
+                    "created_at": row[8].isoformat() if getattr(row[8], "isoformat", None) else str(row[8] or ""),
+                }
+                for row in rows
+            ]
+    except Exception as e:
+        logger.warning(f"Error listing backup jobs: {e}")
+        return []
+
+
+def get_backup_job(job_id: int) -> Optional[Dict[str, Any]]:
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT id, profile_id, status, started_at, finished_at, bytes_written,
+                           artifact_path, error_message, created_at
+                    FROM backup_jobs
+                    WHERE id = :id
+                    """
+                ),
+                {"id": job_id},
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "profile_id": row[1],
+                "status": row[2],
+                "started_at": row[3].isoformat() if getattr(row[3], "isoformat", None) else None,
+                "finished_at": row[4].isoformat() if getattr(row[4], "isoformat", None) else None,
+                "bytes_written": int(row[5] or 0),
+                "artifact_path": row[6] or "",
+                "error_message": row[7] or "",
+                "created_at": row[8].isoformat() if getattr(row[8], "isoformat", None) else str(row[8] or ""),
+            }
+    except Exception as e:
+        logger.warning(f"Error getting backup job {job_id}: {e}")
+        return None
 
 
 def get_all_configs():

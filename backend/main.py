@@ -102,6 +102,10 @@ from database import (
     update_backup_profile,
     delete_backup_profile,
     get_backup_profile,
+    create_backup_job,
+    update_backup_job,
+    list_backup_jobs,
+    get_backup_job,
     upsert_user_notification_preferences,
     upsert_user_memory_policy,
     upsert_user_chat_preferences,
@@ -142,6 +146,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 USER_TOKEN = os.getenv("AMPAI_USER_TOKEN", "ampai-user")
 ADMIN_TOKEN = os.getenv("AMPAI_ADMIN_TOKEN", "ampai-admin")
 INSIGHT_QUEUE: "Queue[str]" = Queue(maxsize=1000)
+BACKUP_JOB_QUEUE: "Queue[Dict[str, Any]]" = Queue(maxsize=200)
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
@@ -646,6 +651,7 @@ def _execute_backup(actor: str, trigger: str = "manual", profile: Optional[Dict[
     backup_mode = (backup_profile.get("destination_type") or "local").strip().lower()
     sessions = export_all_sessions_for_backup()
     serialized, manifest = build_backup_payload(sessions=sessions, actor=actor)
+    payload_bytes = len(serialized.encode("utf-8"))
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     filename = f"ampai_backup_{timestamp}.json"
 
@@ -688,7 +694,7 @@ def _execute_backup(actor: str, trigger: str = "manual", profile: Optional[Dict[
                 "message_count": manifest["message_count"],
             }
         )
-        return {"status": "success", **outcome, "manifest": manifest}
+        return {"status": "success", **outcome, "manifest": manifest, "bytes_written": payload_bytes}
     except Exception as exc:
         _record_backup_status(
             {
@@ -702,6 +708,64 @@ def _execute_backup(actor: str, trigger: str = "manual", profile: Optional[Dict[
             }
         )
         raise
+
+
+def _enqueue_backup_job(actor: str, trigger: str, profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    backup_profile = profile or _profile_from_legacy_configs()
+    job_id = create_backup_job(profile_id=backup_profile.get("id"), status="queued")
+    if not job_id:
+        raise HTTPException(status_code=500, detail="Failed to queue backup job")
+    try:
+        BACKUP_JOB_QUEUE.put_nowait(
+            {
+                "job_id": job_id,
+                "actor": actor,
+                "trigger": trigger,
+                "profile": backup_profile,
+            }
+        )
+    except Exception as exc:
+        update_backup_job(job_id, status="failed", finished_at=datetime.now(timezone.utc), error_message=f"Queue full: {exc}")
+        raise HTTPException(status_code=503, detail="Backup queue is full, try again shortly") from exc
+    return {"job_id": job_id, "status": "queued"}
+
+
+def _backup_job_worker() -> None:
+    while True:
+        try:
+            payload = BACKUP_JOB_QUEUE.get(timeout=2)
+        except Empty:
+            continue
+        job_id = int(payload.get("job_id"))
+        actor = payload.get("actor", "system")
+        trigger = payload.get("trigger", "manual")
+        profile = payload.get("profile")
+        started_at = datetime.now(timezone.utc)
+        update_backup_job(job_id, status="running", started_at=started_at, error_message=None)
+        log_audit_event(username=actor, action="admin.backup.run.start", details=f"job_id={job_id} trigger={trigger}")
+        try:
+            result = _execute_backup(actor=actor, trigger=trigger, profile=profile)
+            artifact_path = result.get("path") or result.get("file") or ""
+            bytes_written = int(result.get("bytes_written") or 0)
+            update_backup_job(
+                job_id,
+                status="success",
+                finished_at=datetime.now(timezone.utc),
+                bytes_written=bytes_written,
+                artifact_path=artifact_path,
+                error_message=None,
+            )
+            log_audit_event(username=actor, action="admin.backup.run.finish", details=f"job_id={job_id} artifact={artifact_path}")
+        except Exception as exc:
+            update_backup_job(
+                job_id,
+                status="failed",
+                finished_at=datetime.now(timezone.utc),
+                error_message=str(exc),
+            )
+            log_audit_event(username=actor, action="admin.backup.run.failure", details=f"job_id={job_id} error={exc}")
+        finally:
+            BACKUP_JOB_QUEUE.task_done()
 
 
 def _ensure_valid_email_access_token(provider: str) -> str:
@@ -927,6 +991,8 @@ def startup_event():
     start_scheduler()
     worker = threading.Thread(target=_insight_worker, daemon=True, name="ampai-insight-worker")
     worker.start()
+    backup_worker = threading.Thread(target=_backup_job_worker, daemon=True, name="ampai-backup-worker")
+    backup_worker.start()
 
 
 def _enforce_session_access_or_403(session_id: str, current_user: UserContext) -> None:
@@ -2418,10 +2484,30 @@ def run_backup_profile_now(profile_id: int, current_user: UserContext = Depends(
         raise HTTPException(status_code=404, detail="Backup profile not found")
     if not profile.get("enabled"):
         raise HTTPException(status_code=400, detail="Backup profile is disabled")
-    try:
-        return _execute_backup(actor=current_user.username, trigger="manual-profile", profile=profile)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Backup failed: {exc}") from exc
+    return _enqueue_backup_job(actor=current_user.username, trigger="manual-profile", profile=profile)
+
+
+@app.post("/api/backups/run/{profile_id}")
+def run_backup_profile_job(profile_id: int, current_user: UserContext = Depends(require_admin_user)):
+    profile = get_backup_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Backup profile not found")
+    if not profile.get("enabled"):
+        raise HTTPException(status_code=400, detail="Backup profile is disabled")
+    return _enqueue_backup_job(actor=current_user.username, trigger="manual-profile", profile=profile)
+
+
+@app.get("/api/backups/jobs")
+def get_backup_jobs(limit: int = Query(default=20), offset: int = Query(default=0), _: UserContext = Depends(require_admin_user)):
+    return {"jobs": list_backup_jobs(limit=limit, offset=offset)}
+
+
+@app.get("/api/backups/jobs/{job_id}")
+def get_backup_job_details(job_id: int, _: UserContext = Depends(require_admin_user)):
+    job = get_backup_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Backup job not found")
+    return {"job": job}
 
 
 @app.post("/api/admin/backup/run")
@@ -2429,10 +2515,7 @@ def run_backup(profile_id: Optional[int] = Query(default=None), current_user: Us
     profile = get_backup_profile(profile_id) if profile_id else None
     if profile_id and not profile:
         raise HTTPException(status_code=404, detail="Backup profile not found")
-    try:
-        return _execute_backup(actor=current_user.username, trigger="manual", profile=profile)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Backup failed: {exc}") from exc
+    return _enqueue_backup_job(actor=current_user.username, trigger="manual", profile=profile)
 
 
 @app.get("/api/admin/backup/status-history")

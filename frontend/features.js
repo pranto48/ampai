@@ -230,6 +230,7 @@ async function adminInit() {
   document.getElementById('restore-backup-btn')?.addEventListener('click', restoreBackup);
   document.getElementById('backup-profile-save-btn')?.addEventListener('click', saveBackupProfile);
   document.getElementById('backup-profile-reset-btn')?.addEventListener('click', resetBackupProfileForm);
+  document.getElementById('backup-monitor-refresh-btn')?.addEventListener('click', () => loadBackupJobs(true));
 }
 
 function adminTabHandlers() {
@@ -251,7 +252,7 @@ function adminTabHandlers() {
       if (name === 'users')    loadAdminUsers();
       if (name === 'sessions') loadAdminSessions();
       if (name === 'memories') loadCoreMemories();
-      if (name === 'backup') { loadBackupHistory(); loadBackupProfiles(); }
+      if (name === 'backup') { loadBackupHistory(); loadBackupProfiles(); loadBackupJobs(); }
       if (name === 'audit')    loadAuditLog();
     });
   });
@@ -389,11 +390,11 @@ async function deleteCoreMemory(id, btn) {
 async function runBackup() {
   const btn = document.getElementById('run-backup-btn');
   const st = document.getElementById('backup-status');
-  btn.disabled = true; if(st) { st.textContent = 'Running…'; st.style.color='var(--muted)'; }
+  btn.disabled = true; if(st) { st.textContent = 'Queued…'; st.style.color='var(--muted)'; }
   const { ok, data } = await apiJSON('/api/admin/backup', { method:'POST' });
   btn.disabled = false;
-  if (st) { st.textContent = ok ? '✓ Backup complete: ' + (data.file||data.path||'done') : '✕ '+( data.detail||'Failed'); st.style.color = ok?'var(--green)':'var(--red)'; }
-  if (ok) loadBackupHistory();
+  if (st) { st.textContent = ok ? `✓ Job queued: #${data.job_id}` : '✕ '+( data.detail||'Failed'); st.style.color = ok?'var(--green)':'var(--red)'; }
+  if (ok) { loadBackupHistory(); loadBackupJobs(); }
 }
 
 function resetBackupProfileForm() {
@@ -491,10 +492,50 @@ function editBackupProfile(profileId) {
 
 async function runBackupProfile(profileId) {
   const st = document.getElementById('backup-status');
-  if (st) { st.textContent = 'Running profile backup…'; st.style.color = 'var(--muted)'; }
+  if (st) { st.textContent = 'Queueing profile backup…'; st.style.color = 'var(--muted)'; }
   const { ok, data } = await apiJSON(`/api/backups/profiles/${profileId}/run`, { method: 'POST' });
-  if (st) { st.textContent = ok ? `✓ ${data.file || data.path || 'Backup complete'}` : `✕ ${data.detail || 'Failed'}`; st.style.color = ok ? 'var(--green)' : 'var(--red)'; }
-  if (ok) loadBackupHistory();
+  if (st) { st.textContent = ok ? `✓ Job queued: #${data.job_id}` : `✕ ${data.detail || 'Failed'}`; st.style.color = ok ? 'var(--green)' : 'var(--red)'; }
+  if (ok) { loadBackupHistory(); loadBackupJobs(); }
+}
+
+function backupStatusBadge(status) {
+  if (status === 'success') return '<span class="badge badge-green">success</span>';
+  if (status === 'failed') return '<span class="badge badge-red">failed</span>';
+  if (status === 'running') return '<span class="badge" style="background:#3b82f61f;color:#60a5fa;border:1px solid #3b82f633">running</span>';
+  return '<span class="badge" style="background:#f59e0b1f;color:#fbbf24;border:1px solid #f59e0b33">queued</span>';
+}
+
+function backupDurationSeconds(job) {
+  if (!job?.started_at) return '-';
+  const start = new Date(job.started_at).getTime();
+  const end = job.finished_at ? new Date(job.finished_at).getTime() : Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return '-';
+  return `${Math.round((end - start) / 1000)}s`;
+}
+
+async function loadBackupJobs(showToast = false) {
+  const tbody = document.getElementById('backup-jobs-tbody');
+  if (!tbody) return;
+  const { ok, data } = await apiJSON('/api/backups/jobs?limit=25&offset=0');
+  if (!ok) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--red)">Failed to load jobs</td></tr>';
+    if (showToast) toast(data.detail || 'Failed to refresh jobs', 'error');
+    return;
+  }
+  const jobs = data.jobs || [];
+  tbody.innerHTML = jobs.length ? jobs.map((j) => `
+    <tr>
+      <td>#${j.id}</td>
+      <td>${backupStatusBadge(j.status)}</td>
+      <td>${j.profile_id ?? '-'}</td>
+      <td class="text-xs">${j.started_at ? fmtDate(j.started_at) : '-'}</td>
+      <td class="text-xs">${backupDurationSeconds(j)}</td>
+      <td class="text-xs">${j.bytes_written || 0}</td>
+      <td class="text-xs">${j.artifact_path || '-'}</td>
+      <td class="text-xs">${j.error_message ? `<details><summary>View</summary>${j.error_message}</details>` : '-'}</td>
+    </tr>`).join('')
+    : '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">No backup jobs yet</td></tr>';
+  if (showToast) toast('Backup jobs refreshed', 'success');
 }
 
 async function deleteBackupProfile(profileId) {
