@@ -8,6 +8,7 @@ import os
 import base64
 import json
 import sqlite3
+import tempfile
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta, timezone
 import shutil
@@ -16,12 +17,13 @@ import urllib.request
 import time
 import re
 import threading
+import zipfile
 from queue import Queue, Empty
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -2857,6 +2859,39 @@ def get_backup_jobs(limit: int = Query(default=20), offset: int = Query(default=
 @app.get("/api/backups/kpis")
 def get_backup_kpis(_: UserContext = Depends(require_admin_user)):
     return {"kpis": get_backup_verification_kpis()}
+
+
+@app.get("/api/backups/download")
+def backup_download(path: str = Query(...), _: UserContext = Depends(require_admin_user)):
+    normalized = (path or "").strip()
+    if not normalized or not os.path.isabs(normalized):
+        raise HTTPException(status_code=400, detail="A valid absolute local path is required")
+    if not os.path.isfile(normalized):
+        raise HTTPException(status_code=404, detail="Backup artifact not found")
+    filename = os.path.basename(normalized) or "backup.json"
+    return FileResponse(normalized, media_type="application/json", filename=filename)
+
+
+@app.get("/api/backups/download-all")
+def backup_download_all(_: UserContext = Depends(require_admin_user)):
+    local_root = (get_config("backup_local_path", "/tmp/ampai_backups") or "/tmp/ampai_backups").strip()
+    if not os.path.isdir(local_root):
+        raise HTTPException(status_code=404, detail="Local backup directory not found")
+    files = sorted(
+        [
+            os.path.join(local_root, name)
+            for name in os.listdir(local_root)
+            if name.endswith(".json") or name.endswith(".manifest.json")
+        ]
+    )
+    if not files:
+        raise HTTPException(status_code=404, detail="No local backup artifacts found")
+    archive_name = f"ampai_backups_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.zip"
+    archive_path = os.path.join(tempfile.gettempdir(), archive_name)
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file_path in files:
+            zf.write(file_path, arcname=os.path.basename(file_path))
+    return FileResponse(archive_path, media_type="application/zip", filename=archive_name)
 
 
 @app.get("/api/backups/jobs/{job_id}")

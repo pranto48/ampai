@@ -233,6 +233,7 @@ async function adminInit() {
   document.getElementById('backup-profile-save-btn')?.addEventListener('click', saveBackupProfile);
   document.getElementById('backup-profile-reset-btn')?.addEventListener('click', resetBackupProfileForm);
   document.getElementById('backup-monitor-refresh-btn')?.addEventListener('click', () => loadBackupJobs(true));
+  document.getElementById('backup-download-all-btn')?.addEventListener('click', downloadAllBackups);
 }
 
 let restorePreflightId = null;
@@ -650,7 +651,7 @@ async function restoreBackup() {
   restorePollTimer = setInterval(async () => {
     const res = await apiJSON(`/api/restores/jobs/${jobId}`);
     if (!res.ok) return;
-    const job = res.data || {};
+    const job = res.data?.job || {};
     if (progress) progress.textContent = `Step: ${job.current_step || '-'} (${job.progress_percent || 0}%)`;
     if (['success', 'failed'].includes(job.status)) {
       clearInterval(restorePollTimer);
@@ -676,8 +677,52 @@ async function loadBackupHistory() {
       <td><span class="badge ${h.status==='success'?'badge-green':'badge-red'}">${h.status}</span></td>
       <td>${h.session_count||0}</td>
       <td>${h.mode||'-'}</td>
+      <td>${h.target ? `<button class="btn btn-secondary btn-sm" onclick="downloadBackupByPath('${String(h.target).replace(/'/g, '&#39;')}')">Download</button>` : '-'}</td>
     </tr>`).join('')
-    : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:20px">No backup history</td></tr>';
+    : '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No backup history</td></tr>';
+}
+
+async function downloadBackupByPath(path) {
+  const normalized = (path || '').trim();
+  if (!normalized.startsWith('/')) {
+    toast('Download is only available for local backup paths', 'error');
+    return;
+  }
+  await _downloadWithAuth(`/api/backups/download?path=${encodeURIComponent(normalized)}`);
+}
+
+async function downloadAllBackups() {
+  await _downloadWithAuth('/api/backups/download-all');
+}
+
+async function _downloadWithAuth(url) {
+  try {
+    const headers = {};
+    if (State?.token) headers.Authorization = `Bearer ${State.token}`;
+    const res = await fetch(url, { method: 'GET', headers });
+    if (!res.ok) {
+      let detail = 'Download failed';
+      try {
+        const data = await res.json();
+        detail = data.detail || detail;
+      } catch (_) {}
+      toast(detail, 'error');
+      return;
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('content-disposition') || '';
+    const match = cd.match(/filename=\"?([^\";]+)\"?/i);
+    const filename = match?.[1] || 'backup_download';
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+  } catch (err) {
+    toast(`Download failed: ${err?.message || 'Unknown error'}`, 'error');
+  }
 }
 
 async function loadAuditLog() {

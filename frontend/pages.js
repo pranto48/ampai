@@ -648,11 +648,23 @@ function buildAdminPage() {
     <div class="card-title">Backup History</div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>Timestamp</th><th>Trigger</th><th>Status</th><th>Sessions</th><th>Mode</th></tr></thead>
+        <thead><tr><th>Timestamp</th><th>Trigger</th><th>Status</th><th>Sessions</th><th>Mode</th><th>Actions</th></tr></thead>
         <tbody id="backup-history-tbody">
-          <tr><td colspan="5" style="text-align:center;padding:20px;color:var(--muted)">No history yet</td></tr>
+          <tr><td colspan="6" style="text-align:center;padding:20px;color:var(--muted)">No history yet</td></tr>
         </tbody>
       </table>
+    </div>
+    <div style="margin-top:10px;display:flex;justify-content:flex-end">
+      <button id="backup-download-all-btn" class="btn btn-secondary btn-sm">⬇ Download All Local Backups</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Backup Verification KPIs</div>
+    <div class="stats-grid" style="margin-top:8px">
+      <div class="stat-card"><div id="kpi-last-successful-backup" class="stat-value">—</div><div class="stat-label">Last Successful Backup</div></div>
+      <div class="stat-card"><div id="kpi-last-successful-restore-test" class="stat-value">—</div><div class="stat-label">Last Successful Restore-Test</div></div>
+      <div class="stat-card"><div id="kpi-backup-success-rate-7d" class="stat-value">0%</div><div class="stat-label">Backup Success Rate (7d)</div></div>
+      <div class="stat-card"><div id="kpi-backup-success-rate-30d" class="stat-value">0%</div><div class="stat-label">Backup Success Rate (30d)</div></div>
     </div>
   </div>
   <div class="card">
