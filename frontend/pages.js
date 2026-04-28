@@ -668,6 +668,15 @@ function buildAdminPage() {
     </div>
   </div>
   <div class="card">
+    <div class="card-title">Backup Verification KPIs</div>
+    <div class="stats-grid" style="margin-top:8px">
+      <div class="stat-card"><div id="kpi-last-successful-backup" class="stat-value">—</div><div class="stat-label">Last Successful Backup</div></div>
+      <div class="stat-card"><div id="kpi-last-successful-restore-test" class="stat-value">—</div><div class="stat-label">Last Successful Restore-Test</div></div>
+      <div class="stat-card"><div id="kpi-backup-success-rate-7d" class="stat-value">0%</div><div class="stat-label">Backup Success Rate (7d)</div></div>
+      <div class="stat-card"><div id="kpi-backup-success-rate-30d" class="stat-value">0%</div><div class="stat-label">Backup Success Rate (30d)</div></div>
+    </div>
+  </div>
+  <div class="card">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
       <div class="card-title">Backup Monitor</div>
       <button id="backup-monitor-refresh-btn" class="btn btn-secondary btn-sm">Refresh</button>
