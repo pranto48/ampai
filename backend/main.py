@@ -952,9 +952,6 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             category_filter=(request.memory_category_filter or "").strip(),
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
-            memory_top_k=memory_top_k,
-            recency_bias=recency_bias,
-            category_filter=category_filter,
         )
         response_text = str(result.get("response") or "")
         suggestions: List[Dict[str, Any]] = []
@@ -1015,12 +1012,53 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
 
 
 @app.get("/api/memory/inbox")
-def list_memory_inbox(status: str = "pending", current_user: UserContext = Depends(require_authenticated_user)):
+def list_memory_inbox(
+    status: str = Query(default="pending"),
+    session_id: str = Query(default=""),
+    q: str = Query(default=""),
+    date_from: str = Query(default=""),
+    date_to: str = Query(default=""),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     rows = _load_config_list("memory_inbox_candidates")
     scoped = [r for r in rows if current_user.role == "admin" or r.get("username") == current_user.username]
-    if status and status != "all":
-        scoped = [r for r in scoped if (r.get("status") or "") == status]
-    return {"items": scoped[:200]}
+    status_value = (status or "").strip().lower()
+    if status_value and status_value != "all":
+        scoped = [r for r in scoped if (r.get("status") or "").lower() == status_value]
+
+    clean_session = (session_id or "").strip()
+    if clean_session:
+        scoped = [r for r in scoped if (r.get("session_id") or "") == clean_session]
+
+    query_text = (q or "").strip().lower()
+    if query_text:
+        scoped = [
+            r for r in scoped
+            if query_text in (r.get("candidate_text") or "").lower()
+            or query_text in (r.get("edited_text") or "").lower()
+            or query_text in (r.get("session_id") or "").lower()
+        ]
+
+    from_dt = _parse_iso_dt(date_from)
+    to_dt = _parse_iso_dt(date_to)
+    if from_dt:
+        scoped = [r for r in scoped if r.get("created_at") and str(r["created_at"]) >= from_dt]
+    if to_dt:
+        scoped = [r for r in scoped if r.get("created_at") and str(r["created_at"]) <= to_dt]
+
+    scoped = sorted(scoped, key=lambda r: r.get("created_at") or "", reverse=True)
+    page = scoped[offset: offset + limit]
+    return {
+        "items": page,
+        "candidates": page,
+        "status": status_value or "pending",
+        "offset": offset,
+        "limit": limit,
+        "total": len(scoped),
+        "has_more": (offset + limit) < len(scoped),
+    }
 
 
 @app.post("/api/memory/inbox/capture")
@@ -1062,6 +1100,30 @@ def update_memory_inbox(candidate_id: str, request: MemoryInboxUpdateRequest, cu
     _save_config_list("memory_inbox_candidates", rows)
     log_audit_event(username=current_user.username, action=f"memory.review.{next_status}", session_id=updated.get("session_id"), details=updated.get("id"))
     return {"status": "success", "item": updated}
+
+
+@app.delete("/api/memory/inbox/{candidate_id}")
+def delete_memory_inbox(candidate_id: str, current_user: UserContext = Depends(require_authenticated_user)):
+    rows = _load_config_list("memory_inbox_candidates")
+    kept: List[Dict[str, Any]] = []
+    removed: Optional[Dict[str, Any]] = None
+    for row in rows:
+        if str(row.get("id")) != str(candidate_id):
+            kept.append(row)
+            continue
+        if current_user.role != "admin" and row.get("username") != current_user.username:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        removed = row
+    if not removed:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    _save_config_list("memory_inbox_candidates", kept)
+    log_audit_event(
+        username=current_user.username,
+        action="memory.review.delete",
+        session_id=removed.get("session_id"),
+        details=str(removed.get("id")),
+    )
+    return {"status": "success"}
 
 
 @app.post("/api/notifications/chat-reply")
@@ -1133,85 +1195,6 @@ def update_my_memory_policy(request: MemoryPolicyRequest, current_user: UserCont
     }
     set_config(f"memory_policy_{current_user.username}", json.dumps(payload))
     return {"status": "success", **payload}
-
-
-@app.get("/api/personas")
-def list_personas(current_user: UserContext = Depends(require_authenticated_user)):
-    rows = _load_config_list("personas_library")
-    scoped = [r for r in rows if r.get("username") in {"*", current_user.username}]
-    return {"personas": scoped[:200]}
-
-
-@app.post("/api/personas")
-def create_persona(request: PersonaCreateRequest, current_user: UserContext = Depends(require_authenticated_user)):
-    name = (request.name or "").strip()
-    system_prompt = (request.system_prompt or "").strip()
-    if not name or not system_prompt:
-        raise HTTPException(status_code=400, detail="name and system_prompt are required")
-    rows = _load_config_list("personas_library")
-    persona = {
-        "id": str(uuid.uuid4()),
-        "username": current_user.username,
-        "name": name[:120],
-        "system_prompt": system_prompt[:5000],
-        "tags": request.tags or [],
-        "is_default": bool(request.is_default),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if persona["is_default"]:
-        for row in rows:
-            if row.get("username") == current_user.username:
-                row["is_default"] = False
-    rows.insert(0, persona)
-    _save_config_list("personas_library", rows[:500])
-    return {"status": "success", "persona": persona}
-
-
-@app.patch("/api/personas/{persona_id}")
-def update_persona(persona_id: str, request: PersonaUpdateRequest, current_user: UserContext = Depends(require_authenticated_user)):
-    rows = _load_config_list("personas_library")
-    updated = None
-    for row in rows:
-        if row.get("id") != persona_id:
-            continue
-        if current_user.role != "admin" and row.get("username") != current_user.username:
-            raise HTTPException(status_code=403, detail="Forbidden")
-        if request.name is not None:
-            row["name"] = request.name.strip()[:120]
-        if request.system_prompt is not None:
-            row["system_prompt"] = request.system_prompt.strip()[:5000]
-        if request.tags is not None:
-            row["tags"] = [t.strip() for t in request.tags if t and t.strip()]
-        if request.is_default is not None:
-            if request.is_default:
-                for other in rows:
-                    if other.get("username") == row.get("username"):
-                        other["is_default"] = False
-            row["is_default"] = bool(request.is_default)
-        updated = row
-        break
-    if not updated:
-        raise HTTPException(status_code=404, detail="Persona not found")
-    _save_config_list("personas_library", rows)
-    return {"status": "success", "persona": updated}
-
-
-@app.delete("/api/personas/{persona_id}")
-def delete_persona(persona_id: str, current_user: UserContext = Depends(require_authenticated_user)):
-    rows = _load_config_list("personas_library")
-    next_rows = []
-    deleted = None
-    for row in rows:
-        if row.get("id") == persona_id:
-            if current_user.role != "admin" and row.get("username") != current_user.username:
-                raise HTTPException(status_code=403, detail="Forbidden")
-            deleted = row
-            continue
-        next_rows.append(row)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Persona not found")
-    _save_config_list("personas_library", next_rows)
-    return {"status": "success"}
 
 
 @app.get("/api/workspaces")
@@ -1828,79 +1811,6 @@ def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = De
         "has_more": (offset + limit) < total,
         "categories": category_counts,
     }
-
-
-@app.get("/api/memory/inbox")
-def memory_inbox_list(
-    status: str = Query(default="pending"),
-    session_id: str = Query(default=""),
-    date_from: str = Query(default=""),
-    date_to: str = Query(default=""),
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-    user=Depends(require_authenticated_user),
-):
-    records = list_memory_candidates(
-        username=user.username,
-        status=(status or "").strip().lower(),
-        limit=limit,
-        offset=offset,
-    )
-    filtered = records
-    cleaned_session = (session_id or "").strip()
-    if cleaned_session:
-        filtered = [row for row in filtered if (row.get("session_id") or "") == cleaned_session]
-
-    from_dt = _parse_iso_dt(date_from)
-    to_dt = _parse_iso_dt(date_to)
-    if from_dt:
-        filtered = [row for row in filtered if row.get("created_at") and row["created_at"] >= from_dt]
-    if to_dt:
-        filtered = [row for row in filtered if row.get("created_at") and row["created_at"] <= to_dt]
-
-    return {"candidates": filtered, "status": status, "offset": offset, "limit": limit}
-
-
-@app.patch("/api/memory/inbox/{candidate_id}")
-def memory_inbox_update(candidate_id: int, request: MemoryInboxUpdateRequest, user=Depends(require_authenticated_user)):
-    existing = get_memory_candidate_by_id(candidate_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Memory candidate not found")
-    if (existing.get("username") or "") != user.username:
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    status_value = (request.status or "").strip().lower()
-    if status_value == "approved":
-        approved_text = (request.edited_text or existing.get("candidate_text") or "").strip()
-        if not approved_text:
-            raise HTTPException(status_code=400, detail="Cannot approve empty candidate")
-        if not add_core_memory(approved_text):
-            raise HTTPException(status_code=500, detail="Failed writing approved memory")
-        updated = update_memory_candidate_status(candidate_id, status_value, approved_text)
-        if not updated:
-            raise HTTPException(status_code=400, detail="Invalid status")
-        log_audit_event(
-            username=user.username,
-            action="memory.review.approve",
-            session_id=updated.get("session_id"),
-            details=f"id={candidate_id}",
-        )
-    elif status_value == "rejected":
-        updated = update_memory_candidate_status(candidate_id, status_value, request.edited_text)
-        if not updated:
-            raise HTTPException(status_code=400, detail="Invalid status")
-        log_audit_event(
-            username=user.username,
-            action="memory.review.reject",
-            session_id=updated.get("session_id"),
-            details=f"id={candidate_id}",
-        )
-    else:
-        updated = update_memory_candidate_status(candidate_id, status_value, request.edited_text)
-        if not updated:
-            raise HTTPException(status_code=400, detail="Invalid status")
-
-    return {"candidate": updated}
 
 
 @app.get("/api/history/{session_id}")

@@ -13,12 +13,17 @@ async function memoryInboxLoad() {
   _memoryInboxBound = true;
   document.getElementById('mi-refresh-btn')?.addEventListener('click', _fetchMemoryInbox);
   document.getElementById('mi-status-filter')?.addEventListener('change', _fetchMemoryInbox);
+  document.getElementById('mi-search')?.addEventListener('input', _fetchMemoryInbox);
   document.getElementById('mi-capture-btn')?.addEventListener('click', _captureMemoryInboxItem);
 }
 
 async function _fetchMemoryInbox() {
   const status = document.getElementById('mi-status-filter')?.value || 'pending';
-  const { ok, data } = await apiJSON(`/api/memory/inbox?status=${encodeURIComponent(status)}`);
+  const q = document.getElementById('mi-search')?.value?.trim() || '';
+  const query = new URLSearchParams();
+  query.set('status', status);
+  if (q) query.set('q', q);
+  const { ok, data } = await apiJSON(`/api/memory/inbox?${query.toString()}`);
   const tbody = document.getElementById('mi-body');
   if (!tbody) return;
   if (!ok) {
@@ -26,6 +31,8 @@ async function _fetchMemoryInbox() {
     return;
   }
   const items = data.items || [];
+  window.State = window.State || {};
+  window.State.memoryInboxRows = items;
   tbody.innerHTML = items.length ? items.map(i => `
     <tr>
       <td style="max-width:340px;font-size:.82rem">${_esc(i.edited_text || i.candidate_text || '-')}</td>
@@ -36,6 +43,8 @@ async function _fetchMemoryInbox() {
       <td style="display:flex;gap:6px">
         <button class="btn btn-secondary btn-sm" onclick="_reviewMemoryInbox('${i.id}','approved')">Approve</button>
         <button class="btn btn-secondary btn-sm" onclick="_reviewMemoryInbox('${i.id}','rejected')">Reject</button>
+        <button class="btn btn-secondary btn-sm" onclick="_editMemoryInbox('${i.id}')">Edit</button>
+        <button class="btn btn-danger btn-sm" onclick="_deleteMemoryInbox('${i.id}')">Delete</button>
       </td>
     </tr>
   `).join('') : '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No candidates</td></tr>';
@@ -55,7 +64,8 @@ async function _captureMemoryInboxItem() {
 }
 
 async function _reviewMemoryInbox(id, status) {
-  const edited = prompt(`Optional edit before marking as ${status}:`) || '';
+  const row = (window.State?.memoryInboxRows || []).find((x) => String(x.id) === String(id));
+  const edited = prompt(`Optional edit before marking as ${status}:`, row?.edited_text || row?.candidate_text || '') || '';
   const { ok } = await apiJSON(`/api/memory/inbox/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify({ status, edited_text: edited }),
@@ -65,6 +75,33 @@ async function _reviewMemoryInbox(id, status) {
     _fetchMemoryInbox();
   } else {
     toast('Failed to update candidate', 'error');
+  }
+}
+
+async function _editMemoryInbox(id) {
+  const row = (window.State?.memoryInboxRows || []).find((x) => String(x.id) === String(id));
+  const edited = prompt('Edit memory text:', row?.edited_text || row?.candidate_text || '');
+  if (edited === null) return;
+  const { ok } = await apiJSON(`/api/memory/inbox/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: row?.status || 'pending', edited_text: edited }),
+  });
+  if (ok) {
+    toast('Memory updated', 'success');
+    _fetchMemoryInbox();
+  } else {
+    toast('Failed to edit candidate', 'error');
+  }
+}
+
+async function _deleteMemoryInbox(id) {
+  if (!confirm('Delete this memory candidate?')) return;
+  const { ok } = await apiJSON(`/api/memory/inbox/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (ok) {
+    toast('Memory deleted', 'success');
+    _fetchMemoryInbox();
+  } else {
+    toast('Failed to delete candidate', 'error');
   }
 }
 
