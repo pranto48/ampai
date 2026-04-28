@@ -228,6 +228,8 @@ async function adminInit() {
   document.getElementById('create-user-btn')?.addEventListener('click', createUser);
   document.getElementById('run-backup-btn')?.addEventListener('click', runBackup);
   document.getElementById('restore-backup-btn')?.addEventListener('click', restoreBackup);
+  document.getElementById('backup-profile-save-btn')?.addEventListener('click', saveBackupProfile);
+  document.getElementById('backup-profile-reset-btn')?.addEventListener('click', resetBackupProfileForm);
 }
 
 function adminTabHandlers() {
@@ -249,7 +251,7 @@ function adminTabHandlers() {
       if (name === 'users')    loadAdminUsers();
       if (name === 'sessions') loadAdminSessions();
       if (name === 'memories') loadCoreMemories();
-      if (name === 'backup')   loadBackupHistory();
+      if (name === 'backup') { loadBackupHistory(); loadBackupProfiles(); }
       if (name === 'audit')    loadAuditLog();
     });
   });
@@ -392,6 +394,140 @@ async function runBackup() {
   btn.disabled = false;
   if (st) { st.textContent = ok ? '✓ Backup complete: ' + (data.file||data.path||'done') : '✕ '+( data.detail||'Failed'); st.style.color = ok?'var(--green)':'var(--red)'; }
   if (ok) loadBackupHistory();
+}
+
+function resetBackupProfileForm() {
+  window._editingBackupProfileId = null;
+  const ids = [
+    'backup-profile-name', 'backup-profile-path', 'backup-profile-host', 'backup-profile-port',
+    'backup-profile-username', 'backup-profile-credential', 'backup-profile-cron',
+    'backup-profile-interval', 'backup-profile-retention-count', 'backup-profile-retention-days'
+  ];
+  ids.forEach((id) => { const el = document.getElementById(id); if (el) el.value = ''; });
+  const typeEl = document.getElementById('backup-profile-type');
+  if (typeEl) typeEl.value = 'local';
+  const checks = {
+    'backup-profile-enabled': true,
+    'backup-profile-include-db': true,
+    'backup-profile-include-uploads': false,
+    'backup-profile-include-configs': false,
+    'backup-profile-include-logs': false,
+  };
+  Object.entries(checks).forEach(([id, val]) => { const el = document.getElementById(id); if (el) el.checked = val; });
+}
+
+function backupProfilePayloadFromForm() {
+  return {
+    name: document.getElementById('backup-profile-name')?.value.trim() || '',
+    enabled: !!document.getElementById('backup-profile-enabled')?.checked,
+    include_database: !!document.getElementById('backup-profile-include-db')?.checked,
+    include_uploads: !!document.getElementById('backup-profile-include-uploads')?.checked,
+    include_configs: !!document.getElementById('backup-profile-include-configs')?.checked,
+    include_logs: !!document.getElementById('backup-profile-include-logs')?.checked,
+    destination: {
+      type: document.getElementById('backup-profile-type')?.value || 'local',
+      path: document.getElementById('backup-profile-path')?.value.trim() || '',
+      host: document.getElementById('backup-profile-host')?.value.trim() || '',
+      port: Number(document.getElementById('backup-profile-port')?.value || 0) || null,
+      username: document.getElementById('backup-profile-username')?.value.trim() || '',
+      credential: document.getElementById('backup-profile-credential')?.value || '',
+    },
+    schedule: {
+      cron: document.getElementById('backup-profile-cron')?.value.trim() || '',
+      interval_minutes: Number(document.getElementById('backup-profile-interval')?.value || 0) || null,
+    },
+    retention_count: Number(document.getElementById('backup-profile-retention-count')?.value || 0) || null,
+    retention_days: Number(document.getElementById('backup-profile-retention-days')?.value || 0) || null,
+  };
+}
+
+async function saveBackupProfile() {
+  const status = document.getElementById('backup-profile-status');
+  const payload = backupProfilePayloadFromForm();
+  if (!payload.name) {
+    if (status) { status.textContent = 'Profile name is required.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  const editingId = window._editingBackupProfileId;
+  const url = editingId ? `/api/backups/profiles/${editingId}` : '/api/backups/profiles';
+  const method = editingId ? 'PATCH' : 'POST';
+  const { ok, data } = await apiJSON(url, { method, body: JSON.stringify(payload) });
+  if (!ok) {
+    if (status) { status.textContent = data.detail || 'Failed to save profile.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  if (status) { status.textContent = editingId ? 'Profile updated.' : 'Profile created.'; status.style.color = 'var(--green)'; }
+  resetBackupProfileForm();
+  await loadBackupProfiles();
+}
+
+function fillBackupProfileForm(profile) {
+  window._editingBackupProfileId = profile.id;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+  const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+  setVal('backup-profile-name', profile.name || '');
+  setVal('backup-profile-type', profile.destination?.type || 'local');
+  setVal('backup-profile-path', profile.destination?.path || '');
+  setVal('backup-profile-host', profile.destination?.host || '');
+  setVal('backup-profile-port', profile.destination?.port || '');
+  setVal('backup-profile-username', profile.destination?.username || '');
+  setVal('backup-profile-credential', '');
+  setVal('backup-profile-cron', profile.schedule?.cron || '');
+  setVal('backup-profile-interval', profile.schedule?.interval_minutes || '');
+  setVal('backup-profile-retention-count', profile.retention_count || '');
+  setVal('backup-profile-retention-days', profile.retention_days || '');
+  setChk('backup-profile-enabled', profile.enabled);
+  setChk('backup-profile-include-db', profile.include_database);
+  setChk('backup-profile-include-uploads', profile.include_uploads);
+  setChk('backup-profile-include-configs', profile.include_configs);
+  setChk('backup-profile-include-logs', profile.include_logs);
+}
+
+function editBackupProfile(profileId) {
+  const profile = (window._backupProfilesById || {})[profileId];
+  if (!profile) return;
+  fillBackupProfileForm(profile);
+}
+
+async function runBackupProfile(profileId) {
+  const st = document.getElementById('backup-status');
+  if (st) { st.textContent = 'Running profile backup…'; st.style.color = 'var(--muted)'; }
+  const { ok, data } = await apiJSON(`/api/backups/profiles/${profileId}/run`, { method: 'POST' });
+  if (st) { st.textContent = ok ? `✓ ${data.file || data.path || 'Backup complete'}` : `✕ ${data.detail || 'Failed'}`; st.style.color = ok ? 'var(--green)' : 'var(--red)'; }
+  if (ok) loadBackupHistory();
+}
+
+async function deleteBackupProfile(profileId) {
+  if (!confirm('Delete this backup profile?')) return;
+  const { ok, data } = await apiJSON(`/api/backups/profiles/${profileId}`, { method: 'DELETE' });
+  if (!ok) { toast(data.detail || 'Failed to delete profile', 'error'); return; }
+  toast('Profile deleted', 'success');
+  loadBackupProfiles();
+}
+
+async function loadBackupProfiles() {
+  const tbody = document.getElementById('backup-profiles-tbody');
+  if (!tbody) return;
+  const { ok, data } = await apiJSON('/api/backups/profiles');
+  if (!ok) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red)">Failed to load profiles</td></tr>';
+    return;
+  }
+  const profiles = data.profiles || [];
+  window._backupProfilesById = Object.fromEntries(profiles.map((p) => [p.id, p]));
+  tbody.innerHTML = profiles.length ? profiles.map((p) => `
+    <tr>
+      <td><strong>${p.name}</strong><div class="text-xs text-muted">${p.enabled ? 'enabled' : 'disabled'}</div></td>
+      <td>${p.destination?.type || 'local'} ${p.destination?.host ? `@ ${p.destination.host}` : ''}<div class="text-xs text-muted">${p.destination?.path || '-'}</div></td>
+      <td class="text-xs">${p.schedule?.cron || (p.schedule?.interval_minutes ? `every ${p.schedule.interval_minutes}m` : '-')}</td>
+      <td class="text-xs">count=${p.retention_count ?? '-'}, days=${p.retention_days ?? '-'}</td>
+      <td style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-secondary btn-sm" onclick="editBackupProfile(${p.id})">Edit</button>
+        <button class="btn btn-primary btn-sm" onclick="runBackupProfile(${p.id})">Run now</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteBackupProfile(${p.id})">Delete</button>
+      </td>
+    </tr>
+  `).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:20px">No profiles</td></tr>';
 }
 
 async function restoreBackup() {

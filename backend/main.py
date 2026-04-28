@@ -97,6 +97,11 @@ from database import (
     get_effective_notification_preferences,
     get_effective_memory_policy,
     get_effective_chat_preferences,
+    list_backup_profiles,
+    create_backup_profile,
+    update_backup_profile,
+    delete_backup_profile,
+    get_backup_profile,
     upsert_user_notification_preferences,
     upsert_user_memory_policy,
     upsert_user_chat_preferences,
@@ -395,6 +400,47 @@ class RetentionRunRequest(BaseModel):
     archive_only: bool = True
 
 
+class BackupProfileDestination(BaseModel):
+    type: str = "local"
+    path: Optional[str] = ""
+    host: Optional[str] = ""
+    port: Optional[int] = None
+    username: Optional[str] = ""
+    credential: Optional[str] = ""
+    credential_key_ref: Optional[str] = ""
+
+
+class BackupProfileSchedule(BaseModel):
+    cron: Optional[str] = ""
+    interval_minutes: Optional[int] = None
+
+
+class BackupProfileCreateRequest(BaseModel):
+    name: str
+    enabled: bool = True
+    include_database: bool = True
+    include_uploads: bool = False
+    include_configs: bool = False
+    include_logs: bool = False
+    destination: BackupProfileDestination
+    schedule: BackupProfileSchedule = BackupProfileSchedule()
+    retention_count: Optional[int] = None
+    retention_days: Optional[int] = None
+
+
+class BackupProfileUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    enabled: Optional[bool] = None
+    include_database: Optional[bool] = None
+    include_uploads: Optional[bool] = None
+    include_configs: Optional[bool] = None
+    include_logs: Optional[bool] = None
+    destination: Optional[BackupProfileDestination] = None
+    schedule: Optional[BackupProfileSchedule] = None
+    retention_count: Optional[int] = None
+    retention_days: Optional[int] = None
+
+
 class UserLoginResponse(BaseModel):
     username: str
     role: str
@@ -558,8 +604,46 @@ def _record_backup_status(entry: Dict) -> None:
     set_config("backup_status_history", json.dumps(history[:100]))
 
 
-def _execute_backup(actor: str, trigger: str = "manual") -> Dict:
-    backup_mode = (get_config("backup_mode", "local") or "local").strip().lower()
+def _profile_destination_password(profile: Dict[str, Any]) -> str:
+    credential_ref = (profile.get("credential_key_ref") or "").strip()
+    if not credential_ref:
+        return ""
+    return get_config(credential_ref, "") or ""
+
+
+def _profile_from_legacy_configs() -> Dict[str, Any]:
+    mode = (get_config("backup_mode", "local") or "local").strip().lower()
+    if mode == "ftp":
+        return {
+            "id": None,
+            "name": "Legacy Backup",
+            "destination_type": "ftp",
+            "destination_host": get_config("backup_ftp_host", ""),
+            "destination_username": get_config("backup_ftp_user", ""),
+            "destination_path": get_config("backup_ftp_path", "/"),
+            "credential_key_ref": "backup_ftp_password",
+        }
+    if mode == "smb":
+        return {
+            "id": None,
+            "name": "Legacy Backup",
+            "destination_type": "smb",
+            "destination_host": get_config("backup_smb_host", ""),
+            "destination_username": get_config("backup_smb_user", ""),
+            "destination_path": get_config("backup_smb_path", "/"),
+            "credential_key_ref": "backup_smb_password",
+        }
+    return {
+        "id": None,
+        "name": "Legacy Backup",
+        "destination_type": "local",
+        "destination_path": get_config("backup_local_path", "/tmp/ampai_backups"),
+    }
+
+
+def _execute_backup(actor: str, trigger: str = "manual", profile: Optional[Dict[str, Any]] = None) -> Dict:
+    backup_profile = profile or _profile_from_legacy_configs()
+    backup_mode = (backup_profile.get("destination_type") or "local").strip().lower()
     sessions = export_all_sessions_for_backup()
     serialized, manifest = build_backup_payload(sessions=sessions, actor=actor)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -567,25 +651,27 @@ def _execute_backup(actor: str, trigger: str = "manual") -> Dict:
 
     try:
         if backup_mode == "ftp":
-            host = get_config("backup_ftp_host")
-            user = get_config("backup_ftp_user")
-            password = get_config("backup_ftp_password")
-            remote_path = get_config("backup_ftp_path", "/")
+            host = backup_profile.get("destination_host")
+            user = backup_profile.get("destination_username")
+            password = _profile_destination_password(backup_profile)
+            remote_path = backup_profile.get("destination_path", "/")
             if not host or not user or not password:
                 raise ValueError("FTP backup is not fully configured")
             outcome = write_backup_ftp(host, user, password, remote_path, filename, serialized, manifest)
         elif backup_mode == "smb":
-            host = get_config("backup_smb_host")
-            share = get_config("backup_smb_share")
-            remote_path = get_config("backup_smb_path", "/")
-            user = get_config("backup_smb_user")
-            password = get_config("backup_smb_password")
-            domain = get_config("backup_smb_domain", "")
+            host = backup_profile.get("destination_host")
+            share = (backup_profile.get("destination_path") or "").split("/", 1)[0]
+            remote_path = ""
+            if "/" in (backup_profile.get("destination_path") or ""):
+                remote_path = (backup_profile.get("destination_path") or "").split("/", 1)[1]
+            user = backup_profile.get("destination_username")
+            password = _profile_destination_password(backup_profile)
+            domain = ""
             if not host or not share or not user or not password:
                 raise ValueError("SMB backup is not fully configured")
             outcome = write_backup_smb(host, share, remote_path, user, password, domain, filename, serialized, manifest)
         else:
-            local_dir = get_config("backup_local_path", "/tmp/ampai_backups")
+            local_dir = backup_profile.get("destination_path") or "/tmp/ampai_backups"
             outcome = write_backup_local(local_dir, filename, serialized, manifest)
 
         _record_backup_status(
@@ -593,6 +679,8 @@ def _execute_backup(actor: str, trigger: str = "manual") -> Dict:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "trigger": trigger,
                 "status": "success",
+                "profile_id": backup_profile.get("id"),
+                "profile_name": backup_profile.get("name"),
                 "mode": outcome.get("mode", backup_mode),
                 "target": outcome.get("path") or outcome.get("file") or "",
                 "manifest_checksum": manifest["checksum_sha256"],
@@ -607,6 +695,8 @@ def _execute_backup(actor: str, trigger: str = "manual") -> Dict:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "trigger": trigger,
                 "status": "failed",
+                "profile_id": backup_profile.get("id"),
+                "profile_name": backup_profile.get("name"),
                 "mode": backup_mode,
                 "error": str(exc),
             }
@@ -2216,10 +2306,131 @@ def admin_unshare_group_session(group_id: int, session_id: str, _: UserContext =
     return {"status": "success"}
 
 
-@app.post("/api/admin/backup/run")
-def run_backup(current_user: UserContext = Depends(require_admin_user)):
+def _profile_row_to_response(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": row.get("id"),
+        "name": row.get("name", ""),
+        "enabled": bool(row.get("enabled")),
+        "include_database": bool(row.get("include_database")),
+        "include_uploads": bool(row.get("include_uploads")),
+        "include_configs": bool(row.get("include_configs")),
+        "include_logs": bool(row.get("include_logs")),
+        "destination": {
+            "type": row.get("destination_type", "local"),
+            "path": row.get("destination_path", ""),
+            "host": row.get("destination_host", ""),
+            "port": row.get("destination_port"),
+            "username": row.get("destination_username", ""),
+            "credential_key_ref": row.get("credential_key_ref", ""),
+            "has_credential": bool(get_config(row.get("credential_key_ref", ""), "")) if row.get("credential_key_ref") else False,
+        },
+        "schedule": {
+            "cron": row.get("schedule_cron", ""),
+            "interval_minutes": row.get("schedule_interval_minutes"),
+        },
+        "retention_count": row.get("retention_count"),
+        "retention_days": row.get("retention_days"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def _normalize_profile_payload(request: BackupProfileCreateRequest | BackupProfileUpdateRequest, existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    destination = request.destination
+    schedule = request.schedule
+    destination_type = (destination.type if destination else (existing or {}).get("destination_type", "local") or "local").strip().lower()
+    if destination_type not in {"local", "ftp", "smb"}:
+        raise HTTPException(status_code=400, detail="destination.type must be local, ftp, or smb")
+
+    credential_key_ref = (destination.credential_key_ref if destination else "") or (existing or {}).get("credential_key_ref") or ""
+    if destination and destination.credential:
+        credential_key_ref = credential_key_ref or f"backup_profile_cred_{uuid.uuid4().hex}"
+        set_config(credential_key_ref, destination.credential)
+
+    return {
+        "name": (request.name if request.name is not None else (existing or {}).get("name") or "").strip(),
+        "enabled": bool(request.enabled if request.enabled is not None else (existing or {}).get("enabled", True)),
+        "include_database": bool(request.include_database if request.include_database is not None else (existing or {}).get("include_database", True)),
+        "include_uploads": bool(request.include_uploads if request.include_uploads is not None else (existing or {}).get("include_uploads", False)),
+        "include_configs": bool(request.include_configs if request.include_configs is not None else (existing or {}).get("include_configs", False)),
+        "include_logs": bool(request.include_logs if request.include_logs is not None else (existing or {}).get("include_logs", False)),
+        "destination_type": destination_type,
+        "destination_path": (destination.path if destination else (existing or {}).get("destination_path", "")) or "",
+        "destination_host": (destination.host if destination else (existing or {}).get("destination_host", "")) or "",
+        "destination_port": destination.port if destination else (existing or {}).get("destination_port"),
+        "destination_username": (destination.username if destination else (existing or {}).get("destination_username", "")) or "",
+        "credential_key_ref": credential_key_ref,
+        "schedule_cron": (schedule.cron if schedule else (existing or {}).get("schedule_cron", "")) or "",
+        "schedule_interval_minutes": schedule.interval_minutes if schedule else (existing or {}).get("schedule_interval_minutes"),
+        "retention_count": request.retention_count if request.retention_count is not None else (existing or {}).get("retention_count"),
+        "retention_days": request.retention_days if request.retention_days is not None else (existing or {}).get("retention_days"),
+    }
+
+
+@app.get("/api/backups/profiles")
+def get_backup_profiles(_: UserContext = Depends(require_admin_user)):
+    return {"profiles": [_profile_row_to_response(row) for row in list_backup_profiles()]}
+
+
+@app.post("/api/backups/profiles")
+def create_backup_profiles_api(request: BackupProfileCreateRequest, user: UserContext = Depends(require_admin_user)):
+    payload = _normalize_profile_payload(request)
+    if not payload["name"]:
+        raise HTTPException(status_code=400, detail="Profile name is required")
+    profile_id = create_backup_profile(payload)
+    if not profile_id:
+        raise HTTPException(status_code=500, detail="Failed to create backup profile")
+    log_audit_event(username=user.username, action="admin.backup_profile.create", details=f"profile_id={profile_id}")
+    profile = get_backup_profile(profile_id)
+    return {"status": "success", "profile": _profile_row_to_response(profile or {"id": profile_id, **payload})}
+
+
+@app.patch("/api/backups/profiles/{profile_id}")
+def update_backup_profiles_api(profile_id: int, request: BackupProfileUpdateRequest, user: UserContext = Depends(require_admin_user)):
+    existing = get_backup_profile(profile_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Backup profile not found")
+    payload = _normalize_profile_payload(request, existing=existing)
+    if not payload["name"]:
+        raise HTTPException(status_code=400, detail="Profile name is required")
+    if not update_backup_profile(profile_id, payload):
+        raise HTTPException(status_code=500, detail="Failed to update backup profile")
+    log_audit_event(username=user.username, action="admin.backup_profile.update", details=f"profile_id={profile_id}")
+    updated = get_backup_profile(profile_id)
+    return {"status": "success", "profile": _profile_row_to_response(updated or {"id": profile_id, **payload})}
+
+
+@app.delete("/api/backups/profiles/{profile_id}")
+def delete_backup_profiles_api(profile_id: int, user: UserContext = Depends(require_admin_user)):
+    profile = get_backup_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Backup profile not found")
+    if not delete_backup_profile(profile_id):
+        raise HTTPException(status_code=500, detail="Failed to delete backup profile")
+    log_audit_event(username=user.username, action="admin.backup_profile.delete", details=f"profile_id={profile_id}")
+    return {"status": "success"}
+
+
+@app.post("/api/backups/profiles/{profile_id}/run")
+def run_backup_profile_now(profile_id: int, current_user: UserContext = Depends(require_admin_user)):
+    profile = get_backup_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Backup profile not found")
+    if not profile.get("enabled"):
+        raise HTTPException(status_code=400, detail="Backup profile is disabled")
     try:
-        return _execute_backup(actor=current_user.username, trigger="manual")
+        return _execute_backup(actor=current_user.username, trigger="manual-profile", profile=profile)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Backup failed: {exc}") from exc
+
+
+@app.post("/api/admin/backup/run")
+def run_backup(profile_id: Optional[int] = Query(default=None), current_user: UserContext = Depends(require_admin_user)):
+    profile = get_backup_profile(profile_id) if profile_id else None
+    if profile_id and not profile:
+        raise HTTPException(status_code=404, detail="Backup profile not found")
+    try:
+        return _execute_backup(actor=current_user.username, trigger="manual", profile=profile)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Backup failed: {exc}") from exc
 
@@ -2234,6 +2445,16 @@ def get_backup_status_history(_: UserContext = Depends(require_admin_user)):
     if not isinstance(parsed, list):
         parsed = []
     return {"history": parsed}
+
+
+@app.post("/api/admin/backup")
+def run_backup_compat(profile_id: Optional[int] = Query(default=None), current_user: UserContext = Depends(require_admin_user)):
+    return run_backup(profile_id=profile_id, current_user=current_user)
+
+
+@app.get("/api/admin/backup/history")
+def get_backup_history_compat(user: UserContext = Depends(require_admin_user)):
+    return get_backup_status_history(user)
 
 
 @app.post("/api/admin/backup/test-connection")

@@ -589,6 +589,38 @@ function buildAdminPage() {
       <div id="backup-status" style="font-size:.85rem;margin-top:10px"></div>
     </div>
     <div class="card">
+      <div class="card-title">Backup Profiles</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <input id="backup-profile-name" class="input" placeholder="Profile name"/>
+        <select id="backup-profile-type" class="input">
+          <option value="local">local</option>
+          <option value="ftp">ftp</option>
+          <option value="smb">smb</option>
+        </select>
+        <input id="backup-profile-path" class="input" placeholder="Path (or smb share/path)"/>
+        <input id="backup-profile-host" class="input" placeholder="Host"/>
+        <input id="backup-profile-port" class="input" placeholder="Port (optional)" type="number"/>
+        <input id="backup-profile-username" class="input" placeholder="Username"/>
+        <input id="backup-profile-credential" class="input" placeholder="Credential/Password" type="password"/>
+        <input id="backup-profile-cron" class="input" placeholder="Cron (optional)"/>
+        <input id="backup-profile-interval" class="input" placeholder="Interval minutes" type="number"/>
+        <input id="backup-profile-retention-count" class="input" placeholder="Retention count" type="number"/>
+        <input id="backup-profile-retention-days" class="input" placeholder="Retention days" type="number"/>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:.83rem;color:var(--muted)">
+        <label><input type="checkbox" id="backup-profile-enabled" checked/> Enabled</label>
+        <label><input type="checkbox" id="backup-profile-include-db" checked/> DB</label>
+        <label><input type="checkbox" id="backup-profile-include-uploads"/> Uploads</label>
+        <label><input type="checkbox" id="backup-profile-include-configs"/> Configs</label>
+        <label><input type="checkbox" id="backup-profile-include-logs"/> Logs</label>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button id="backup-profile-save-btn" class="btn btn-secondary">Save Profile</button>
+        <button id="backup-profile-reset-btn" class="btn btn-ghost">Clear Form</button>
+      </div>
+      <div id="backup-profile-status" style="font-size:.85rem;margin-top:10px"></div>
+    </div>
+    <div class="card">
       <div class="card-title">Restore from JSON</div>
       <textarea id="backup-restore-json" class="input" rows="4" placeholder="Paste backup JSON here…"
         style="resize:vertical"></textarea>
@@ -598,6 +630,17 @@ function buildAdminPage() {
       </div>
       <button id="restore-backup-btn" class="btn btn-secondary" style="margin-top:10px">Restore</button>
       <div id="restore-status" style="font-size:.85rem;margin-top:8px"></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Configured Profiles</div>
+    <div style="overflow-x:auto;margin-bottom:14px">
+      <table class="tbl">
+        <thead><tr><th>Name</th><th>Destination</th><th>Schedule</th><th>Retention</th><th>Actions</th></tr></thead>
+        <tbody id="backup-profiles-tbody">
+          <tr><td colspan="5" style="text-align:center;padding:20px;color:var(--muted)">No profiles</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
   <div class="card">
