@@ -5,6 +5,7 @@
 let chatAttachments = [];
 let _chatHandlersBound = false;
 const PERSONA_PREF_KEY = 'ampai_persona_id';
+const WEB_SEARCH_PREF_KEY = 'ampai_web_search_enabled';
 
 function chatInit() {
   // Only load sessions each time; bind handlers only once
@@ -13,6 +14,8 @@ function chatInit() {
   _updateChatSessionDisplay();
   _loadPersonaOptions();
   _loadSessionTaskSuggestions(State.sessionId);
+  _restoreWebSearchPreference();
+  _loadMediaLibrary();
   if (!_chatHandlersBound) {
     _chatHandlersBound = true;
     _bindChatHandlers();
@@ -66,12 +69,17 @@ function _bindChatHandlers() {
   document.getElementById('persona-select')?.addEventListener('change', (e) => {
     localStorage.setItem(PERSONA_PREF_KEY, e.target.value || '');
   });
+  document.getElementById('web-search-toggle')?.addEventListener('change', (e) => {
+    localStorage.setItem(WEB_SEARCH_PREF_KEY, e.target.checked ? '1' : '0');
+    toast(e.target.checked ? 'Web search enabled' : 'Web search disabled', 'info');
+  });
 
   // File attach
   document.getElementById('attach-btn')?.addEventListener('click', () => {
     document.getElementById('file-input')?.click();
   });
   document.getElementById('quick-capture-btn')?.addEventListener('click', _quickCaptureMemory);
+  document.getElementById('media-refresh-btn')?.addEventListener('click', _loadMediaLibrary);
 
   document.getElementById('file-input')?.addEventListener('change', async e => {
     const files = Array.from(e.target.files || []);
@@ -133,6 +141,55 @@ function _bindChatHandlers() {
   document.getElementById('retrieval-preset-balanced')?.addEventListener('click', () => applyRetrievalPreset('balanced'));
   document.getElementById('retrieval-preset-recent')?.addEventListener('click', () => applyRetrievalPreset('recent'));
   document.getElementById('retrieval-preset-deep')?.addEventListener('click', () => applyRetrievalPreset('deep'));
+}
+
+function _restoreWebSearchPreference() {
+  const toggle = document.getElementById('web-search-toggle');
+  if (!toggle) return;
+  const pref = localStorage.getItem(WEB_SEARCH_PREF_KEY);
+  if (pref === '1') toggle.checked = true;
+  if (pref === '0') toggle.checked = false;
+}
+
+async function _loadMediaLibrary() {
+  const listEl = document.getElementById('media-library-list');
+  if (!listEl) return;
+  listEl.innerHTML = 'Loading uploaded files…';
+  const { ok, data } = await apiJSON('/api/media');
+  if (!ok) {
+    listEl.innerHTML = '<div style="color:var(--red)">Failed to load attached media.</div>';
+    return;
+  }
+  const rows = data.media || [];
+  if (!rows.length) {
+    listEl.innerHTML = '<div style="color:var(--muted)">No uploaded files yet.</div>';
+    return;
+  }
+  listEl.innerHTML = rows.map((m) => `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--border);border-radius:8px;padding:6px 8px">
+      <div style="min-width:0">
+        <div style="font-size:.8rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${(m.filename || 'file').replace(/</g, '&lt;')}</div>
+        <div style="font-size:.72rem;color:var(--muted)">${(m.session_id || '-')} · ${m.created_at ? new Date(m.created_at).toLocaleString() : ''}</div>
+      </div>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="_attachMediaFromLibrary('${String(m.id)}')">Attach</button>
+    </div>
+  `).join('');
+  window._mediaLibraryRows = rows;
+}
+
+function _attachMediaFromLibrary(id) {
+  const rows = window._mediaLibraryRows || [];
+  const selected = rows.find((r) => String(r.id) === String(id));
+  if (!selected) return;
+  chatAttachments.push({
+    filename: selected.filename,
+    url: selected.url,
+    type: selected.mime_type || 'application/octet-stream',
+    extracted_text: null,
+  });
+  _renderAttachPreviews();
+  _setSendEnabled(true);
+  toast('File attached from media library', 'success');
 }
 
 function _setSendEnabled(enabled) {
