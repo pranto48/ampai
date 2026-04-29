@@ -2861,6 +2861,24 @@ def get_backup_kpis(_: UserContext = Depends(require_admin_user)):
     return {"kpis": get_backup_verification_kpis()}
 
 
+@app.get("/api/admin/backup/download-instant")
+def backup_download_instant(_: UserContext = Depends(require_admin_user)):
+    try:
+        from backup_helpers import build_backup_payload
+        sessions = export_all_sessions_for_backup()
+        serialized, manifest = build_backup_payload(sessions=sessions, actor="admin_download_instant")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"ampai_full_backup_{timestamp}.json"
+        return Response(
+            content=serialized,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
+    except Exception as e:
+        logger.error(f"Instant backup failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/backups/download")
 def backup_download(path: str = Query(...), _: UserContext = Depends(require_admin_user)):
     normalized = (path or "").strip()

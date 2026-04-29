@@ -238,6 +238,7 @@ def chat_with_agent(
     use_web_search: bool = False,
     attachments: List[Dict] = None,
     chat_output_mode: str = None,
+    **kwargs,
 ):
     if attachments is None:
         attachments = []
@@ -315,11 +316,15 @@ def chat_with_agent(
         agent_directives += (
             f"\nAnswer in <= {compact_token_cap} tokens, concise bullets, no extra explanation unless asked.\n"
         )
+    persona_prompt_override = kwargs.get("persona_prompt_override")
+    username = kwargs.get("username", "system")
+    is_admin = kwargs.get("is_admin", False)
+    allowed_memory_categories = kwargs.get("allowed_memory_categories", [])
+    persist_memory = kwargs.get("persist_memory", True)
+    require_memory_approval = kwargs.get("require_memory_approval", False)
+    pii_strict_mode = kwargs.get("pii_strict_mode", False)
+
     persona_prompt = (persona_prompt_override or "").strip()
-    if not persona_prompt and persona_id:
-        persona = get_persona_for_user(persona_id=persona_id, username=username, is_admin=is_admin)
-        if persona:
-            persona_prompt = (persona.get("system_prompt") or "").strip()
     if persona_prompt:
         agent_directives = (
             f"PERSONA SYSTEM PROMPT (highest priority):\n{persona_prompt}\n\n"

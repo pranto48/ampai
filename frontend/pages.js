@@ -585,7 +585,10 @@ function buildAdminPage() {
     <div class="card">
       <div class="card-title">Run Backup Now</div>
       <p style="font-size:.85rem;color:var(--muted);margin-bottom:14px">Exports all sessions to configured destination.</p>
-      <button id="run-backup-btn" class="btn btn-primary">▶ Run Backup</button>
+      <div style="display:flex; gap: 8px;">
+        <button id="run-backup-btn" class="btn btn-primary">▶ Run Backup</button>
+        <button id="instant-backup-btn" class="btn btn-secondary">⬇ Download One Click Full Backup</button>
+      </div>
       <div id="backup-status" style="font-size:.85rem;margin-top:10px"></div>
     </div>
     <div class="card">
