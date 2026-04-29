@@ -163,7 +163,7 @@ def _resolve_generation_options(model_type: str, chat_output_mode: str = "normal
 def get_llm(model_type: str, api_key: str = None, model_name: str = None, generation_options: Dict[str, Any] = None):
     generation_options = generation_options or {}
     if model_type == "ollama":
-        base_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+        base_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         configured_models = _parse_model_list(
             get_config("ollama_model_list"),
             ["llama3.2", "gemma", "mistral", "qwen2.5"],
