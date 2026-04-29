@@ -193,7 +193,7 @@ function App() {
     const res = await authFetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sessionId, message, model_type: "ollama", memory_mode: "full", use_web_search: false, attachments: [] }),
+      body: JSON.stringify({ session_id: sessionId, message, memory_mode: "full", use_web_search: false, attachments: [] }),
     });
     const data = await decodeResponse<any>(res);
     if (!res.ok) {
