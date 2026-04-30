@@ -234,6 +234,7 @@ async function adminInit() {
   document.getElementById('backup-profile-reset-btn')?.addEventListener('click', resetBackupProfileForm);
   document.getElementById('backup-monitor-refresh-btn')?.addEventListener('click', () => loadBackupJobs(true));
   document.getElementById('backup-download-all-btn')?.addEventListener('click', downloadAllBackups);
+  document.getElementById('instant-backup-btn')?.addEventListener('click', () => _downloadWithAuth('/api/admin/backup/download-instant'));
 }
 
 let restorePreflightId = null;

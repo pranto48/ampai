@@ -1,12 +1,10 @@
-import React from 'https://esm.sh/react@18.3.1';
-import { createRoot } from 'https://esm.sh/react-dom@18.3.1/client';
-import { renderPageShell } from './page-shell.js';
-
-const rootEl = document.getElementById('root');
+import { jsx as _jsx } from "react/jsx-runtime";
+import { createRoot } from "react-dom/client";
+import { PageShell } from "./PageShell";
+export default function AdminPage() {
+    return _jsx(PageShell, { title: "AmpAI Admin", description: "Admin area rendered in TSX.", spaRoute: "/#/admin" });
+}
+const rootEl = document.getElementById("root");
 if (rootEl) {
-  createRoot(rootEl).render(renderPageShell({
-    title: 'AmpAI Admin',
-    description: 'Admin page rendered from frontend/build/admin.js',
-    spaRoute: '/#/admin'
-  }));
+    createRoot(rootEl).render(_jsx(AdminPage, {}));
 }

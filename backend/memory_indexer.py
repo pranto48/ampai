@@ -10,6 +10,7 @@ from langchain_postgres import PGVector
 from sqlalchemy import text
 
 from database import DATABASE_URL, engine, get_config
+from memory_persistence import memory_persistence_manager
 
 
 EMBED_CACHE_TTL_SECONDS = int(os.getenv("MEMORY_EMBED_CACHE_TTL_SECONDS", "300") or "300")
@@ -32,8 +33,31 @@ def get_embedding_model(model_type: str = "ollama"):
         if not key:
             raise ValueError("Google API key missing for embeddings")
         return GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=key)
+    elif model_type in ("openrouter", "anthropic", "generic"):
+        # These providers don't offer embeddings; try OpenAI embeddings if key
+        # is available, otherwise fall through to Ollama.
+        openai_key = get_config("openai_api_key") or os.getenv("OPENAI_API_KEY")
+        if openai_key:
+            from langchain_openai import OpenAIEmbeddings
+            return OpenAIEmbeddings(api_key=openai_key)
+        gemini_key = get_config("gemini_api_key") or os.getenv("GOOGLE_API_KEY")
+        if gemini_key:
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+            return GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=gemini_key)
+        # Last resort: try Ollama but test connectivity first
+        base_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+        try:
+            import urllib.request
+            urllib.request.urlopen(base_url, timeout=2)
+        except Exception:
+            raise ValueError(
+                f"No embedding provider available for model_type={model_type}. "
+                "Configure an OpenAI or Gemini API key, or ensure Ollama is running."
+            )
+        from langchain_community.embeddings import OllamaEmbeddings
+        return OllamaEmbeddings(model="nomic-embed-text", base_url=base_url)
     else:
-        # Default to Ollama nomic-embed-text for local indexing
+        # Default: Ollama
         from langchain_community.embeddings import OllamaEmbeddings
 
         base_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
@@ -162,12 +186,13 @@ class MemoryIndexer:
                 mc.status,
                 mc.created_at,
                 COALESCE(mc.retrieval_priority, 1.0) AS retrieval_priority,
+                COALESCE(mc.importance_score, 0.5) AS importance_score,
                 COALESCE(sm.category, 'Uncategorized') AS category,
                 ts_rank_cd(to_tsvector('simple', mc.candidate_text), plainto_tsquery('simple', :query)) AS lex_rank
             FROM memory_candidates mc
             LEFT JOIN session_metadata sm ON sm.session_id = mc.session_id
             WHERE {' AND '.join(where_parts)}
-            ORDER BY retrieval_priority DESC, lex_rank DESC NULLS LAST, mc.created_at DESC, mc.id DESC
+            ORDER BY (retrieval_priority * importance_score) DESC, lex_rank DESC NULLS LAST, mc.created_at DESC, mc.id DESC
             LIMIT :limit
             """
         )

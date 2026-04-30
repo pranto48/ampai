@@ -694,25 +694,6 @@ def migrate_backup_jobs_schema() -> None:
         return
     try:
         with engine.connect() as conn:
-            conn.execute(
-                text(
-                    """
-                    CREATE TABLE IF NOT EXISTS backup_jobs (
-                        id SERIAL PRIMARY KEY,
-                        profile_id INTEGER,
-                        status VARCHAR NOT NULL DEFAULT 'queued',
-                        started_at TIMESTAMPTZ,
-                        finished_at TIMESTAMPTZ,
-                        bytes_written BIGINT NOT NULL DEFAULT 0,
-                        artifact_path VARCHAR,
-                        verified BOOLEAN NOT NULL DEFAULT FALSE,
-                        verification_error VARCHAR,
-                        error_message VARCHAR,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )
-                    """
-                )
-            )
             conn.execute(text("ALTER TABLE backup_jobs ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE"))
             conn.execute(text("ALTER TABLE backup_jobs ADD COLUMN IF NOT EXISTS verification_error VARCHAR"))
             conn.commit()

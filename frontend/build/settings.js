@@ -1,12 +1,10 @@
-import React from 'https://esm.sh/react@18.3.1';
-import { createRoot } from 'https://esm.sh/react-dom@18.3.1/client';
-import { renderPageShell } from './page-shell.js';
-
-const rootEl = document.getElementById('root');
+import { jsx as _jsx } from "react/jsx-runtime";
+import { createRoot } from "react-dom/client";
+import { PageShell } from "./PageShell";
+export default function SettingsPage() {
+    return _jsx(PageShell, { title: "AmpAI Settings", description: "Settings page rendered in TSX.", spaRoute: "/#/settings" });
+}
+const rootEl = document.getElementById("root");
 if (rootEl) {
-  createRoot(rootEl).render(renderPageShell({
-    title: 'AmpAI Settings',
-    description: 'Settings page rendered from frontend/build/settings.js',
-    spaRoute: '/#/settings'
-  }));
+    createRoot(rootEl).render(_jsx(SettingsPage, {}));
 }

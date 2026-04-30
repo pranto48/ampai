@@ -125,6 +125,7 @@ from database import (
     get_memory_rollup_metrics,
     engine,
 )
+from memory_persistence import memory_persistence_manager
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
     refresh_access_token as refresh_gmail_access_token,
@@ -145,7 +146,18 @@ from langchain_community.chat_message_histories import SQLChatMessageHistory
 # We intentionally do not include auth.py routers to avoid duplicate/conflicting
 # /api/auth and /api/admin/users route registrations.
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8000"],  # Frontend origin
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 logger = logging.getLogger("ampai")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 
@@ -1341,6 +1353,8 @@ def startup_event():
         logger.warning("Skipping default-user bootstrap due to startup error: %s", exc)
     bootstrap_default_admin()
     start_scheduler()
+    # Initialize memory persistence manager
+    memory_persistence_manager.initialize()
     worker = threading.Thread(target=_insight_worker, daemon=True, name="ampai-insight-worker")
     worker.start()
     backup_worker = threading.Thread(target=_backup_job_worker, daemon=True, name="ampai-backup-worker")
@@ -1448,6 +1462,40 @@ def api_delete_persona(persona_id: int, user: UserContext = Depends(require_auth
 @app.post("/api/chat")
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
+        logger.info("CHAT REQUEST model_type=%s, model_name=%s, memory_mode=%s, user=%s",
+                     request.model_type, request.model_name, request.memory_mode, user.username)
+
+        # Auto-resolve model_type: if frontend sends "ollama" but no Ollama is
+        # running, prefer the admin-configured default_model or any provider
+        # that has a valid API key.
+        effective_model_type = (request.model_type or "ollama").strip().lower()
+        if effective_model_type == "ollama":
+            configured_default = (get_config("default_model") or "").strip().lower()
+            if configured_default and configured_default != "ollama":
+                effective_model_type = configured_default
+                logger.info("Auto-resolved model_type from 'ollama' to configured default '%s'", effective_model_type)
+            else:
+                # Check if Ollama is reachable; if not, try to find an alternative
+                ollama_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+                try:
+                    import urllib.request as _ur
+                    _ur.urlopen(ollama_url, timeout=2)
+                except Exception:
+                    # Ollama not reachable — try known providers in priority order
+                    provider_keys = [
+                        ("openrouter", "openrouter_api_key"),
+                        ("openai", "openai_api_key"),
+                        ("gemini", "gemini_api_key"),
+                        ("anthropic", "anthropic_api_key"),
+                        ("generic", "generic_api_key"),
+                    ]
+                    for prov, key_name in provider_keys:
+                        if get_config(key_name):
+                            effective_model_type = prov
+                            logger.info("Ollama unreachable; auto-resolved model_type to '%s'", prov)
+                            break
+        request.model_type = effective_model_type
+
         _ensure_session_owner_for_user(request.session_id, user)
         persona_prompt = ""
         if request.persona_id:
@@ -2859,6 +2907,24 @@ def get_backup_jobs(limit: int = Query(default=20), offset: int = Query(default=
 @app.get("/api/backups/kpis")
 def get_backup_kpis(_: UserContext = Depends(require_admin_user)):
     return {"kpis": get_backup_verification_kpis()}
+
+
+@app.get("/api/admin/backup/download-instant")
+def backup_download_instant(_: UserContext = Depends(require_admin_user)):
+    try:
+        from backup_helpers import build_backup_payload
+        sessions = export_all_sessions_for_backup()
+        serialized, manifest = build_backup_payload(sessions=sessions, actor="admin_download_instant")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"ampai_full_backup_{timestamp}.json"
+        return Response(
+            content=serialized,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
+    except Exception as e:
+        logger.error(f"Instant backup failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/backups/download")

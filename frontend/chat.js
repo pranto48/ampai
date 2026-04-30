@@ -11,11 +11,10 @@ let chatOutputMode = 'normal';
 function chatInit() {
   // Only load sessions each time; bind handlers only once
   loadSessions();
-  loadPersonaOptions();
   _updateChatSessionDisplay();
   _loadPersonaOptions();
   _loadSessionTaskSuggestions(State.sessionId);
-  _restoreWebSearchPreference();
+  _restoreLocalPreferences();
   _loadChatPreferences();
   _loadMediaLibrary();
   if (!_chatHandlersBound) {
@@ -80,6 +79,12 @@ function _bindChatHandlers() {
   document.getElementById('web-search-toggle')?.addEventListener('change', (e) => {
     localStorage.setItem(WEB_SEARCH_PREF_KEY, e.target.checked ? '1' : '0');
     toast(e.target.checked ? 'Web search enabled' : 'Web search disabled', 'info');
+  });
+  document.getElementById('model-select')?.addEventListener('change', (e) => {
+    localStorage.setItem('ampai_model_type', e.target.value || '');
+  });
+  document.getElementById('memory-mode-select')?.addEventListener('change', (e) => {
+    localStorage.setItem('ampai_memory_mode', e.target.value || '');
   });
 
   // File attach
@@ -151,12 +156,23 @@ function _bindChatHandlers() {
   document.getElementById('retrieval-preset-deep')?.addEventListener('click', () => applyRetrievalPreset('deep'));
 }
 
-function _restoreWebSearchPreference() {
+function _restoreLocalPreferences() {
   const toggle = document.getElementById('web-search-toggle');
-  if (!toggle) return;
-  const pref = localStorage.getItem(WEB_SEARCH_PREF_KEY);
-  if (pref === '1') toggle.checked = true;
-  if (pref === '0') toggle.checked = false;
+  if (toggle) {
+    const pref = localStorage.getItem(WEB_SEARCH_PREF_KEY);
+    if (pref === '1') toggle.checked = true;
+    if (pref === '0') toggle.checked = false;
+  }
+  const modelSel = document.getElementById('model-select');
+  if (modelSel) {
+    const m = localStorage.getItem('ampai_model_type');
+    if (m) modelSel.value = m;
+  }
+  const memSel = document.getElementById('memory-mode-select');
+  if (memSel) {
+    const m = localStorage.getItem('ampai_memory_mode');
+    if (m) memSel.value = m;
+  }
 }
 
 async function _loadMediaLibrary() {
