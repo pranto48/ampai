@@ -1,5 +1,6 @@
 import subprocess
 import re
+import shutil
 import json
 import time
 import urllib.request
@@ -80,8 +81,21 @@ def _send_resend_email(subject: str, body_text: str):
         return False
 
 def ping_target(ip_address: str) -> dict:
+    ping_binary = shutil.which('ping')
+    if not ping_binary:
+        return {
+            "status": "Error",
+            "avg_ping": "N/A",
+            "details": "Ping utility is not installed in this runtime",
+        }
+
     try:
-        result = subprocess.run(['ping', '-c', '3', '-W', '2', ip_address], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(
+            [ping_binary, '-c', '3', '-W', '2', ip_address],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         output = result.stdout
         if result.returncode == 0:
             avg_ping_match = re.search(r'(?:rtt|round-trip) min/avg/max/(?:mdev|stddev) = [0-9.]+?/([0-9.]+)', output)
