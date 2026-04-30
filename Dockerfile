@@ -5,6 +5,8 @@ WORKDIR /app
 
 # Install backend dependencies
 COPY backend/requirements.txt /app/backend/requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
 # Copy source code
