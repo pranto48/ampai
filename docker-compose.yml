@@ -45,7 +45,12 @@ services:
     environment:
       - DATABASE_URL=postgresql://ampai:ampai@db:5432/ampai
       - REDIS_URL=redis://:${REDIS_PASSWORD:-ampairedis}@redis:6379/0
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # Set default model provider to openrouter (options: ollama, openai, gemini, anthropic, openrouter, generic, anythingllm)
+      - DEFAULT_MODEL=${DEFAULT_MODEL:-openrouter}
+      # OpenRouter API key — set this in your .env file or environment
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # Ollama URL (only needed if using Ollama locally — Ollama must be running on host)
+      # - OLLAMA_BASE_URL=http://host.docker.internal:11434
       # Auth / RBAC configuration
       - JWT_SECRET=change-this-in-production
       - JWT_EXPIRY_MINUTES=60
