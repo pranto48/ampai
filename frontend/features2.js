@@ -532,7 +532,7 @@ async function _noteAISummary() {
     body: JSON.stringify({
       session_id: 'notes_ai_' + (_currentNoteId || 'new'),
       message: `Please summarize and extract key insights from this note titled "${title}":\n\n${body.slice(0, 3000)}`,
-      model_type: document.getElementById('model-select')?.value || '',
+      model_type: document.getElementById('model-select')?.value || 'ollama',
       memory_mode: 'none',
     }),
   });

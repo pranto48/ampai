@@ -328,7 +328,7 @@ async function _sendChat() {
   const payload = {
     session_id:   State.sessionId,
     message:      message || 'Please review the attached files.',
-    model_type:   document.getElementById('model-select')?.value || '',
+    model_type:   document.getElementById('model-select')?.value || 'ollama',
     memory_mode:  memoryMode,
     use_web_search: !!(document.getElementById('web-search-toggle')?.checked),
     attachments:  atts,
@@ -348,7 +348,7 @@ async function _sendChat() {
       body: JSON.stringify({
         session_id:   State.sessionId,
         message:      message || 'Please review the attached files.',
-        model_type:   document.getElementById('model-select')?.value        || '',
+        model_type:   document.getElementById('model-select')?.value        || 'ollama',
         memory_mode:  document.getElementById('memory-mode-select')?.value  || 'full',
         memory_top_k: Number(document.getElementById('memory-top-k')?.value || 5),
         memory_recency_bias: Number(document.getElementById('memory-recency-bias')?.value || 0),

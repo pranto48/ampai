@@ -627,13 +627,7 @@ def get_config(key: str, default=None):
         with engine.connect() as conn:
             stmt = select(app_configs.c.config_value).where(app_configs.c.config_key == key)
             result = conn.execute(stmt).first()
-            if result:
-                return decrypt_config_value(result[0])
-            # Fall back to environment variable (e.g. OPENROUTER_API_KEY, DEFAULT_MODEL)
-            env_val = os.getenv(key.upper())
-            if env_val is not None:
-                return env_val
-            return default
+            return decrypt_config_value(result[0]) if result else default
     except Exception as e:
         logger.warning(f"Error getting config {key}: {e}")
         return default

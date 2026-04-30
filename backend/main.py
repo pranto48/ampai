@@ -200,7 +200,7 @@ class TargetModel(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str
     message: str
-    model_type: Optional[str] = None  # None = use DEFAULT_MODEL config/env
+    model_type: str = "ollama"
     api_key: Optional[str] = None
     model_name: Optional[str] = None
     memory_mode: str = "indexed"
@@ -395,7 +395,7 @@ class SuggestionTaskCreateRequest(BaseModel):
 
 
 class EmailSummaryRequest(BaseModel):
-    model_type: Optional[str] = None  # None = use DEFAULT_MODEL config/env
+    model_type: str = "ollama"
     api_key: Optional[str] = None
     session_id: str = "system_email_reports"
 
@@ -404,7 +404,7 @@ class EmailSummaryTodayRequest(BaseModel):
     provider: str = "outlook"
     timezone: str = "UTC"
     max_results: int = 50
-    model_type: Optional[str] = None  # None = use DEFAULT_MODEL config/env
+    model_type: str = "ollama"
     model_name: Optional[str] = None
     api_key: Optional[str] = None
     session_id: str = "system_email_reports"
@@ -1524,16 +1524,10 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         effective_recency_bias = float(raw_recency_bias if raw_recency_bias is not None else 0.6)
         effective_recency_bias = max(0.0, min(1.0, effective_recency_bias))
         category_filter_value = (request.category_filter or request.memory_category_filter or "").strip()
-        # Resolve effective model type: request → DB config → env var → fallback
-        effective_model_type = (
-            request.model_type
-            or get_config("default_model")
-            or os.getenv("DEFAULT_MODEL", "ollama")
-        ).strip().lower()
         result = chat_with_agent(
             session_id=request.session_id,
             message=message_for_agent,
-            model_type=effective_model_type,
+            model_type=request.model_type,
             api_key=request.api_key,
             model_name=request.model_name,
             memory_mode=effective_memory_mode,
@@ -1593,7 +1587,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         touch_session(request.session_id)
         created_suggestions = _append_session_suggestions(request.session_id, result.get("task_suggestions") or [])
         result["task_suggestions"] = created_suggestions
-        log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={effective_model_type}")
+        log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={request.model_type}")
         if created_suggestions:
             log_audit_event(
                 username=user.username,

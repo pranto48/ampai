@@ -32,7 +32,6 @@ function buildChatPage() {
       </div>
       <select id="model-select" style="padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.25);
         border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.82rem;outline:none">
-        <option value="">🤖 System Default</option>
         <option value="ollama">🦙 Ollama</option>
         <option value="openai">✨ OpenAI</option>
         <option value="gemini">🌟 Gemini</option>

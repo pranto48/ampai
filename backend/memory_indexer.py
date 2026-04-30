@@ -60,7 +60,7 @@ def get_embedding_model(model_type: str = "ollama"):
         # Default: Ollama
         from langchain_community.embeddings import OllamaEmbeddings
 
-        base_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        base_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
         return OllamaEmbeddings(model="nomic-embed-text", base_url=base_url)
 
 
