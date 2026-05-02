@@ -121,6 +121,20 @@ def _extract_explicit_memory_request(message: str) -> str:
 def _normalize_memory_fact(fact: str) -> str:
     return re.sub(r"\s+", " ", (fact or "").strip())
 
+def _determine_memory_action(normalized_fact: str, persist_memory: bool, require_memory_approval: bool, allowed_memory_categories: list | None) -> str:
+    if not normalized_fact:
+        return ""
+    save_allowed = persist_memory and not require_memory_approval
+    allowed_categories_set = {str(c).strip().lower() for c in (allowed_memory_categories or []) if str(c).strip()}
+    if save_allowed and allowed_categories_set:
+        inferred_category = "preferences" if re.search(r"\b(like|prefer|favorite|always|usually)\b", normalized_fact, re.IGNORECASE) else "general"
+        save_allowed = inferred_category in allowed_categories_set
+    if save_allowed:
+        return "saved"
+    if require_memory_approval:
+        return "pending_approval"
+    return "blocked_by_policy"
+
 def _build_fallback_suggestion(message: str, response: str) -> List[Dict[str, Any]]:
     if not (_looks_like_task_intent(message) or _looks_like_task_intent(response)):
         return []
@@ -482,7 +496,6 @@ def chat_with_agent(
 
     explicit_memory_request = _extract_explicit_memory_request(message)
     match = re.search(r'\[SAVE_MEMORY:\s*(.*?)\]', content, re.IGNORECASE | re.DOTALL)
-    allowed_categories_set = {str(c).strip().lower() for c in (allowed_memory_categories or []) if str(c).strip()}
     fact_to_save = ""
     if explicit_memory_request:
         fact_to_save = explicit_memory_request
@@ -492,22 +505,14 @@ def chat_with_agent(
     normalized_fact = _normalize_memory_fact(fact_to_save)
     memory_action = ""
     if normalized_fact:
-        save_allowed = persist_memory and not require_memory_approval
-        if save_allowed and allowed_categories_set:
-            inferred_category = "preferences" if re.search(r"(like|prefer|favorite|always|usually)", normalized_fact, re.IGNORECASE) else "general"
-            save_allowed = inferred_category in allowed_categories_set
-        if save_allowed:
+        memory_action = _determine_memory_action(normalized_fact, persist_memory, require_memory_approval, allowed_memory_categories)
+        if memory_action == "saved":
             add_core_memory(normalized_fact)
             try:
                 indexer = MemoryIndexer(model_type)
                 indexer.add_fact(normalized_fact)
             except Exception as e:
                 print(f"Failed to add fact to PGVector: {e}")
-            memory_action = "saved"
-        elif require_memory_approval:
-            memory_action = "pending_approval"
-        else:
-            memory_action = "blocked_by_policy"
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
         if not content and explicit_memory_request:
             if memory_action == "saved":
