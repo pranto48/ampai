@@ -1199,3 +1199,100 @@ function _fmtRelative(iso) {
   if (diff < 86400000) return Math.floor(diff/3600000) + 'h ago';
   return Math.floor(diff/86400000) + 'd ago';
 }
+
+// ═══════════════════════════════════════════════════
+// TELEGRAM INTEGRATION (admin/settings embedding)
+// ═══════════════════════════════════════════════════
+let _telegramSettingsBound = false;
+
+async function telegramSettingsLoad() {
+  await _fetchTelegramStatus();
+  await _fetchTelegramSettings();
+  if (_telegramSettingsBound) return;
+  _telegramSettingsBound = true;
+
+  document.getElementById('tg-save-btn')?.addEventListener('click', _saveTelegramSettings);
+  document.getElementById('tg-test-btn')?.addEventListener('click', _testTelegramGetMe);
+  document.getElementById('tg-register-btn')?.addEventListener('click', _registerTelegramWebhook);
+  document.getElementById('tg-remove-btn')?.addEventListener('click', _removeTelegramWebhook);
+}
+
+async function _fetchTelegramSettings() {
+  const { ok, data } = await apiJSON('/api/integrations/telegram/settings');
+  if (!ok) return;
+  document.getElementById('tg-enabled') && (document.getElementById('tg-enabled').checked = !!data.enabled);
+  document.getElementById('tg-webhook-url') && (document.getElementById('tg-webhook-url').value = data.webhook_url || '');
+  document.getElementById('tg-webhook-secret') && (document.getElementById('tg-webhook-secret').value = data.webhook_secret || '');
+  if (data.bot_token_masked) {
+    const tokenEl = document.getElementById('tg-bot-token');
+    if (tokenEl && !tokenEl.value) tokenEl.placeholder = data.bot_token_masked;
+  }
+}
+
+async function _saveTelegramSettings() {
+  const payload = {
+    enabled: !!document.getElementById('tg-enabled')?.checked,
+    bot_token: document.getElementById('tg-bot-token')?.value?.trim() || undefined,
+    webhook_url: document.getElementById('tg-webhook-url')?.value?.trim() || '',
+    webhook_secret: document.getElementById('tg-webhook-secret')?.value?.trim() || '',
+  };
+  const { ok, data } = await apiJSON('/api/integrations/telegram/settings', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  toast(ok ? 'Telegram settings saved' : (data?.detail || 'Failed to save Telegram settings'), ok ? 'success' : 'error');
+  if (ok) {
+    const tokenEl = document.getElementById('tg-bot-token');
+    if (tokenEl) tokenEl.value = '';
+    _fetchTelegramSettings();
+    _fetchTelegramStatus();
+  }
+}
+
+async function _testTelegramGetMe() {
+  const { ok, data } = await apiJSON('/api/integrations/telegram/test', { method: 'POST' });
+  toast(ok ? `Connected as @${data?.username || data?.result?.username || 'bot'}` : (data?.detail || 'Telegram getMe failed'), ok ? 'success' : 'error');
+  _fetchTelegramStatus();
+}
+
+async function _registerTelegramWebhook() {
+  const payload = {
+    webhook_url: document.getElementById('tg-webhook-url')?.value?.trim() || '',
+    webhook_secret: document.getElementById('tg-webhook-secret')?.value?.trim() || '',
+  };
+  if (!payload.webhook_url) return toast('Webhook URL is required', 'error');
+  const { ok, data } = await apiJSON('/api/integrations/telegram/webhook/register', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  toast(ok ? 'Webhook registered' : (data?.detail || 'Failed to register webhook'), ok ? 'success' : 'error');
+  if (ok) _fetchTelegramStatus();
+}
+
+async function _removeTelegramWebhook() {
+  const { ok, data } = await apiJSON('/api/integrations/telegram/webhook/remove', { method: 'POST' });
+  toast(ok ? 'Webhook removed' : (data?.detail || 'Failed to remove webhook'), ok ? 'success' : 'error');
+  if (ok) _fetchTelegramStatus();
+}
+
+async function _fetchTelegramStatus() {
+  const { ok, data } = await apiJSON('/api/integrations/telegram/status');
+  const badge = document.getElementById('tg-status-badge');
+  const webhook = document.getElementById('tg-status-webhook');
+  const errTs = document.getElementById('tg-status-last-error');
+  if (!badge || !webhook || !errTs) return;
+
+  if (!ok) {
+    badge.textContent = 'Not connected';
+    badge.className = 'badge badge-red';
+    webhook.textContent = '—';
+    errTs.textContent = '—';
+    return;
+  }
+
+  const connected = !!(data.connected ?? data.ok);
+  badge.textContent = connected ? 'Connected' : 'Not connected';
+  badge.className = connected ? 'badge badge-green' : 'badge badge-red';
+  webhook.textContent = data.webhook_url || '—';
+  errTs.textContent = data.last_webhook_error_at ? new Date(data.last_webhook_error_at).toLocaleString() : '—';
+}
