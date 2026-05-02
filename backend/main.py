@@ -225,6 +225,39 @@ class MemoryInboxUpdateRequest(BaseModel):
     edited_text: Optional[str] = ""
 
 
+class TelegramIntegrationSaveRequest(BaseModel):
+    bot_token: str = ""
+    webhook_url: str = ""
+    enabled: bool = False
+
+
+def _mask_telegram_token(token: str) -> str:
+    normalized = (token or "").strip()
+    if not normalized:
+        return ""
+    if len(normalized) <= 8:
+        return "****"
+    return f"{normalized[:4]}...{normalized[-4:]}"
+
+
+def _telegram_api_call(method: str, bot_token: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    token = (bot_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Telegram bot token is not configured")
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST" if payload is not None else "GET")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        parsed = json.loads((resp.read() or b"{}").decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=502, detail="Invalid Telegram API response")
+    return parsed
+
+
 class MemoryPolicyRequest(BaseModel):
     auto_capture_enabled: bool = True
     require_approval: bool = True
@@ -1668,6 +1701,89 @@ def _start_telegram_poller_if_enabled() -> None:
         worker.start()
         _telegram_poller_started = True
 
+
+
+
+@app.get("/api/admin/integrations/telegram/status")
+def admin_telegram_status(current_user: UserContext = Depends(require_admin_user)):
+    bot_token = (get_config("telegram_bot_token") or "").strip()
+    webhook_url = (get_config("telegram_webhook_url") or "").strip()
+    enabled = _config_bool("telegram_enabled", default=False)
+    log_audit_event(username=current_user.username, action="integration.telegram.admin_status")
+    return {
+        "ok": True,
+        "enabled": enabled,
+        "webhook_url": webhook_url,
+        "token_configured": bool(bot_token),
+        "token_masked": _mask_telegram_token(bot_token),
+    }
+
+
+@app.post("/api/admin/integrations/telegram/save")
+def admin_telegram_save(request: TelegramIntegrationSaveRequest, current_user: UserContext = Depends(require_admin_user)):
+    set_config("telegram_bot_token", request.bot_token or "")
+    set_config("telegram_webhook_url", (request.webhook_url or "").strip())
+    set_config("telegram_enabled", "true" if request.enabled else "false")
+    log_audit_event(username=current_user.username, action="integration.telegram.admin_save")
+    return {
+        "ok": True,
+        "enabled": bool(request.enabled),
+        "webhook_url": (request.webhook_url or "").strip(),
+        "token_configured": bool((request.bot_token or "").strip()),
+        "token_masked": _mask_telegram_token(request.bot_token or ""),
+    }
+
+
+@app.post("/api/admin/integrations/telegram/test")
+def admin_telegram_test(current_user: UserContext = Depends(require_admin_user)):
+    token = (get_config("telegram_bot_token") or "").strip()
+    try:
+        payload = _telegram_api_call("getMe", token)
+    except urllib.error.HTTPError as exc:
+        detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
+        raise HTTPException(status_code=502, detail=f"Telegram getMe failed: {detail or exc.reason}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Telegram getMe failed: {exc}") from exc
+    if not payload.get("ok"):
+        raise HTTPException(status_code=400, detail=str(payload.get("description") or "Telegram getMe failed"))
+    result = payload.get("result") or {}
+    log_audit_event(username=current_user.username, action="integration.telegram.admin_test")
+    return {"ok": True, "bot_username": result.get("username"), "bot_id": result.get("id")}
+
+
+@app.post("/api/admin/integrations/telegram/connect")
+def admin_telegram_connect(current_user: UserContext = Depends(require_admin_user)):
+    token = (get_config("telegram_bot_token") or "").strip()
+    webhook_url = (get_config("telegram_webhook_url") or "").strip()
+    if not webhook_url:
+        raise HTTPException(status_code=400, detail="Telegram webhook URL is not configured")
+    try:
+        payload = _telegram_api_call("setWebhook", token, {"url": webhook_url})
+    except urllib.error.HTTPError as exc:
+        detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
+        raise HTTPException(status_code=502, detail=f"Telegram setWebhook failed: {detail or exc.reason}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Telegram setWebhook failed: {exc}") from exc
+    if not payload.get("ok"):
+        raise HTTPException(status_code=400, detail=str(payload.get("description") or "Telegram setWebhook failed"))
+    log_audit_event(username=current_user.username, action="integration.telegram.admin_connect")
+    return {"ok": True, "description": payload.get("description", "Webhook connected")}
+
+
+@app.post("/api/admin/integrations/telegram/disconnect")
+def admin_telegram_disconnect(current_user: UserContext = Depends(require_admin_user)):
+    token = (get_config("telegram_bot_token") or "").strip()
+    try:
+        payload = _telegram_api_call("deleteWebhook", token, {})
+    except urllib.error.HTTPError as exc:
+        detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
+        raise HTTPException(status_code=502, detail=f"Telegram deleteWebhook failed: {detail or exc.reason}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Telegram deleteWebhook failed: {exc}") from exc
+    if not payload.get("ok"):
+        raise HTTPException(status_code=400, detail=str(payload.get("description") or "Telegram deleteWebhook failed"))
+    log_audit_event(username=current_user.username, action="integration.telegram.admin_disconnect")
+    return {"ok": True, "description": payload.get("description", "Webhook disconnected")}
 
 @app.post("/api/integrations/telegram/webhook")
 def telegram_webhook(
