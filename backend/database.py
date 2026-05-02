@@ -262,6 +262,16 @@ users = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
 
+telegram_identities = Table(
+    "telegram_identities",
+    metadata,
+    Column("telegram_user_id", String, primary_key=True),
+    Column("telegram_chat_id", String, nullable=True),
+    Column("username", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
 persona_presets = Table(
     "persona_presets",
     metadata,
@@ -736,6 +746,92 @@ def migrate_restore_jobs_schema() -> None:
 
 
 migrate_restore_jobs_schema()
+
+
+def migrate_telegram_identities_schema() -> None:
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS telegram_identities (
+                        telegram_user_id VARCHAR PRIMARY KEY,
+                        telegram_chat_id VARCHAR,
+                        username VARCHAR NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_identities_username ON telegram_identities (username)"))
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Error migrating telegram identities schema: {e}")
+
+
+migrate_telegram_identities_schema()
+
+
+def get_or_create_telegram_user(telegram_user_id: Any, telegram_chat_id: Any = None, default_username: Optional[str] = None) -> Optional[str]:
+    if not engine:
+        return default_username
+    user_id = str(telegram_user_id or "").strip()
+    if not user_id:
+        return default_username
+    chat_id = str(telegram_chat_id).strip() if telegram_chat_id is not None else None
+    fallback_username = (default_username or f"telegram-{user_id}").strip()
+    if not fallback_username:
+        fallback_username = f"telegram-{user_id}"
+    try:
+        with engine.connect() as conn:
+            existing = conn.execute(
+                text("SELECT username FROM telegram_identities WHERE telegram_user_id = :uid"),
+                {"uid": user_id},
+            ).scalar()
+            if existing:
+                conn.execute(
+                    text(
+                        "UPDATE telegram_identities SET telegram_chat_id = :chat_id, updated_at = NOW() "
+                        "WHERE telegram_user_id = :uid"
+                    ),
+                    {"uid": user_id, "chat_id": chat_id},
+                )
+                conn.commit()
+                return str(existing)
+
+            conn.execute(
+                text(
+                    "INSERT INTO telegram_identities (telegram_user_id, telegram_chat_id, username, created_at, updated_at) "
+                    "VALUES (:uid, :chat_id, :username, NOW(), NOW())"
+                ),
+                {"uid": user_id, "chat_id": chat_id, "username": fallback_username},
+            )
+            conn.commit()
+            return fallback_username
+    except Exception as e:
+        logger.warning(f"Error upserting telegram user identity: {e}")
+        return fallback_username
+
+
+def lookup_username_by_telegram_user_id(telegram_user_id: Any) -> Optional[str]:
+    if not engine:
+        return None
+    user_id = str(telegram_user_id or "").strip()
+    if not user_id:
+        return None
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT username FROM telegram_identities WHERE telegram_user_id = :uid"),
+                {"uid": user_id},
+            ).scalar()
+            return str(result) if result else None
+    except Exception as e:
+        logger.warning(f"Error looking up telegram user identity: {e}")
+        return None
 
 
 def list_backup_profiles() -> List[Dict[str, Any]]:
