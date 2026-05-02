@@ -1524,6 +1524,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         effective_recency_bias = float(raw_recency_bias if raw_recency_bias is not None else 0.6)
         effective_recency_bias = max(0.0, min(1.0, effective_recency_bias))
         category_filter_value = (request.category_filter or request.memory_category_filter or "").strip()
+        policy = _get_memory_policy(user.username)
         result = chat_with_agent(
             session_id=request.session_id,
             message=message_for_agent,
@@ -1537,6 +1538,12 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             use_web_search=request.use_web_search,
             attachments=[a.dict() for a in request.attachments],
             chat_output_mode=requested_mode,
+            username=user.username,
+            is_admin=(user.role == "admin"),
+            allowed_memory_categories=policy.get("allowed_categories") or [],
+            persist_memory=bool(policy.get("auto_capture_enabled", True)),
+            require_memory_approval=bool(policy.get("require_approval", False)),
+            pii_strict_mode=bool(policy.get("pii_strict_mode", True)),
         )
         response_text = str(result.get("response") or "")
         retrieval_meta = result.get("retrieval") or {}
@@ -1578,7 +1585,6 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             result["task_suggestions"] = suggestions
             cleaned = re.sub(r"\[CREATE_TASK:\s*.*?\]", "", response_text, flags=re.IGNORECASE | re.DOTALL).strip()
             result["response"] = cleaned or response_text
-        policy = _get_memory_policy(user.username)
         if policy.get("auto_capture_enabled") and policy.get("require_approval"):
             user_msg = (request.message or "").strip()
             if user_msg and re.search(r"\b(remember|preference|my name is|i prefer|always)\b", user_msg, re.IGNORECASE):
