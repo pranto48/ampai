@@ -1204,6 +1204,8 @@ function _fmtRelative(iso) {
 // TELEGRAM INTEGRATION (admin/settings embedding)
 // ═══════════════════════════════════════════════════
 let _telegramSettingsBound = false;
+let _telegramTokenSaved = false;
+let _telegramLastTestResult = '—';
 
 async function telegramSettingsLoad() {
   await _fetchTelegramStatus();
@@ -1222,7 +1224,7 @@ async function _fetchTelegramSettings() {
   if (!ok) return;
   document.getElementById('tg-enabled') && (document.getElementById('tg-enabled').checked = !!data.enabled);
   document.getElementById('tg-webhook-url') && (document.getElementById('tg-webhook-url').value = data.webhook_url || '');
-  document.getElementById('tg-webhook-secret') && (document.getElementById('tg-webhook-secret').value = data.webhook_secret || '');
+  _telegramTokenSaved = !!data.bot_token_masked || !!data.token_saved;
   if (data.bot_token_masked) {
     const tokenEl = document.getElementById('tg-bot-token');
     if (tokenEl && !tokenEl.value) tokenEl.placeholder = data.bot_token_masked;
@@ -1230,11 +1232,11 @@ async function _fetchTelegramSettings() {
 }
 
 async function _saveTelegramSettings() {
+  const tokenEl = document.getElementById('tg-bot-token');
   const payload = {
     enabled: !!document.getElementById('tg-enabled')?.checked,
-    bot_token: document.getElementById('tg-bot-token')?.value?.trim() || undefined,
+    bot_token: tokenEl?.value?.trim() || undefined,
     webhook_url: document.getElementById('tg-webhook-url')?.value?.trim() || '',
-    webhook_secret: document.getElementById('tg-webhook-secret')?.value?.trim() || '',
   };
   const { ok, data } = await apiJSON('/api/integrations/telegram/settings', {
     method: 'POST',
@@ -1242,7 +1244,7 @@ async function _saveTelegramSettings() {
   });
   toast(ok ? 'Telegram settings saved' : (data?.detail || 'Failed to save Telegram settings'), ok ? 'success' : 'error');
   if (ok) {
-    const tokenEl = document.getElementById('tg-bot-token');
+    _telegramTokenSaved = _telegramTokenSaved || !!payload.bot_token;
     if (tokenEl) tokenEl.value = '';
     _fetchTelegramSettings();
     _fetchTelegramStatus();
@@ -1251,6 +1253,7 @@ async function _saveTelegramSettings() {
 
 async function _testTelegramGetMe() {
   const { ok, data } = await apiJSON('/api/integrations/telegram/test', { method: 'POST' });
+  _telegramLastTestResult = ok ? `Passed (${new Date().toLocaleTimeString()})` : `Failed (${new Date().toLocaleTimeString()})`;
   toast(ok ? `Connected as @${data?.username || data?.result?.username || 'bot'}` : (data?.detail || 'Telegram getMe failed'), ok ? 'success' : 'error');
   _fetchTelegramStatus();
 }
@@ -1258,7 +1261,6 @@ async function _testTelegramGetMe() {
 async function _registerTelegramWebhook() {
   const payload = {
     webhook_url: document.getElementById('tg-webhook-url')?.value?.trim() || '',
-    webhook_secret: document.getElementById('tg-webhook-secret')?.value?.trim() || '',
   };
   if (!payload.webhook_url) return toast('Webhook URL is required', 'error');
   const { ok, data } = await apiJSON('/api/integrations/telegram/webhook/register', {
@@ -1277,22 +1279,27 @@ async function _removeTelegramWebhook() {
 
 async function _fetchTelegramStatus() {
   const { ok, data } = await apiJSON('/api/integrations/telegram/status');
-  const badge = document.getElementById('tg-status-badge');
-  const webhook = document.getElementById('tg-status-webhook');
-  const errTs = document.getElementById('tg-status-last-error');
-  if (!badge || !webhook || !errTs) return;
+  const enabledEl = document.getElementById('tg-status-enabled');
+  const tokenEl = document.getElementById('tg-status-token');
+  const lastTestEl = document.getElementById('tg-status-last-test');
+  if (!enabledEl || !tokenEl || !lastTestEl) return;
 
   if (!ok) {
-    badge.textContent = 'Not connected';
-    badge.className = 'badge badge-red';
-    webhook.textContent = '—';
-    errTs.textContent = '—';
+    enabledEl.textContent = 'Disabled';
+    enabledEl.className = 'badge badge-red';
+    tokenEl.textContent = _telegramTokenSaved ? 'Saved' : 'Not saved';
+    tokenEl.className = _telegramTokenSaved ? 'badge badge-green' : 'badge badge-red';
+    lastTestEl.textContent = _telegramLastTestResult;
     return;
   }
 
-  const connected = !!(data.connected ?? data.ok);
-  badge.textContent = connected ? 'Connected' : 'Not connected';
-  badge.className = connected ? 'badge badge-green' : 'badge badge-red';
-  webhook.textContent = data.webhook_url || '—';
-  errTs.textContent = data.last_webhook_error_at ? new Date(data.last_webhook_error_at).toLocaleString() : '—';
+  const enabled = !!(data.enabled ?? data.connected ?? data.ok);
+  enabledEl.textContent = enabled ? 'Enabled' : 'Disabled';
+  enabledEl.className = enabled ? 'badge badge-green' : 'badge badge-red';
+
+  _telegramTokenSaved = _telegramTokenSaved || !!data.bot_token_masked || !!data.token_saved;
+  tokenEl.textContent = _telegramTokenSaved ? 'Saved' : 'Not saved';
+  tokenEl.className = _telegramTokenSaved ? 'badge badge-green' : 'badge badge-red';
+
+  lastTestEl.textContent = data.last_test_result || _telegramLastTestResult;
 }
