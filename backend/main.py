@@ -251,8 +251,12 @@ def _telegram_api_call(method: str, bot_token: str, payload: Optional[Dict[str, 
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method="POST" if payload is not None else "GET")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        parsed = json.loads((resp.read() or b"{}").decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            parsed = json.loads((resp.read() or b"{}").decode("utf-8"))
+    except Exception:
+        logger.exception("telegram api call failed: method=%s token=%s", method, _mask_telegram_token(token))
+        raise
     if not isinstance(parsed, dict):
         raise HTTPException(status_code=502, detail="Invalid Telegram API response")
     return parsed
@@ -1504,14 +1508,14 @@ def _config_bool(key: str, default: bool = False) -> bool:
 
 def _extract_telegram_update_fields(update: Dict[str, Any]) -> Dict[str, Any]:
     message_obj = update.get("message") or update.get("edited_message") or {}
-    callback_query = update.get("callback_query") or {}
-    from_obj = message_obj.get("from") or callback_query.get("from") or {}
-    chat_obj = message_obj.get("chat") or (callback_query.get("message") or {}).get("chat") or {}
-    text = (message_obj.get("text") or (callback_query.get("data") if isinstance(callback_query, dict) else "") or "").strip()
+    from_obj = message_obj.get("from") or {}
+    chat_obj = message_obj.get("chat") or {}
+    text = (message_obj.get("text") or "").strip()
     return {
         "user_id": from_obj.get("id"),
         "chat_id": chat_obj.get("id"),
         "text": text,
+        "is_text_update": bool(text),
     }
 
 
@@ -1528,11 +1532,16 @@ def _resolve_telegram_username(user_id: Any) -> str:
 def _send_telegram_message(bot_token: str, chat_id: Any, text: str) -> None:
     if not bot_token or not chat_id or not text:
         return
+    text = str(text)[:3500]
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+    except Exception:
+        logger.exception("telegram sendMessage failed: chat_id=%s token=%s", chat_id, _mask_telegram_token(bot_token))
+        raise
 
 
 TELEGRAM_MAX_MESSAGE_CHARS = 4000
@@ -1578,7 +1587,7 @@ def _process_telegram_update(update: Dict[str, Any]) -> None:
     user_id = fields.get("user_id")
     chat_id = fields.get("chat_id")
     incoming_text = _sanitize_telegram_text(fields.get("text"))
-    if not user_id or not chat_id or not incoming_text:
+    if not fields.get("is_text_update") or not user_id or not chat_id or not incoming_text:
         return
     if _is_rate_limited(user_id, chat_id):
         return
@@ -1737,13 +1746,15 @@ def admin_telegram_save(request: TelegramIntegrationSaveRequest, current_user: U
 @app.post("/api/admin/integrations/telegram/test")
 def admin_telegram_test(current_user: UserContext = Depends(require_admin_user)):
     token = (get_config("telegram_bot_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Telegram bot token is required")
     try:
         payload = _telegram_api_call("getMe", token)
     except urllib.error.HTTPError as exc:
         detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
         raise HTTPException(status_code=502, detail=f"Telegram getMe failed: {detail or exc.reason}") from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Telegram getMe failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="Telegram getMe failed") from exc
     if not payload.get("ok"):
         raise HTTPException(status_code=400, detail=str(payload.get("description") or "Telegram getMe failed"))
     result = payload.get("result") or {}
@@ -1755,6 +1766,8 @@ def admin_telegram_test(current_user: UserContext = Depends(require_admin_user))
 def admin_telegram_connect(current_user: UserContext = Depends(require_admin_user)):
     token = (get_config("telegram_bot_token") or "").strip()
     webhook_url = (get_config("telegram_webhook_url") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Telegram bot token is required")
     if not webhook_url:
         raise HTTPException(status_code=400, detail="Telegram webhook URL is not configured")
     try:
@@ -1763,7 +1776,7 @@ def admin_telegram_connect(current_user: UserContext = Depends(require_admin_use
         detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
         raise HTTPException(status_code=502, detail=f"Telegram setWebhook failed: {detail or exc.reason}") from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Telegram setWebhook failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="Telegram setWebhook failed") from exc
     if not payload.get("ok"):
         raise HTTPException(status_code=400, detail=str(payload.get("description") or "Telegram setWebhook failed"))
     log_audit_event(username=current_user.username, action="integration.telegram.admin_connect")
@@ -1773,13 +1786,15 @@ def admin_telegram_connect(current_user: UserContext = Depends(require_admin_use
 @app.post("/api/admin/integrations/telegram/disconnect")
 def admin_telegram_disconnect(current_user: UserContext = Depends(require_admin_user)):
     token = (get_config("telegram_bot_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Telegram bot token is required")
     try:
         payload = _telegram_api_call("deleteWebhook", token, {})
     except urllib.error.HTTPError as exc:
         detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
         raise HTTPException(status_code=502, detail=f"Telegram deleteWebhook failed: {detail or exc.reason}") from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Telegram deleteWebhook failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="Telegram deleteWebhook failed") from exc
     if not payload.get("ok"):
         raise HTTPException(status_code=400, detail=str(payload.get("description") or "Telegram deleteWebhook failed"))
     log_audit_event(username=current_user.username, action="integration.telegram.admin_disconnect")
@@ -1792,6 +1807,9 @@ def telegram_webhook(
 ):
     if not _config_bool("telegram_enabled", default=False):
         return {"status": "ignored", "reason": "disabled"}
+    bot_token = (get_config("telegram_bot_token") or "").strip()
+    if not bot_token:
+        raise HTTPException(status_code=400, detail="Telegram bot token is required")
 
     expected_secret = (get_config("telegram_webhook_secret") or "").strip()
     if expected_secret and (x_telegram_bot_api_secret_token or "").strip() != expected_secret:
@@ -1801,7 +1819,7 @@ def telegram_webhook(
     fields = _extract_telegram_update_fields(payload or {})
     chat_id = fields.get("chat_id")
     incoming_text = _sanitize_telegram_text(fields.get("text"))
-    if not chat_id or not incoming_text:
+    if not fields.get("is_text_update") or not chat_id or not incoming_text:
         return {"status": "ok"}
 
     session_id = f"tg_{chat_id}"
@@ -1831,7 +1849,7 @@ def telegram_webhook(
         )
         response_text = str((result or {}).get("response") or "").strip()
         if response_text:
-            _send_telegram_message((get_config("telegram_bot_token") or "").strip(), chat_id, response_text)
+            _send_telegram_message(bot_token, chat_id, response_text)
         ensure_session_owner(session_id, username)
         touch_session(session_id)
         log_audit_event(username=username, action="integration.telegram.webhook_processed", session_id=session_id)
