@@ -179,6 +179,7 @@ SECRET_CONFIG_KEYS = {
     "openrouter_api_key", "anythingllm_api_key", "serpapi_api_key",
     "resend_api_key", "backup_ftp_password", "backup_smb_password",
     "bing_api_key", "generic_api_key",
+    "telegram_bot_token", "telegram_webhook_secret",
 }
 RESTORE_PREFLIGHT_CACHE: Dict[str, Dict[str, Any]] = {}
 RESTORE_PREFLIGHT_TTL_SECONDS = 15 * 60
@@ -1457,6 +1458,106 @@ def api_delete_persona(persona_id: int, user: UserContext = Depends(require_auth
     if not deleted:
         raise HTTPException(status_code=404, detail="Persona not found or not deletable")
     return {"status": "success"}
+
+
+def _config_bool(key: str, default: bool = False) -> bool:
+    raw = (get_config(key, "true" if default else "false") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _extract_telegram_update_fields(update: Dict[str, Any]) -> Dict[str, Any]:
+    message_obj = update.get("message") or update.get("edited_message") or {}
+    callback_query = update.get("callback_query") or {}
+    from_obj = message_obj.get("from") or callback_query.get("from") or {}
+    chat_obj = message_obj.get("chat") or (callback_query.get("message") or {}).get("chat") or {}
+    text = (message_obj.get("text") or (callback_query.get("data") if isinstance(callback_query, dict) else "") or "").strip()
+    return {
+        "user_id": from_obj.get("id"),
+        "chat_id": chat_obj.get("id"),
+        "text": text,
+    }
+
+
+def _resolve_telegram_username(user_id: Any) -> str:
+    user_id_str = str(user_id or "").strip()
+    if not user_id_str:
+        return "telegram-bot"
+    strategy = (get_config("telegram_user_mapping_mode", "per_user") or "per_user").strip().lower()
+    if strategy == "service_account":
+        return "telegram-bot"
+    return f"telegram-{user_id_str}"
+
+
+def _send_telegram_message(bot_token: str, chat_id: Any, text: str) -> None:
+    if not bot_token or not chat_id or not text:
+        return
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        resp.read()
+
+
+def _process_telegram_update(update: Dict[str, Any]) -> None:
+    fields = _extract_telegram_update_fields(update)
+    user_id = fields.get("user_id")
+    chat_id = fields.get("chat_id")
+    incoming_text = fields.get("text")
+    if not user_id or not chat_id or not incoming_text:
+        return
+
+    session_id = f"tg_{chat_id}_{user_id}"
+    username = _resolve_telegram_username(user_id)
+    if not get_user(username):
+        db_create_user(username=username, role="user", password_hash=pwd_context.hash(uuid.uuid4().hex))
+
+    model_type = (get_config("default_model", "ollama") or "ollama").strip().lower()
+    policy = _get_memory_policy(username)
+    result = chat_with_agent(
+        session_id=session_id,
+        message=incoming_text,
+        model_type=model_type,
+        api_key=None,
+        model_name=None,
+        memory_mode="indexed",
+        memory_top_k=5,
+        recency_bias=0.6,
+        category_filter="",
+        use_web_search=False,
+        attachments=[],
+        chat_output_mode="normal",
+        username=username,
+        is_admin=False,
+        allowed_memory_categories=policy.get("allowed_categories") or [],
+        persist_memory=bool(policy.get("auto_capture_enabled", True)),
+        require_memory_approval=bool(policy.get("require_approval", False)),
+        pii_strict_mode=bool(policy.get("pii_strict_mode", True)),
+    )
+    response_text = str((result or {}).get("response") or "").strip()
+    if response_text:
+        _send_telegram_message((get_config("telegram_bot_token") or "").strip(), chat_id, response_text)
+    ensure_session_owner(session_id, username)
+    touch_session(session_id)
+
+
+@app.post("/api/integrations/telegram/webhook")
+def telegram_webhook(payload: Dict[str, Any], x_telegram_bot_api_secret_token: Optional[str] = Header(default=None)):
+    if not _config_bool("telegram_enabled", default=False):
+        return {"status": "ignored", "reason": "disabled"}
+
+    expected_secret = (get_config("telegram_webhook_secret") or "").strip()
+    if expected_secret and (x_telegram_bot_api_secret_token or "").strip() != expected_secret:
+        logger.warning("telegram webhook rejected: invalid secret")
+        raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret")
+
+    try:
+        worker = threading.Thread(target=_process_telegram_update, args=(payload or {},), daemon=True)
+        worker.start()
+    except Exception:
+        logger.exception("telegram webhook failed to enqueue")
+        log_audit_event(username="telegram-webhook", action="integration.telegram.webhook.enqueue_failure")
+
+    return {"status": "ok"}
 
 
 @app.post("/api/chat")
