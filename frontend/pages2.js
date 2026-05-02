@@ -379,3 +379,190 @@ function buildNetworkPage() {
   </div>
 </div>`;
 }
+
+// ── Docker Update Page ──────────────────────────────
+function buildDockerUpdatePage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:24px">
+  <div>
+    <h2 style="font-size:1.15rem;font-weight:700;margin-bottom:4px">🐳 Docker Update Manager</h2>
+    <p style="font-size:.82rem;color:var(--muted)">Pull the latest AmpAI code from GitHub and restart — all your data stays safe.</p>
+  </div>
+  <span id="update-badge" style="padding:5px 14px;border-radius:999px;font-size:.8rem;font-weight:600;
+    background:rgba(100,116,139,.15);color:var(--muted);border:1px solid rgba(100,116,139,.3)">Checking…</span>
+</div>
+
+<!-- Version card -->
+<div class="card" style="margin-bottom:20px">
+  <div class="card-title" style="margin-bottom:14px">📦 Version Info</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div style="background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:14px">
+      <div style="font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Current Commit</div>
+      <code id="update-current-commit" style="font-size:.95rem;color:var(--text)">—</code>
+    </div>
+    <div style="background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:14px">
+      <div style="font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Latest on GitHub</div>
+      <code id="update-latest-commit" style="font-size:.95rem;color:var(--text)">—</code>
+    </div>
+  </div>
+  <div id="update-version-status" style="font-size:.84rem;color:var(--muted);margin-bottom:14px">Checking versions…</div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap">
+    <button id="update-check-btn" class="btn btn-secondary">↻ Check for Updates</button>
+    <button id="update-trigger-btn" class="btn btn-primary" disabled
+      style="background:linear-gradient(135deg,#6366f1,#8b5cf6);border:none;padding:10px 22px;font-size:.9rem;font-weight:600">
+      🚀 Update AmpAI
+    </button>
+  </div>
+</div>
+
+<!-- What's preserved notice -->
+<div style="background:rgba(16,185,129,.07);border:1px solid rgba(16,185,129,.2);border-radius:12px;padding:14px 18px;margin-bottom:20px;font-size:.84rem">
+  <div style="font-weight:700;color:#10b981;margin-bottom:8px">🔒 What's preserved during update</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:6px;color:var(--muted)">
+    <span>✓ All chat sessions &amp; history</span>
+    <span>✓ Core memories &amp; memory inbox</span>
+    <span>✓ Users &amp; authentication</span>
+    <span>✓ Tasks &amp; notes</span>
+    <span>✓ API keys &amp; settings</span>
+    <span>✓ PostgreSQL database</span>
+    <span>✓ Redis session data</span>
+    <span>✓ Uploaded files</span>
+  </div>
+</div>
+
+<!-- Live update log -->
+<div id="update-log-wrap" style="display:none;margin-bottom:20px">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+    <div style="font-weight:700;font-size:.9rem">📋 Update Log</div>
+    <span id="update-state-badge" style="padding:3px 10px;border-radius:999px;font-size:.75rem;font-weight:600;
+      background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3)">Idle</span>
+  </div>
+  <pre id="update-log-box" style="background:rgba(0,0,0,.5);border:1px solid var(--border);border-radius:10px;
+    padding:16px;font-size:.78rem;font-family:monospace;color:#86efac;min-height:120px;max-height:320px;
+    overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.7"></pre>
+</div>
+
+<!-- Code Backups -->
+<div class="card">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+    <div class="card-title">🗂 Code Backups</div>
+    <button id="update-backups-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+  </div>
+  <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+    A backup of the previous code is created automatically before each update.
+    Remove old backups to free disk space.
+  </p>
+  <div style="overflow-x:auto">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th>Timestamp</th>
+          <th>Commit</th>
+          <th>Size</th>
+          <th>Age</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="update-backups-tbody">
+        <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>`;
+}
+
+// ── Full Backup / Restore Page ───────────────────────────
+function buildFullBackupPage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:24px">
+  <div>
+    <h2 style="font-size:1.15rem;font-weight:700;margin-bottom:4px">💾 Full Backup &amp; Restore</h2>
+    <p style="font-size:.82rem;color:var(--muted)">Category-wise memory backup (5 GB slots) + full system backup with AI configs, users &amp; settings.</p>
+  </div>
+  <span id="fb-slot-badge" style="padding:5px 14px;border-radius:999px;font-size:.8rem;font-weight:600;
+    background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3)">Slot: 5 GB max</span>
+</div>
+
+<!-- Memory categories overview -->
+<div class="card" style="margin-bottom:20px">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+    <div class="card-title">📂 Memory Categories</div>
+    <button id="fb-cats-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+  </div>
+  <div style="overflow-x:auto">
+    <table class="tbl">
+      <thead><tr><th>Category</th><th>Sessions</th><th>Messages</th><th>Memories</th></tr></thead>
+      <tbody id="fb-cats-tbody">
+        <tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Create backup -->
+<div class="card" style="margin-bottom:20px">
+  <div class="card-title" style="margin-bottom:12px">🚀 Create Full Backup</div>
+  <div style="font-size:.82rem;color:var(--muted);margin-bottom:14px">
+    Backs up: chat history · AI memories · core memories · users · AI model API keys · app settings · personas · tasks.
+    Large memory data is split into 5 GB slots automatically.
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button id="fb-create-btn" class="btn btn-primary"
+      style="background:linear-gradient(135deg,#6366f1,#8b5cf6);border:none;padding:10px 22px;font-size:.9rem;font-weight:600">
+      💾 Create Full Backup
+    </button>
+    <span id="fb-create-status" style="font-size:.84rem;color:var(--muted)"></span>
+  </div>
+  <div id="fb-manifest-wrap" style="display:none;margin-top:16px;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:14px;font-size:.82rem">
+    <div style="font-weight:700;margin-bottom:8px">📋 Backup Manifest</div>
+    <div id="fb-manifest-body" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px"></div>
+  </div>
+</div>
+
+<!-- Saved backups list -->
+<div class="card" style="margin-bottom:20px">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+    <div class="card-title">🗂 Saved Backups</div>
+    <button id="fb-list-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+  </div>
+  <div style="overflow-x:auto">
+    <table class="tbl">
+      <thead>
+        <tr><th>File</th><th>Created</th><th>Slots</th><th>Sessions</th><th>Memories</th><th>Users</th><th>Size</th><th>Actions</th></tr>
+      </thead>
+      <tbody id="fb-list-tbody">
+        <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Restore -->
+<div class="card">
+  <div class="card-title" style="margin-bottom:12px">♻️ Restore from Backup</div>
+  <div style="margin-bottom:12px">
+    <label style="font-size:.82rem;color:var(--muted);display:block;margin-bottom:6px">Select saved backup file:</label>
+    <select id="fb-restore-select" class="input" style="max-width:480px">
+      <option value="">— choose a backup —</option>
+    </select>
+  </div>
+  <div style="font-size:.82rem;font-weight:600;margin-bottom:8px;color:var(--text)">Restore sections:</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin-bottom:16px;font-size:.84rem">
+    <label><input type="checkbox" id="fb-r-chats" checked> Chat histories</label>
+    <label><input type="checkbox" id="fb-r-memories" checked> AI memories</label>
+    <label><input type="checkbox" id="fb-r-core" checked> Core memories</label>
+    <label><input type="checkbox" id="fb-r-users" checked> Users</label>
+    <label><input type="checkbox" id="fb-r-configs" checked> AI keys &amp; settings</label>
+    <label><input type="checkbox" id="fb-r-personas" checked> Personas</label>
+    <label><input type="checkbox" id="fb-r-tasks" checked> Tasks</label>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button id="fb-restore-btn" class="btn btn-danger"
+      style="padding:10px 22px;font-size:.9rem;font-weight:600">
+      ♻️ Restore Selected
+    </button>
+    <span id="fb-restore-status" style="font-size:.84rem;color:var(--muted)"></span>
+  </div>
+  <div id="fb-restore-result" style="display:none;margin-top:14px;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:14px;font-size:.82rem"></div>
+</div>`;
+}

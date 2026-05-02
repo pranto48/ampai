@@ -48,11 +48,11 @@ function closeModal(id) { document.getElementById(id)?.classList.remove('open');
 // ── Navigation ─────────────────────────────────────
 // Two top-level pages: #page-login and #page-shell.
 // Sub-pages live inside #page-shell as .subpage divs.
-const SUBPAGES = ['chat','memory','inbox','brief','tasks','personas','workspace','analytics','network','models','settings','admin'];
+const SUBPAGES = ['chat','memory','inbox','brief','tasks','personas','workspace','analytics','network','models','settings','admin','dockerupdate','fullbackup'];
 const PAGE_TITLES = {
   chat:'Chat', memory:'Memory Explorer', inbox:'Memory Inbox', brief:'Daily Brief', tasks:'Task Manager',
   personas:'Persona Library', workspace:'Workspaces', analytics:'Analytics', network:'Network Monitor',
-  models:'AI Models', settings:'Settings', admin:'Admin Panel'
+  models:'AI Models', settings:'Settings', admin:'Admin Panel', dockerupdate:'Docker Update', fullbackup:'Full Backup'
 };
 
 function navigate(page) {
@@ -104,19 +104,20 @@ function _hideEl(id) {
 }
 
 function _onPageEnter(page) {
-  if (page === 'chat')      chatInit();
-  if (page === 'memory')    memoryLoad();
-  if (page === 'inbox')     memoryInboxLoad();
-  if (page === 'brief')     dailyBriefLoad();
-  if (page === 'tasks')     tasksLoad();
-  if (page === 'personas')  personasLoad();
-  if (page === 'workspace') workspaceLoad();
-  if (page === 'analytics') analyticsLoad();
-  if (page === 'network')   networkLoad();
-  if (page === 'personas')  personasLoad();
-  if (page === 'admin')     adminInit();
-  if (page === 'models')    modelsLoad();
-  if (page === 'settings')  settingsLoad();
+  if (page === 'chat')         chatInit();
+  if (page === 'memory')       memoryLoad();
+  if (page === 'inbox')        memoryInboxLoad();
+  if (page === 'brief')        dailyBriefLoad();
+  if (page === 'tasks')        tasksLoad();
+  if (page === 'personas')     personasLoad();
+  if (page === 'workspace')    workspaceLoad();
+  if (page === 'analytics')    analyticsLoad();
+  if (page === 'network')      networkLoad();
+  if (page === 'admin')        adminInit();
+  if (page === 'models')       modelsLoad();
+  if (page === 'settings')     settingsLoad();
+  if (page === 'dockerupdate') dockerUpdateLoad();
+  if (page === 'fullbackup')   fullBackupLoad();
 }
 
 // ── Auth ───────────────────────────────────────────
@@ -319,6 +320,12 @@ function _shellHTML() {
         <button class="nav-item admin-only hidden" data-page="admin">
           <span class="icon">🛡️</span><span class="sidebar-label">Admin Panel</span>
         </button>
+        <button class="nav-item admin-only hidden" data-page="dockerupdate">
+          <span class="icon">🐳</span><span class="sidebar-label">Docker Update</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-page="fullbackup">
+          <span class="icon">💾</span><span class="sidebar-label">Full Backup</span>
+        </button>
       </nav>
       <div class="sidebar-footer">
         <button class="nav-item w-full" id="logout-btn">
@@ -372,9 +379,11 @@ function _shellHTML() {
       <div id="sp-analytics" class="subpage hidden page-content">${buildAnalyticsPage()}</div>
       <div id="sp-network"  class="subpage hidden page-content">${buildNetworkPage()}</div>
       <div id="sp-personas" class="subpage hidden page-content">${buildPersonasPage()}</div>
-      <div id="sp-models"   class="subpage hidden page-content">${buildModelsPage()}</div>
-      <div id="sp-settings" class="subpage hidden page-content">${buildSettingsPage()}</div>
-      <div id="sp-admin"    class="subpage hidden page-content">${buildAdminPage()}</div>
+      <div id="sp-models"        class="subpage hidden page-content">${buildModelsPage()}</div>
+      <div id="sp-settings"      class="subpage hidden page-content">${buildSettingsPage()}</div>
+      <div id="sp-admin"         class="subpage hidden page-content">${buildAdminPage()}</div>
+      <div id="sp-dockerupdate"  class="subpage hidden page-content">${buildDockerUpdatePage()}</div>
+      <div id="sp-fullbackup"    class="subpage hidden page-content">${buildFullBackupPage()}</div>
     </div>
   </div>
 </div>

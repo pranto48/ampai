@@ -801,7 +801,361 @@ async function _runSweep() {
 }
 
 // ═══════════════════════════════════════════════════
-// SHARED UTILITIES
+// DOCKER UPDATE PAGE
+// ═══════════════════════════════════════════════════
+let _updateBound = false;
+let _updatePollTimer = null;
+
+async function dockerUpdateLoad() {
+  _fetchUpdateVersion();
+  _fetchUpdateBackups();
+  if (_updateBound) return;
+  _updateBound = true;
+  document.getElementById('update-check-btn')?.addEventListener('click', _fetchUpdateVersion);
+  document.getElementById('update-trigger-btn')?.addEventListener('click', _triggerUpdate);
+  document.getElementById('update-backups-refresh-btn')?.addEventListener('click', _fetchUpdateBackups);
+}
+
+async function _fetchUpdateVersion() {
+  const statusEl = document.getElementById('update-version-status');
+  const currentEl = document.getElementById('update-current-commit');
+  const latestEl  = document.getElementById('update-latest-commit');
+  const badgeEl   = document.getElementById('update-badge');
+  const trigBtn   = document.getElementById('update-trigger-btn');
+
+  if (statusEl) { statusEl.textContent = 'Checking…'; statusEl.style.color = 'var(--muted)'; }
+
+  const { ok, data } = await apiJSON('/api/admin/update/version');
+  if (!ok) {
+    if (statusEl) { statusEl.textContent = 'Failed to check version.'; statusEl.style.color = 'var(--red)'; }
+    return;
+  }
+  if (currentEl) currentEl.textContent = data.current_commit || 'unknown';
+  if (latestEl)  latestEl.textContent  = data.latest_commit  || 'unknown';
+
+  if (data.up_to_date) {
+    if (badgeEl) {
+      badgeEl.textContent = '✓ Up to date';
+      badgeEl.style.background = 'rgba(16,185,129,.15)';
+      badgeEl.style.color = '#10b981';
+      badgeEl.style.border = '1px solid rgba(16,185,129,.3)';
+    }
+    if (statusEl) { statusEl.textContent = 'Your deployment is up to date.'; statusEl.style.color = 'var(--green)'; }
+    if (trigBtn) { trigBtn.disabled = true; trigBtn.title = 'Already up to date'; }
+  } else {
+    if (badgeEl) {
+      badgeEl.textContent = '⬆ Update available';
+      badgeEl.style.background = 'rgba(245,158,11,.15)';
+      badgeEl.style.color = '#f59e0b';
+      badgeEl.style.border = '1px solid rgba(245,158,11,.3)';
+    }
+    if (statusEl) { statusEl.textContent = 'A newer version is available on GitHub.'; statusEl.style.color = 'var(--yellow)'; }
+    if (trigBtn) { trigBtn.disabled = false; trigBtn.title = ''; }
+  }
+}
+
+async function _triggerUpdate() {
+  if (!confirm('⚠️ This will:\n1. Backup the current code\n2. Pull latest code from GitHub\n3. Restart the server\n\nAll settings, memories, users and tasks are preserved in Docker volumes.\n\nProceed?')) return;
+
+  const btn = document.getElementById('update-trigger-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Starting update…'; }
+
+  const logBox = document.getElementById('update-log-box');
+  const logWrap = document.getElementById('update-log-wrap');
+  if (logWrap) logWrap.style.display = 'block';
+  if (logBox) logBox.textContent = 'Connecting…\n';
+
+  const { ok, data } = await apiJSON('/api/admin/update/trigger', { method: 'POST' });
+  if (!ok) {
+    toast(data?.detail || 'Failed to start update', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '🚀 Update AmpAI'; }
+    return;
+  }
+
+  toast('Update started! Watching progress…', 'info');
+  _pollUpdateStatus();
+}
+
+function _pollUpdateStatus() {
+  clearInterval(_updatePollTimer);
+  _updatePollTimer = setInterval(async () => {
+    const { ok, data } = await apiJSON('/api/admin/update/status');
+    if (!ok) return;
+
+    const logBox = document.getElementById('update-log-box');
+    if (logBox) {
+      logBox.textContent = (data.log_lines || []).join('\n');
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    const stateEl = document.getElementById('update-state-badge');
+    if (stateEl) {
+      const stateColors = {
+        idle:    { bg:'rgba(100,116,139,.15)', color:'var(--muted)',  border:'1px solid rgba(100,116,139,.3)', label:'Idle' },
+        running: { bg:'rgba(99,102,241,.15)',  color:'#818cf8',       border:'1px solid rgba(99,102,241,.3)',  label:'🔄 Running…' },
+        success: { bg:'rgba(16,185,129,.15)',  color:'#10b981',       border:'1px solid rgba(16,185,129,.3)', label:'✓ Success' },
+        error:   { bg:'rgba(239,68,68,.15)',   color:'var(--red)',    border:'1px solid rgba(239,68,68,.3)',  label:'✕ Error' },
+      };
+      const s = stateColors[data.state] || stateColors.idle;
+      stateEl.textContent = s.label;
+      stateEl.style.background = s.bg;
+      stateEl.style.color = s.color;
+      stateEl.style.border = s.border;
+    }
+
+    if (data.state === 'success') {
+      clearInterval(_updatePollTimer);
+      toast('✓ Update complete! Server restarting…', 'success');
+      const btn = document.getElementById('update-trigger-btn');
+      if (btn) { btn.textContent = '🚀 Update AmpAI'; }
+      _fetchUpdateBackups();
+      // Reload page after server restarts
+      setTimeout(() => location.reload(), 5000);
+    } else if (data.state === 'error') {
+      clearInterval(_updatePollTimer);
+      toast('Update failed: ' + (data.error || 'Unknown error'), 'error');
+      const btn = document.getElementById('update-trigger-btn');
+      if (btn) { btn.disabled = false; btn.textContent = '🚀 Update AmpAI'; }
+    }
+  }, 1500);
+}
+
+async function _fetchUpdateBackups() {
+  const tbody = document.getElementById('update-backups-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:16px">Loading…</td></tr>';
+
+  const { ok, data } = await apiJSON('/api/admin/update/backups');
+  if (!ok || !data.backups?.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px">No code backups found.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.backups.map(b => {
+    const sizeMB = (b.size_bytes / 1048576).toFixed(2);
+    return `<tr>
+      <td style="font-size:.82rem"><code>${_esc(b.name)}</code></td>
+      <td><code style="font-size:.78rem">${_esc(b.commit)}</code></td>
+      <td style="font-size:.82rem">${sizeMB} MB</td>
+      <td style="font-size:.78rem;color:var(--muted)">${_fmtRelative(b.name)}</td>
+      <td>
+        <button class="btn btn-danger btn-sm" onclick="_deleteUpdateBackup('${_esc(b.name)}')">🗑 Remove</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function _deleteUpdateBackup(name) {
+  if (!confirm(`Delete backup "${name}"?\nThis cannot be undone.`)) return;
+  const { ok } = await apiJSON(`/api/admin/update/backups/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (ok) {
+    toast('Backup deleted', 'success');
+    _fetchUpdateBackups();
+  } else {
+    toast('Failed to delete backup', 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// FULL BACKUP / RESTORE PAGE
+// ═══════════════════════════════════════════════════
+let _fbBound = false;
+
+async function fullBackupLoad() {
+  _fbLoadCategories();
+  _fbLoadList();
+  if (_fbBound) return;
+  _fbBound = true;
+  document.getElementById('fb-cats-refresh-btn')?.addEventListener('click', _fbLoadCategories);
+  document.getElementById('fb-create-btn')?.addEventListener('click', _fbCreate);
+  document.getElementById('fb-list-refresh-btn')?.addEventListener('click', _fbLoadList);
+  document.getElementById('fb-restore-btn')?.addEventListener('click', _fbRestore);
+}
+
+async function _fbLoadCategories() {
+  const tbody = document.getElementById('fb-cats-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:16px">Loading…</td></tr>';
+  const { ok, data } = await apiJSON('/api/admin/fullbackup/memory-categories');
+  if (!ok || !data.categories?.length) {
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">No categories found.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.categories.map(c => `<tr>
+    <td><span class="badge badge-blue">${_esc(c.category)}</span></td>
+    <td>${c.session_count}</td>
+    <td>${c.message_count}</td>
+    <td>${c.memory_count}</td>
+  </tr>`).join('');
+}
+
+async function _fbCreate() {
+  const btn = document.getElementById('fb-create-btn');
+  const st  = document.getElementById('fb-create-status');
+  const wrap = document.getElementById('fb-manifest-wrap');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Building…'; }
+  if (st)  { st.textContent = 'Creating backup — this may take a moment…'; st.style.color = 'var(--muted)'; }
+  if (wrap) wrap.style.display = 'none';
+
+  const { ok, data } = await apiJSON('/api/admin/fullbackup/create', { method: 'POST' });
+  if (btn) { btn.disabled = false; btn.textContent = '💾 Create Full Backup'; }
+  if (!ok) {
+    if (st) { st.textContent = '✕ ' + (data?.detail || 'Failed'); st.style.color = 'var(--red)'; }
+    return;
+  }
+
+  if (st) { st.textContent = `✓ Saved: ${data.filename}`; st.style.color = 'var(--green)'; }
+  toast('Full backup created!', 'success');
+
+  // Render manifest
+  const m = data.manifest || {};
+  const mBody = document.getElementById('fb-manifest-body');
+  if (mBody && wrap) {
+    const items = [
+      ['Slots', m.slot_count],
+      ['Sessions', m.total_sessions],
+      ['Messages', m.total_messages],
+      ['Memories', m.total_memories],
+      ['Core Memories', m.total_core_memories],
+      ['Users', m.total_users],
+      ['Configs', m.total_configs],
+      ['Personas', m.total_personas],
+      ['Tasks', m.total_tasks],
+      ['Created', m.created_at ? new Date(m.created_at).toLocaleString() : '—'],
+    ];
+    mBody.innerHTML = items.map(([k, v]) =>
+      `<div style="background:var(--bg-2);border:1px solid var(--border);border-radius:8px;padding:10px 12px">
+        <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">${k}</div>
+        <div style="font-weight:700;font-size:.95rem">${v ?? '—'}</div>
+       </div>`
+    ).join('');
+
+    // Slots breakdown
+    if ((m.slots || []).length) {
+      mBody.innerHTML += `<div style="grid-column:1/-1;margin-top:8px;font-size:.8rem;color:var(--muted)">
+        <strong>Slot breakdown:</strong> ${m.slots.map(s =>
+          `Slot ${s.slot}: [${(s.categories||[]).join(', ') || 'empty'}] — ${(s.bytes/1048576).toFixed(1)} MB`
+        ).join(' | ')}</div>`;
+    }
+    wrap.style.display = 'block';
+  }
+  _fbLoadList();
+}
+
+async function _fbLoadList() {
+  const tbody = document.getElementById('fb-list-tbody');
+  const sel   = document.getElementById('fb-restore-select');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:16px">Loading…</td></tr>';
+
+  const { ok, data } = await apiJSON('/api/admin/fullbackup/list');
+  if (!ok || !data.backups?.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px">No full backups yet.</td></tr>';
+    if (sel) sel.innerHTML = '<option value="">— no backups found —</option>';
+    return;
+  }
+
+  // Populate restore dropdown
+  if (sel) {
+    sel.innerHTML = '<option value="">— choose a backup —</option>' +
+      data.backups.map(b => `<option value="${_esc(b.filename)}">${_esc(b.filename)}</option>`).join('');
+  }
+
+  tbody.innerHTML = data.backups.map(b => {
+    const mb = (b.size_bytes / 1048576).toFixed(2);
+    const created = b.created_at ? new Date(b.created_at).toLocaleString() : '—';
+    return `<tr>
+      <td style="font-size:.8rem"><code>${_esc(b.filename)}</code></td>
+      <td style="font-size:.78rem">${created}</td>
+      <td>${b.slot_count || '—'}</td>
+      <td>${b.total_sessions || 0}</td>
+      <td>${b.total_memories || 0}</td>
+      <td>${b.total_users || 0}</td>
+      <td>${mb} MB</td>
+      <td style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-secondary btn-sm" onclick="_fbDownload('${_esc(b.filename)}')">⬇ Download</button>
+        <button class="btn btn-danger btn-sm"    onclick="_fbDelete('${_esc(b.filename)}')">🗑 Delete</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function _fbDownload(filename) {
+  await _downloadWithAuth(`/api/admin/fullbackup/download/${encodeURIComponent(filename)}`);
+}
+
+async function _fbDelete(filename) {
+  if (!confirm(`Delete backup "${filename}"?\nThis cannot be undone.`)) return;
+  const { ok } = await apiJSON(`/api/admin/fullbackup/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+  if (ok) { toast('Backup deleted', 'success'); _fbLoadList(); }
+  else toast('Failed to delete backup', 'error');
+}
+
+async function _fbRestore() {
+  const filename = document.getElementById('fb-restore-select')?.value;
+  if (!filename) { toast('Select a backup file first', 'error'); return; }
+
+  const sections = [
+    ['fb-r-chats',    'restore_chats'],
+    ['fb-r-memories', 'restore_memories'],
+    ['fb-r-core',     'restore_core_memories'],
+    ['fb-r-users',    'restore_users'],
+    ['fb-r-configs',  'restore_configs'],
+    ['fb-r-personas', 'restore_personas'],
+    ['fb-r-tasks',    'restore_tasks'],
+  ];
+  const payload = { filename };
+  sections.forEach(([elId, key]) => {
+    payload[key] = !!document.getElementById(elId)?.checked;
+  });
+
+  const chosen = sections.filter(([elId]) => document.getElementById(elId)?.checked).map(([, k]) => k);
+  if (!chosen.length) { toast('Select at least one section to restore', 'error'); return; }
+
+  if (!confirm(
+    `⚠️ Restore from "${filename}"?\n\nSections: ${chosen.join(', ')}\n\nExisting data will NOT be deleted — records are inserted/merged.\n\nProceed?`
+  )) return;
+
+  const btn = document.getElementById('fb-restore-btn');
+  const st  = document.getElementById('fb-restore-status');
+  const res = document.getElementById('fb-restore-result');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Restoring…'; }
+  if (st)  { st.textContent = 'Running restore…'; st.style.color = 'var(--muted)'; }
+  if (res) res.style.display = 'none';
+
+  const { ok, data } = await apiJSON('/api/admin/fullbackup/restore', {
+    method: 'POST', body: JSON.stringify(payload)
+  });
+  if (btn) { btn.disabled = false; btn.textContent = '♻️ Restore Selected'; }
+
+  if (!ok) {
+    if (st) { st.textContent = '✕ Restore failed'; st.style.color = 'var(--red)'; }
+    toast(data?.detail || 'Restore failed', 'error');
+    return;
+  }
+
+  if (st) { st.textContent = data.ok ? '✓ Restore complete' : '⚠ Restore finished with errors'; st.style.color = data.ok ? 'var(--green)' : 'var(--yellow)'; }
+  toast(data.ok ? 'Restore complete!' : 'Restore finished with some errors', data.ok ? 'success' : 'error');
+
+  // Show summary
+  if (res) {
+    const s = data.summary || {};
+    const errs = data.errors || [];
+    res.style.display = 'block';
+    res.innerHTML = `<div style="font-weight:700;margin-bottom:8px">${data.ok ? '✓ Restore Summary' : '⚠ Restore Summary (with errors)'}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:10px">
+        ${Object.entries(s).map(([k, v]) =>
+          `<div style="background:var(--bg-2);border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+            <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase">${k.replace(/_/g,' ')}</div>
+            <div style="font-weight:700">${v}</div>
+          </div>`
+        ).join('')}
+      </div>
+      ${errs.length ? `<details style="font-size:.78rem;color:var(--red)"><summary>${errs.length} error(s)</summary><pre style="white-space:pre-wrap">${errs.slice(0,20).join('\n')}</pre></details>` : ''}`;
+  }
+}
+
+
 // ═══════════════════════════════════════════════════
 function _esc(s) {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');

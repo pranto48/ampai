@@ -3712,6 +3712,448 @@ def memory_analytics(
     return payload
 
 
+# ═══════════════════════════════════════════════════════════
+# FULL BACKUP / RESTORE ENDPOINTS
+# ═══════════════════════════════════════════════════════════
+from full_backup import (
+    build_full_backup,
+    save_full_backup_to_disk,
+    list_full_backups,
+    restore_full_backup,
+    FULL_BACKUP_DIR,
+    SLOT_SIZE_BYTES,
+)
+import threading as _fb_threading
+_fb_lock = _fb_threading.Lock()
+
+
+class FullRestoreRequest(BaseModel):
+    filename: str
+    restore_chats: bool = True
+    restore_memories: bool = True
+    restore_core_memories: bool = True
+    restore_users: bool = True
+    restore_configs: bool = True
+    restore_personas: bool = True
+    restore_tasks: bool = True
+
+
+@app.post("/api/admin/fullbackup/create")
+def api_fullbackup_create(user: UserContext = Depends(require_admin_user)):
+    """Build a full backup and save it to disk. Returns manifest + file info."""
+    if not _fb_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A full backup is already running")
+    try:
+        bundle = build_full_backup(actor=user.username)
+        zip_path = save_full_backup_to_disk(bundle)
+        manifest = bundle["manifest"]
+        log_audit_event(username=user.username, action="admin.fullbackup.create",
+                        details=f"file={os.path.basename(zip_path)}")
+        return {
+            "ok": True,
+            "filename": os.path.basename(zip_path),
+            "manifest": manifest,
+            "slot_size_bytes": SLOT_SIZE_BYTES,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        _fb_lock.release()
+
+
+@app.get("/api/admin/fullbackup/list")
+def api_fullbackup_list(user: UserContext = Depends(require_admin_user)):
+    """List all saved full-backup zip files."""
+    backups = list_full_backups()
+    return {"backups": backups, "total": len(backups)}
+
+
+@app.get("/api/admin/fullbackup/download/{filename}")
+def api_fullbackup_download(filename: str, user: UserContext = Depends(require_admin_user)):
+    """Download a saved full-backup zip file."""
+    if "/" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    zip_path = os.path.join(FULL_BACKUP_DIR, filename)
+    if not os.path.isfile(zip_path):
+        raise HTTPException(status_code=404, detail="Backup file not found")
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.delete("/api/admin/fullbackup/{filename}")
+def api_fullbackup_delete(filename: str, user: UserContext = Depends(require_admin_user)):
+    """Delete a saved full-backup zip file."""
+    if "/" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    zip_path = os.path.join(FULL_BACKUP_DIR, filename)
+    if not os.path.isfile(zip_path):
+        raise HTTPException(status_code=404, detail="Backup not found")
+    os.remove(zip_path)
+    log_audit_event(username=user.username, action="admin.fullbackup.delete", details=f"file={filename}")
+    return {"deleted": filename}
+
+
+@app.post("/api/admin/fullbackup/restore")
+def api_fullbackup_restore(request: FullRestoreRequest, user: UserContext = Depends(require_admin_user)):
+    """Restore from a saved full-backup zip. Selective restore via boolean flags."""
+    if "/" in request.filename or ".." in request.filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    zip_path = os.path.join(FULL_BACKUP_DIR, request.filename)
+    if not os.path.isfile(zip_path):
+        raise HTTPException(status_code=404, detail="Backup file not found")
+    opts = {
+        "restore_chats": request.restore_chats,
+        "restore_memories": request.restore_memories,
+        "restore_core_memories": request.restore_core_memories,
+        "restore_users": request.restore_users,
+        "restore_configs": request.restore_configs,
+        "restore_personas": request.restore_personas,
+        "restore_tasks": request.restore_tasks,
+    }
+    result = restore_full_backup(zip_path, opts)
+    log_audit_event(username=user.username, action="admin.fullbackup.restore",
+                    details=f"file={request.filename} ok={result['ok']}")
+    if not result["ok"] and not result.get("summary"):
+        raise HTTPException(status_code=500, detail="; ".join(result.get("errors", ["Unknown error"])))
+    return result
+
+
+@app.get("/api/admin/fullbackup/memory-categories")
+def api_fullbackup_memory_categories(user: UserContext = Depends(require_admin_user)):
+    """Return memory category stats (count of sessions and candidates per category)."""
+    from full_backup import _fetch_sessions_by_category, _fetch_memories_by_category
+    sessions_by_cat = _fetch_sessions_by_category()
+    memories_by_cat = _fetch_memories_by_category()
+    all_cats = sorted(set(list(sessions_by_cat.keys()) + list(memories_by_cat.keys())))
+    rows = []
+    for cat in all_cats:
+        sessions = sessions_by_cat.get(cat, [])
+        mems = memories_by_cat.get(cat, [])
+        total_msgs = sum(len(s.get("messages", [])) for s in sessions)
+        rows.append({
+            "category": cat,
+            "session_count": len(sessions),
+            "message_count": total_msgs,
+            "memory_count": len(mems),
+        })
+    return {"categories": rows}
+
+
+# ═══════════════════════════════════════════════════════════
+# DOCKER / CODE UPDATE ENDPOINTS
+
+# Admin-only: check version, trigger update, manage backups
+# ═══════════════════════════════════════════════════════════
+
+CODE_BACKUP_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "code_backups")
+REPO_URL = os.getenv("AMPAI_REPO_URL", "https://github.com/pranto48/ampai.git")
+_update_lock = threading.Lock()
+_update_log_lines: List[str] = []
+_update_status: Dict[str, Any] = {"state": "idle", "started_at": None, "finished_at": None, "error": None}
+
+
+def _update_log(msg: str) -> None:
+    line = f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}"
+    _update_log_lines.append(line)
+    if len(_update_log_lines) > 500:
+        _update_log_lines.pop(0)
+    logger.info("[UPDATE] %s", msg)
+
+
+def _get_current_git_commit() -> str:
+    """Return the HEAD commit hash of the deployed code, or 'unknown'."""
+    try:
+        # The host directory is mounted into /app_host inside the container
+        for candidate in [
+            os.path.join(os.path.dirname(__file__), "..", "..", ".git"),
+            os.path.join(os.path.dirname(__file__), "..", ".git"),
+            "/app_host/.git",
+        ]:
+            if os.path.isdir(candidate):
+                git_head = os.path.join(candidate, "HEAD")
+                if os.path.exists(git_head):
+                    with open(git_head) as f:
+                        ref = f.read().strip()
+                    if ref.startswith("ref: "):
+                        ref_file = os.path.join(candidate, ref[5:])
+                        if os.path.exists(ref_file):
+                            with open(ref_file) as f:
+                                return f.read().strip()[:12]
+                    return ref[:12]
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _fetch_remote_commit() -> str:
+    """Fetch the latest commit hash from GitHub without cloning."""
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/pranto48/ampai/commits/main",
+            headers={"Accept": "application/vnd.github.sha", "User-Agent": "ampai-updater/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.read().decode().strip()[:12]
+    except Exception:
+        pass
+    try:
+        req2 = urllib.request.Request(
+            "https://api.github.com/repos/pranto48/ampai/commits/master",
+            headers={"Accept": "application/vnd.github.sha", "User-Agent": "ampai-updater/1.0"},
+        )
+        with urllib.request.urlopen(req2, timeout=10) as resp:
+            return resp.read().decode().strip()[:12]
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _list_code_backups() -> List[Dict[str, Any]]:
+    """Return list of code backups sorted newest-first."""
+    os.makedirs(CODE_BACKUP_DIR, exist_ok=True)
+    backups = []
+    for name in sorted(os.listdir(CODE_BACKUP_DIR), reverse=True):
+        full = os.path.join(CODE_BACKUP_DIR, name)
+        if not os.path.isdir(full):
+            continue
+        size = 0
+        for dirpath, _, filenames in os.walk(full):
+            for fname in filenames:
+                try:
+                    size += os.path.getsize(os.path.join(dirpath, fname))
+                except Exception:
+                    pass
+        commit_file = os.path.join(full, "git_commit.txt")
+        commit = "unknown"
+        if os.path.exists(commit_file):
+            with open(commit_file) as f:
+                commit = f.read().strip()[:12]
+        backups.append({
+            "name": name,
+            "path": full,
+            "created_at": name,  # name is the timestamp
+            "size_bytes": size,
+            "commit": commit,
+        })
+    return backups
+
+
+def _do_update_in_thread(actor: str) -> None:
+    """Run the update process in a background thread."""
+    global _update_status
+    _update_status = {"state": "running", "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": None, "error": None}
+    _update_log_lines.clear()
+
+    try:
+        import subprocess
+        _update_log("Starting AmpAI code update…")
+        _update_log(f"Triggered by: {actor}")
+        _update_log(f"Repo: {REPO_URL}")
+
+        # ── Step 1: Create code backup ────────────────────
+        _update_log("--- Step 1: Creating code backup ---")
+        os.makedirs(CODE_BACKUP_DIR, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = os.path.join(CODE_BACKUP_DIR, ts)
+        os.makedirs(backup_path, exist_ok=True)
+
+        backend_src = os.path.join(os.path.dirname(__file__))
+        frontend_src = os.path.join(os.path.dirname(__file__), "..", "frontend")
+
+        if os.path.isdir(backend_src):
+            shutil.copytree(backend_src, os.path.join(backup_path, "backend"), dirs_exist_ok=True)
+            _update_log("Backed up: backend/")
+        if os.path.isdir(frontend_src):
+            shutil.copytree(frontend_src, os.path.join(backup_path, "frontend"), dirs_exist_ok=True)
+            _update_log("Backed up: frontend/")
+
+        # Save current commit
+        current_commit = _get_current_git_commit()
+        with open(os.path.join(backup_path, "git_commit.txt"), "w") as f:
+            f.write(current_commit)
+        _update_log(f"Backup created at: {backup_path} (commit: {current_commit})")
+
+        # ── Step 2: Pull latest code ───────────────────────
+        _update_log("--- Step 2: Pulling latest code from GitHub ---")
+
+        # Candidate paths for the host-mounted git repo
+        host_git_candidates = [
+            os.path.join(os.path.dirname(__file__), "..", ".."),  # /app/../ → host mount
+            "/app_host",
+        ]
+        repo_root = None
+        for c in host_git_candidates:
+            if os.path.isdir(os.path.join(c, ".git")):
+                repo_root = os.path.abspath(c)
+                break
+
+        if repo_root:
+            _update_log(f"Found git repo at {repo_root}")
+            result = subprocess.run(
+                ["git", "-C", repo_root, "fetch", "origin"],
+                capture_output=True, text=True, timeout=120
+            )
+            _update_log(f"git fetch: {result.stdout.strip() or result.stderr.strip() or 'ok'}")
+
+            for branch in ["main", "master"]:
+                r = subprocess.run(
+                    ["git", "-C", repo_root, "reset", "--hard", f"origin/{branch}"],
+                    capture_output=True, text=True, timeout=60
+                )
+                if r.returncode == 0:
+                    _update_log(f"Reset to origin/{branch}: {r.stdout.strip()}")
+                    break
+                _update_log(f"Branch {branch} not found, trying next…")
+
+            new_commit = subprocess.run(
+                ["git", "-C", repo_root, "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=10
+            ).stdout.strip()
+            _update_log(f"Updated to commit: {new_commit}")
+        else:
+            # Fallback: download code via GitHub archive API
+            _update_log("No git repo found on mounted volume. Downloading via GitHub archive…")
+            import tempfile
+
+            archive_url = REPO_URL.rstrip("/").replace(".git", "") + "/archive/refs/heads/main.zip"
+            _update_log(f"Downloading: {archive_url}")
+            temp_zip = tempfile.mktemp(suffix=".zip")
+            urllib.request.urlretrieve(archive_url, temp_zip)
+            _update_log("Download complete. Extracting…")
+
+            temp_dir = tempfile.mkdtemp()
+            with zipfile.ZipFile(temp_zip, "r") as zf:
+                zf.extractall(temp_dir)
+            os.remove(temp_zip)
+
+            # Find extracted root (ampai-main/ or similar)
+            extracted_dirs = [d for d in os.listdir(temp_dir) if os.path.isdir(os.path.join(temp_dir, d))]
+            if not extracted_dirs:
+                raise RuntimeError("Archive extraction yielded no directory")
+            extracted_root = os.path.join(temp_dir, extracted_dirs[0])
+
+            # Copy backend and frontend
+            new_backend = os.path.join(extracted_root, "backend")
+            new_frontend = os.path.join(extracted_root, "frontend")
+
+            if os.path.isdir(new_backend):
+                shutil.copytree(new_backend, backend_src, dirs_exist_ok=True)
+                _update_log("Copied new backend/")
+            if os.path.isdir(new_frontend):
+                shutil.copytree(new_frontend, frontend_src, dirs_exist_ok=True)
+                _update_log("Copied new frontend/")
+
+            shutil.rmtree(temp_dir)
+            _update_log("Archive update complete.")
+            new_commit = "downloaded"
+
+        # ── Step 3: Install dependencies ──────────────────
+        _update_log("--- Step 3: Installing Python dependencies ---")
+        req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
+        if os.path.exists(req_file):
+            result = subprocess.run(
+                ["pip", "install", "--no-cache-dir", "-q", "-r", req_file],
+                capture_output=True, text=True, timeout=300
+            )
+            if result.returncode == 0:
+                _update_log("Dependencies installed successfully.")
+            else:
+                _update_log(f"pip warning: {result.stderr.strip()[:400]}")
+        else:
+            _update_log("No requirements.txt found, skipping.")
+
+        # ── Step 4: Signal server to reload ───────────────
+        _update_log("--- Step 4: Signaling server reload ---")
+        _update_log("Update complete! Restarting uvicorn in 3 seconds…")
+
+        _update_status["state"] = "success"
+        _update_status["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _update_status["error"] = None
+        log_audit_event(username=actor, action="admin.docker.update.success", details=f"backup={backup_path}")
+
+        # Delay then restart uvicorn via os.execv to reload all modules
+        def _restart_server():
+            import time as _t
+            _t.sleep(3)
+            _update_log("Restarting server now…")
+            os.execv("/usr/local/bin/uvicorn", [
+                "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"
+            ])
+
+        threading.Thread(target=_restart_server, daemon=True).start()
+
+    except Exception as exc:
+        _update_log(f"ERROR: {exc}")
+        _update_status["state"] = "error"
+        _update_status["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _update_status["error"] = str(exc)
+        log_audit_event(username=actor, action="admin.docker.update.failure", details=str(exc))
+
+
+@app.get("/api/admin/update/version")
+def update_check_version(user: UserContext = Depends(require_admin_user)):
+    """Return current and latest commit hashes."""
+    current = _get_current_git_commit()
+    latest = _fetch_remote_commit()
+    up_to_date = (current != "unknown" and latest != "unknown" and current == latest[:len(current)])
+    return {
+        "current_commit": current,
+        "latest_commit": latest,
+        "up_to_date": up_to_date,
+        "repo_url": REPO_URL,
+    }
+
+
+@app.post("/api/admin/update/trigger")
+def update_trigger(user: UserContext = Depends(require_admin_user)):
+    """Kick off the update process in a background thread (admin only)."""
+    if not _update_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="An update is already in progress")
+    try:
+        t = threading.Thread(target=_do_update_in_thread, args=(user.username,), daemon=True)
+        t.start()
+        # release lock after thread is done
+        threading.Thread(target=lambda: (t.join(), _update_lock.release()), daemon=True).start()
+    except Exception as e:
+        _update_lock.release()
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "started", "message": "Update started. Poll /api/admin/update/status for progress."}
+
+
+@app.get("/api/admin/update/status")
+def update_status_endpoint(user: UserContext = Depends(require_admin_user)):
+    """Return current update state and recent log lines."""
+    return {
+        **_update_status,
+        "log_lines": list(_update_log_lines),
+    }
+
+
+@app.get("/api/admin/update/backups")
+def update_list_backups(user: UserContext = Depends(require_admin_user)):
+    """List all code backups."""
+    backups = _list_code_backups()
+    return {"backups": backups, "total": len(backups)}
+
+
+@app.delete("/api/admin/update/backups/{backup_name}")
+def update_delete_backup(backup_name: str, user: UserContext = Depends(require_admin_user)):
+    """Delete a specific code backup by name (timestamp folder)."""
+    # Security: only allow simple timestamp names, no path traversal
+    if "/" in backup_name or ".." in backup_name:
+        raise HTTPException(status_code=400, detail="Invalid backup name")
+    full_path = os.path.join(CODE_BACKUP_DIR, backup_name)
+    if not os.path.isdir(full_path):
+        raise HTTPException(status_code=404, detail="Backup not found")
+    shutil.rmtree(full_path)
+    log_audit_event(username=user.username, action="admin.docker.backup.delete", details=f"backup={backup_name}")
+    return {"deleted": backup_name}
+
+
 
 if os.path.exists(UPLOAD_DIR):
     app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")

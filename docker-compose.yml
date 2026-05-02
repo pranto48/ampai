@@ -42,6 +42,8 @@ services:
       - ./agent_data/app:/app/data
       - ./backend:/app/backend
       - ./frontend:/app/frontend
+      # Mount project root so the update endpoint can run git pull
+      - .:/app_host
     environment:
       - DATABASE_URL=postgresql://ampai:ampai@db:5432/ampai
       - REDIS_URL=redis://:${REDIS_PASSWORD:-ampairedis}@redis:6379/0
@@ -53,6 +55,8 @@ services:
       - ADMIN_PASSWORD=P@ssw0rd
       - USER_USERNAME=user
       - USER_PASSWORD=user123
+      # Update manager
+      - AMPAI_REPO_URL=https://github.com/pranto48/ampai.git
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
