@@ -1500,12 +1500,45 @@ def _send_telegram_message(bot_token: str, chat_id: Any, text: str) -> None:
         resp.read()
 
 
+TELEGRAM_MAX_MESSAGE_CHARS = 4000
+TELEGRAM_MAX_WEBHOOK_BYTES = 1024 * 1024  # 1MB
+TELEGRAM_RATE_LIMIT_COUNT = 8
+TELEGRAM_RATE_LIMIT_WINDOW_SECONDS = 20
+TELEGRAM_GENERIC_FAILURE_TEXT = "Sorry, something went wrong while processing your message."
+_telegram_rate_limit_lock = threading.Lock()
+_telegram_rate_limit_buckets: Dict[str, List[float]] = {}
+
+
+def _sanitize_telegram_text(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", text).strip()
+    if len(text) > TELEGRAM_MAX_MESSAGE_CHARS:
+        text = text[:TELEGRAM_MAX_MESSAGE_CHARS]
+    return text
+
+
+def _is_rate_limited(user_id: Any, chat_id: Any) -> bool:
+    now = time.time()
+    key = f"{user_id}:{chat_id}"
+    with _telegram_rate_limit_lock:
+        bucket = _telegram_rate_limit_buckets.get(key, [])
+        bucket = [ts for ts in bucket if now - ts < TELEGRAM_RATE_LIMIT_WINDOW_SECONDS]
+        if len(bucket) >= TELEGRAM_RATE_LIMIT_COUNT:
+            _telegram_rate_limit_buckets[key] = bucket
+            return True
+        bucket.append(now)
+        _telegram_rate_limit_buckets[key] = bucket
+    return False
+
+
 def _process_telegram_update(update: Dict[str, Any]) -> None:
     fields = _extract_telegram_update_fields(update)
     user_id = fields.get("user_id")
     chat_id = fields.get("chat_id")
-    incoming_text = fields.get("text")
+    incoming_text = _sanitize_telegram_text(fields.get("text"))
     if not user_id or not chat_id or not incoming_text:
+        return
+    if _is_rate_limited(user_id, chat_id):
         return
 
     session_id = f"tg_{chat_id}_{user_id}"
@@ -1521,42 +1554,70 @@ def _process_telegram_update(update: Dict[str, Any]) -> None:
 
     model_type = (get_config("default_model", "ollama") or "ollama").strip().lower()
     policy = _get_memory_policy(username)
-    result = chat_with_agent(
-        session_id=session_id,
-        message=incoming_text,
-        model_type=model_type,
-        api_key=None,
-        model_name=None,
-        memory_mode="indexed",
-        memory_top_k=5,
-        recency_bias=0.6,
-        category_filter="",
-        use_web_search=False,
-        attachments=[],
-        chat_output_mode="normal",
-        username=username,
-        is_admin=False,
-        allowed_memory_categories=policy.get("allowed_categories") or [],
-        persist_memory=bool(policy.get("auto_capture_enabled", True)),
-        require_memory_approval=bool(policy.get("require_approval", False)),
-        pii_strict_mode=bool(policy.get("pii_strict_mode", True)),
-    )
-    response_text = str((result or {}).get("response") or "").strip()
-    if response_text:
-        _send_telegram_message((get_config("telegram_bot_token") or "").strip(), chat_id, response_text)
-    ensure_session_owner(session_id, username)
-    touch_session(session_id)
+    try:
+        result = chat_with_agent(
+            session_id=session_id,
+            message=incoming_text,
+            model_type=model_type,
+            api_key=None,
+            model_name=None,
+            memory_mode="indexed",
+            memory_top_k=5,
+            recency_bias=0.6,
+            category_filter="",
+            use_web_search=False,
+            attachments=[],
+            chat_output_mode="normal",
+            username=username,
+            is_admin=False,
+            allowed_memory_categories=policy.get("allowed_categories") or [],
+            persist_memory=bool(policy.get("auto_capture_enabled", True)),
+            require_memory_approval=bool(policy.get("require_approval", False)),
+            pii_strict_mode=bool(policy.get("pii_strict_mode", True)),
+        )
+        response_text = str((result or {}).get("response") or "").strip()
+        if response_text:
+            try:
+                _send_telegram_message((get_config("telegram_bot_token") or "").strip(), chat_id, response_text)
+            except Exception:
+                logger.exception("telegram provider send failure")
+                log_audit_event(username=username, action="integration.telegram.provider_send_failure", session_id=session_id)
+                raise
+        ensure_session_owner(session_id, username)
+        touch_session(session_id)
+        log_audit_event(username=username, action="integration.telegram.message_processed", session_id=session_id)
+    except Exception:
+        logger.exception("telegram update processing failed")
+        try:
+            _send_telegram_message((get_config("telegram_bot_token") or "").strip(), chat_id, TELEGRAM_GENERIC_FAILURE_TEXT)
+        except Exception:
+            logger.exception("telegram provider send failure")
+            log_audit_event(username=username, action="integration.telegram.provider_send_failure", session_id=session_id)
 
 
 @app.post("/api/integrations/telegram/webhook")
-def telegram_webhook(payload: Dict[str, Any], x_telegram_bot_api_secret_token: Optional[str] = Header(default=None)):
+def telegram_webhook(
+    request: Request,
+    payload: Dict[str, Any],
+    x_telegram_bot_api_secret_token: Optional[str] = Header(default=None),
+):
     if not _config_bool("telegram_enabled", default=False):
         return {"status": "ignored", "reason": "disabled"}
+    if request.method != "POST":
+        raise HTTPException(status_code=405, detail="Method not allowed")
 
     expected_secret = (get_config("telegram_webhook_secret") or "").strip()
     if expected_secret and (x_telegram_bot_api_secret_token or "").strip() != expected_secret:
         logger.warning("telegram webhook rejected: invalid secret")
         raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret")
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > TELEGRAM_MAX_WEBHOOK_BYTES:
+                raise HTTPException(status_code=413, detail="Payload too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length")
+    log_audit_event(username="telegram-webhook", action="integration.telegram.webhook_received")
 
     try:
         worker = threading.Thread(target=_process_telegram_update, args=(payload or {},), daemon=True)
