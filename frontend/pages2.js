@@ -570,3 +570,46 @@ function buildFullBackupPage() {
   <div id="fb-restore-result" style="display:none;margin-top:14px;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:14px;font-size:.82rem"></div>
 </div>`;
 }
+
+// ── Telegram Integration Card (for admin/settings embedding) ───────────────
+function buildTelegramIntegrationCard() {
+  return `
+<div class="card" id="telegram-integration-card" style="margin-top:16px">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+    <div class="card-title">📨 Telegram Bot Integration</div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:.82rem;color:var(--muted)">
+      <input id="tg-enabled" type="checkbox" style="accent-color:var(--accent)"/>
+      Enable Telegram
+    </label>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+    <div class="fg" style="margin:0">
+      <label class="lbl">Bot token</label>
+      <input id="tg-bot-token" type="password" class="input" placeholder="123456:ABCDEF..." autocomplete="off"/>
+    </div>
+    <div class="fg" style="margin:0">
+      <label class="lbl">Public webhook URL</label>
+      <input id="tg-webhook-url" class="input" placeholder="https://example.com/api/integrations/telegram/webhook"/>
+    </div>
+  </div>
+
+  <div class="fg" style="margin-bottom:12px">
+    <label class="lbl">Webhook secret (optional)</label>
+    <input id="tg-webhook-secret" class="input" placeholder="Optional secret token" autocomplete="off"/>
+  </div>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+    <button id="tg-save-btn" class="btn btn-primary btn-sm">💾 Save Settings</button>
+    <button id="tg-test-btn" class="btn btn-secondary btn-sm">🔍 Test getMe</button>
+    <button id="tg-register-btn" class="btn btn-secondary btn-sm">🔗 Register Webhook</button>
+    <button id="tg-remove-btn" class="btn btn-danger btn-sm">🗑 Remove Webhook</button>
+  </div>
+
+  <div style="background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:12px;font-size:.82rem">
+    <div style="margin-bottom:6px">Status: <span id="tg-status-badge" class="badge badge-yellow">Unknown</span></div>
+    <div style="margin-bottom:6px">Webhook URL: <code id="tg-status-webhook">—</code></div>
+    <div>Last webhook error: <span id="tg-status-last-error">—</span></div>
+  </div>
+</div>`;
+}
