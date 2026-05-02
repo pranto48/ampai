@@ -1,5 +1,9 @@
 from fastapi.testclient import TestClient
 from backend import main
+import io
+import json
+import gzip
+import zipfile
 
 
 class DummyUser:
@@ -34,6 +38,25 @@ def test_restore_upload_empty_file():
     resp = client.post("/api/admin/fullbackup/restore-upload", files=files)
     assert resp.status_code == 400
     assert "empty" in resp.json()["detail"].lower()
+
+
+def test_restore_upload_preflight_only():
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        full_data = {"users": [{"username": "u1"}], "configs": {"a": "b"}}
+        zf.writestr("full_data.json.gz", gzip.compress(json.dumps(full_data).encode("utf-8")))
+    files = {"backup_file": ("backup.zip", archive.getvalue(), "application/zip")}
+    resp = client.post("/api/admin/fullbackup/restore-upload", files=files, data={"preflight_only": "true"})
+    assert resp.status_code == 200
+    assert resp.json()["preflight"]["users"] == 1
+
+
+def test_restore_upload_dry_run(monkeypatch):
+    monkeypatch.setattr(main, "restore_full_backup", lambda path, opts: {"ok": False})
+    files = {"backup_file": ("backup.zip", b"PK\x03\x04fake", "application/zip")}
+    resp = client.post("/api/admin/fullbackup/restore-upload", files=files, data={"dry_run": "true"})
+    assert resp.status_code == 200
+    assert resp.json().get("dry_run") is True
 
 
 def test_update_version_check_ok_false(monkeypatch):

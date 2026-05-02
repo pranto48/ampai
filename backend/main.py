@@ -4363,6 +4363,8 @@ def api_fullbackup_restore(request: FullRestoreRequest, user: UserContext = Depe
 @app.post("/api/admin/fullbackup/restore-upload")
 async def api_fullbackup_restore_upload(
     backup_file: UploadFile = File(...),
+    preflight_only: bool = Form(False),
+    dry_run: bool = Form(False),
     restore_chats: bool = Form(True),
     restore_memories: bool = Form(True),
     restore_core_memories: bool = Form(True),
@@ -4386,6 +4388,27 @@ async def api_fullbackup_restore_upload(
         with open(tmp_zip, "wb") as f:
             f.write(content)
 
+        with zipfile.ZipFile(tmp_zip) as zf:
+            names = zf.namelist()
+            non_mem = {}
+            if "full_data.json.gz" in names:
+                non_mem = json.loads(gzip.decompress(zf.read("full_data.json.gz")).decode("utf-8"))
+            sessions_count = 0
+            memories_count = 0
+            for sf in (n for n in names if n.startswith("slot_") and n.endswith(".json.gz")):
+                slot_payload = json.loads(gzip.decompress(zf.read(sf)).decode("utf-8"))
+                for _, cat_data in (slot_payload.get("categories") or {}).items():
+                    sessions_count += len(cat_data.get("sessions", []))
+                    memories_count += len(cat_data.get("memories", []))
+            preview = {
+                "sessions": sessions_count,
+                "memories": memories_count,
+                "users": len(non_mem.get("users") or []),
+                "configs": len((non_mem.get("configs") or {}).keys()),
+            }
+            if preflight_only:
+                return {"ok": True, "preflight": preview}
+
         opts = {
             "restore_chats": restore_chats,
             "restore_memories": restore_memories,
@@ -4395,6 +4418,8 @@ async def api_fullbackup_restore_upload(
             "restore_personas": restore_personas,
             "restore_tasks": restore_tasks,
         }
+        if dry_run:
+            return {"ok": True, "dry_run": True, "summary": preview, "errors": []}
         result = restore_full_backup(tmp_zip, opts)
         log_audit_event(username=user.username, action="admin.fullbackup.restore.upload",
                         details=f"file={filename} ok={result.get('ok')}")

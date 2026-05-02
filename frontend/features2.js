@@ -981,6 +981,7 @@ async function fullBackupLoad() {
   document.getElementById('fb-cats-refresh-btn')?.addEventListener('click', _fbLoadCategories);
   document.getElementById('fb-create-btn')?.addEventListener('click', _fbCreate);
   document.getElementById('fb-list-refresh-btn')?.addEventListener('click', _fbLoadList);
+  document.getElementById('fb-restore-preview-btn')?.addEventListener('click', () => _fbRestore({ previewOnly: true }));
   document.getElementById('fb-restore-btn')?.addEventListener('click', _fbRestore);
 }
 
@@ -1103,7 +1104,7 @@ async function _fbDelete(filename) {
   else toast('Failed to delete backup', 'error');
 }
 
-async function _fbRestore() {
+async function _fbRestore({ previewOnly = false } = {}) {
   const filename = document.getElementById('fb-restore-select')?.value;
   const uploadFile = document.getElementById('fb-restore-upload')?.files?.[0];
   if (!filename && !uploadFile) { toast('Select a saved backup or upload a ZIP file first', 'error'); return; }
@@ -1125,15 +1126,18 @@ async function _fbRestore() {
   const chosen = sections.filter(([elId]) => document.getElementById(elId)?.checked).map(([, k]) => k);
   if (!chosen.length) { toast('Select at least one section to restore', 'error'); return; }
 
-  if (!confirm(
+  const dryRun = !!document.getElementById('fb-r-dry-run')?.checked;
+  if (!previewOnly && !confirm(
     `⚠️ Restore from "${filename}"?\n\nSections: ${chosen.join(', ')}\n\nExisting data will NOT be deleted — records are inserted/merged.\n\nProceed?`
   )) return;
 
   const btn = document.getElementById('fb-restore-btn');
+  const pbtn = document.getElementById('fb-restore-preview-btn');
   const st  = document.getElementById('fb-restore-status');
   const res = document.getElementById('fb-restore-result');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Restoring…'; }
-  if (st)  { st.textContent = 'Running restore…'; st.style.color = 'var(--muted)'; }
+  if (pbtn) { pbtn.disabled = true; pbtn.textContent = '⏳ Previewing…'; }
+  if (st)  { st.textContent = previewOnly ? 'Uploading ZIP for preview…' : 'Uploading ZIP / preparing restore…'; st.style.color = 'var(--muted)'; }
   if (res) res.style.display = 'none';
 
   let ok = false; let data = {};
@@ -1141,7 +1145,10 @@ async function _fbRestore() {
     const form = new FormData();
     form.append('backup_file', uploadFile);
     sections.forEach(([elId, key]) => form.append(key, String(!!document.getElementById(elId)?.checked)));
+    form.append('preflight_only', String(previewOnly));
+    form.append('dry_run', String(dryRun));
     const token = localStorage.getItem('ampai_token') || '';
+    if (st) st.textContent = previewOnly ? 'Running preflight checks…' : (dryRun ? 'Running dry run validation…' : 'Submitting restore request…');
     const resUp = await fetch('/api/admin/fullbackup/restore-upload', {
       method: 'POST',
       headers: token ? { Authorization: 'Bearer ' + token } : {},
@@ -1150,6 +1157,13 @@ async function _fbRestore() {
     ok = resUp.ok;
     data = await resUp.json().catch(() => ({}));
   } else {
+    if (previewOnly) {
+      toast('Preview currently requires upload ZIP path', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '♻️ Restore Selected'; }
+      if (pbtn) { pbtn.disabled = false; pbtn.textContent = '🔎 Preview Restore'; }
+      return;
+    }
+    if (st) st.textContent = 'Submitting restore request…';
     const resJson = await apiJSON('/api/admin/fullbackup/restore', {
       method: 'POST', body: JSON.stringify(payload)
     });
@@ -1157,10 +1171,22 @@ async function _fbRestore() {
     data = resJson.data;
   }
   if (btn) { btn.disabled = false; btn.textContent = '♻️ Restore Selected'; }
+  if (pbtn) { pbtn.disabled = false; pbtn.textContent = '🔎 Preview Restore'; }
 
   if (!ok) {
     if (st) { st.textContent = '✕ Restore failed'; st.style.color = 'var(--red)'; }
     toast(data?.detail || 'Restore failed', 'error');
+    return;
+  }
+
+  if (previewOnly) {
+    if (st) { st.textContent = '✓ Preview ready'; st.style.color = 'var(--green)'; }
+    const pre = data.preflight || {};
+    if (res) {
+      res.style.display = 'block';
+      res.innerHTML = `<div style="font-weight:700;margin-bottom:8px">🔎 Restore Preview</div>
+      <div>Sessions: <b>${pre.sessions || 0}</b> · Memories: <b>${pre.memories || 0}</b> · Users: <b>${pre.users || 0}</b> · Configs: <b>${pre.configs || 0}</b></div>`;
+    }
     return;
   }
 
