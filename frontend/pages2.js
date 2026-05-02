@@ -546,6 +546,10 @@ function buildFullBackupPage() {
       <option value="">— choose a backup —</option>
     </select>
   </div>
+  <div style="margin-bottom:12px">
+    <label style="font-size:.82rem;color:var(--muted);display:block;margin-bottom:6px">Or upload downloaded backup ZIP:</label>
+    <input id="fb-restore-upload" type="file" accept=".zip,application/zip" class="input" style="max-width:480px" />
+  </div>
   <div style="font-size:.82rem;font-weight:600;margin-bottom:8px;color:var(--text)">Restore sections:</div>
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin-bottom:16px;font-size:.84rem">
     <label><input type="checkbox" id="fb-r-chats" checked> Chat histories</label>

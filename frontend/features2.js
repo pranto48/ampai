@@ -1105,7 +1105,8 @@ async function _fbDelete(filename) {
 
 async function _fbRestore() {
   const filename = document.getElementById('fb-restore-select')?.value;
-  if (!filename) { toast('Select a backup file first', 'error'); return; }
+  const uploadFile = document.getElementById('fb-restore-upload')?.files?.[0];
+  if (!filename && !uploadFile) { toast('Select a saved backup or upload a ZIP file first', 'error'); return; }
 
   const sections = [
     ['fb-r-chats',    'restore_chats'],
@@ -1116,7 +1117,7 @@ async function _fbRestore() {
     ['fb-r-personas', 'restore_personas'],
     ['fb-r-tasks',    'restore_tasks'],
   ];
-  const payload = { filename };
+  const payload = filename ? { filename } : {}; 
   sections.forEach(([elId, key]) => {
     payload[key] = !!document.getElementById(elId)?.checked;
   });
@@ -1135,9 +1136,26 @@ async function _fbRestore() {
   if (st)  { st.textContent = 'Running restore…'; st.style.color = 'var(--muted)'; }
   if (res) res.style.display = 'none';
 
-  const { ok, data } = await apiJSON('/api/admin/fullbackup/restore', {
-    method: 'POST', body: JSON.stringify(payload)
-  });
+  let ok = false; let data = {};
+  if (uploadFile) {
+    const form = new FormData();
+    form.append('backup_file', uploadFile);
+    sections.forEach(([elId, key]) => form.append(key, String(!!document.getElementById(elId)?.checked)));
+    const token = localStorage.getItem('ampai_token') || '';
+    const resUp = await fetch('/api/admin/fullbackup/restore-upload', {
+      method: 'POST',
+      headers: token ? { Authorization: 'Bearer ' + token } : {},
+      body: form,
+    });
+    ok = resUp.ok;
+    data = await resUp.json().catch(() => ({}));
+  } else {
+    const resJson = await apiJSON('/api/admin/fullbackup/restore', {
+      method: 'POST', body: JSON.stringify(payload)
+    });
+    ok = resJson.ok;
+    data = resJson.data;
+  }
   if (btn) { btn.disabled = false; btn.textContent = '♻️ Restore Selected'; }
 
   if (!ok) {
