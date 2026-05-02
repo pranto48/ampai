@@ -561,10 +561,17 @@ function buildFullBackupPage() {
     <label><input type="checkbox" id="fb-r-tasks" checked> Tasks</label>
   </div>
   <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button id="fb-restore-preview-btn" class="btn btn-secondary"
+      style="padding:10px 22px;font-size:.9rem;font-weight:600">
+      🔎 Preview Restore
+    </button>
     <button id="fb-restore-btn" class="btn btn-danger"
       style="padding:10px 22px;font-size:.9rem;font-weight:600">
       ♻️ Restore Selected
     </button>
+    <label style="font-size:.82rem;color:var(--muted);display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="fb-r-dry-run"> Dry run (no writes)
+    </label>
     <span id="fb-restore-status" style="font-size:.84rem;color:var(--muted)"></span>
   </div>
   <div id="fb-restore-result" style="display:none;margin-top:14px;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:14px;font-size:.82rem"></div>
