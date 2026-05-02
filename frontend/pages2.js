@@ -592,6 +592,10 @@ function buildTelegramIntegrationCard() {
       <label class="lbl">Webhook URL</label>
       <input id="tg-webhook-url" class="input" placeholder="https://example.com/api/integrations/telegram/webhook"/>
     </div>
+    <div class="fg" style="margin:0;grid-column:1 / -1;">
+      <label class="lbl">Secret token (optional)</label>
+      <input id="tg-secret-token" type="password" class="input" placeholder="optional webhook secret" autocomplete="off"/>
+    </div>
   </div>
 
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">

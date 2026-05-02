@@ -1220,7 +1220,7 @@ async function telegramSettingsLoad() {
 }
 
 async function _fetchTelegramSettings() {
-  const { ok, data } = await apiJSON('/api/integrations/telegram/settings');
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/status');
   if (!ok) return;
   document.getElementById('tg-enabled') && (document.getElementById('tg-enabled').checked = !!data.enabled);
   document.getElementById('tg-webhook-url') && (document.getElementById('tg-webhook-url').value = data.webhook_url || '');
@@ -1237,8 +1237,9 @@ async function _saveTelegramSettings() {
     enabled: !!document.getElementById('tg-enabled')?.checked,
     bot_token: tokenEl?.value?.trim() || undefined,
     webhook_url: document.getElementById('tg-webhook-url')?.value?.trim() || '',
+    secret_token: document.getElementById('tg-secret-token')?.value?.trim() || '',
   };
-  const { ok, data } = await apiJSON('/api/integrations/telegram/settings', {
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/save', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
@@ -1246,13 +1247,14 @@ async function _saveTelegramSettings() {
   if (ok) {
     _telegramTokenSaved = _telegramTokenSaved || !!payload.bot_token;
     if (tokenEl) tokenEl.value = '';
+    const secretEl = document.getElementById('tg-secret-token'); if (secretEl) secretEl.value = '';
     _fetchTelegramSettings();
     _fetchTelegramStatus();
   }
 }
 
 async function _testTelegramGetMe() {
-  const { ok, data } = await apiJSON('/api/integrations/telegram/test', { method: 'POST' });
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/test', { method: 'POST' });
   _telegramLastTestResult = ok ? `Passed (${new Date().toLocaleTimeString()})` : `Failed (${new Date().toLocaleTimeString()})`;
   toast(ok ? `Connected as @${data?.username || data?.result?.username || 'bot'}` : (data?.detail || 'Telegram getMe failed'), ok ? 'success' : 'error');
   _fetchTelegramStatus();
@@ -1261,9 +1263,10 @@ async function _testTelegramGetMe() {
 async function _registerTelegramWebhook() {
   const payload = {
     webhook_url: document.getElementById('tg-webhook-url')?.value?.trim() || '',
+    secret_token: document.getElementById('tg-secret-token')?.value?.trim() || '',
   };
   if (!payload.webhook_url) return toast('Webhook URL is required', 'error');
-  const { ok, data } = await apiJSON('/api/integrations/telegram/webhook/register', {
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/connect', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
@@ -1272,13 +1275,13 @@ async function _registerTelegramWebhook() {
 }
 
 async function _removeTelegramWebhook() {
-  const { ok, data } = await apiJSON('/api/integrations/telegram/webhook/remove', { method: 'POST' });
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/disconnect', { method: 'POST' });
   toast(ok ? 'Webhook removed' : (data?.detail || 'Failed to remove webhook'), ok ? 'success' : 'error');
   if (ok) _fetchTelegramStatus();
 }
 
 async function _fetchTelegramStatus() {
-  const { ok, data } = await apiJSON('/api/integrations/telegram/status');
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/status');
   const enabledEl = document.getElementById('tg-status-enabled');
   const tokenEl = document.getElementById('tg-status-token');
   const lastTestEl = document.getElementById('tg-status-last-test');

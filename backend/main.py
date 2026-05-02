@@ -129,6 +129,7 @@ from database import (
     engine,
 )
 from memory_persistence import memory_persistence_manager
+from integrations.telegram_api import get_me, set_webhook, delete_webhook, send_message
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
     refresh_access_token as refresh_gmail_access_token,
@@ -228,6 +229,7 @@ class MemoryInboxUpdateRequest(BaseModel):
 class TelegramIntegrationSaveRequest(BaseModel):
     bot_token: str = ""
     webhook_url: str = ""
+    secret_token: Optional[str] = None
     enabled: bool = False
 
 
@@ -1725,6 +1727,7 @@ def admin_telegram_status(current_user: UserContext = Depends(require_admin_user
         "webhook_url": webhook_url,
         "token_configured": bool(bot_token),
         "token_masked": _mask_telegram_token(bot_token),
+        "secret_configured": bool((get_config("telegram_webhook_secret") or "").strip()),
     }
 
 
@@ -1732,6 +1735,7 @@ def admin_telegram_status(current_user: UserContext = Depends(require_admin_user
 def admin_telegram_save(request: TelegramIntegrationSaveRequest, current_user: UserContext = Depends(require_admin_user)):
     set_config("telegram_bot_token", request.bot_token or "")
     set_config("telegram_webhook_url", (request.webhook_url or "").strip())
+    set_config("telegram_webhook_secret", (request.secret_token or "").strip())
     set_config("telegram_enabled", "true" if request.enabled else "false")
     log_audit_event(username=current_user.username, action="integration.telegram.admin_save")
     return {
@@ -1749,7 +1753,7 @@ def admin_telegram_test(current_user: UserContext = Depends(require_admin_user))
     if not token:
         raise HTTPException(status_code=400, detail="Telegram bot token is required")
     try:
-        payload = _telegram_api_call("getMe", token)
+        payload = get_me(token)
     except urllib.error.HTTPError as exc:
         detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
         raise HTTPException(status_code=502, detail=f"Telegram getMe failed: {detail or exc.reason}") from exc
@@ -1770,8 +1774,9 @@ def admin_telegram_connect(current_user: UserContext = Depends(require_admin_use
         raise HTTPException(status_code=400, detail="Telegram bot token is required")
     if not webhook_url:
         raise HTTPException(status_code=400, detail="Telegram webhook URL is not configured")
+    secret_token = (get_config("telegram_webhook_secret") or "").strip()
     try:
-        payload = _telegram_api_call("setWebhook", token, {"url": webhook_url})
+        payload = set_webhook(token, webhook_url, secret_token=secret_token or None)
     except urllib.error.HTTPError as exc:
         detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
         raise HTTPException(status_code=502, detail=f"Telegram setWebhook failed: {detail or exc.reason}") from exc
@@ -1789,7 +1794,7 @@ def admin_telegram_disconnect(current_user: UserContext = Depends(require_admin_
     if not token:
         raise HTTPException(status_code=400, detail="Telegram bot token is required")
     try:
-        payload = _telegram_api_call("deleteWebhook", token, {})
+        payload = delete_webhook(token)
     except urllib.error.HTTPError as exc:
         detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
         raise HTTPException(status_code=502, detail=f"Telegram deleteWebhook failed: {detail or exc.reason}") from exc
@@ -1849,7 +1854,7 @@ def telegram_webhook(
         )
         response_text = str((result or {}).get("response") or "").strip()
         if response_text:
-            _send_telegram_message(bot_token, chat_id, response_text)
+            send_message(bot_token, chat_id, response_text)
         ensure_session_owner(session_id, username)
         touch_session(session_id)
         log_audit_event(username=username, action="integration.telegram.webhook_processed", session_id=session_id)

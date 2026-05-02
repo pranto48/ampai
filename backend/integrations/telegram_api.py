@@ -16,9 +16,12 @@ def get_me(bot_token):
         return {"ok": False, "error": "request_failed"}
 
 
-def set_webhook(bot_token, webhook_url):
+def set_webhook(bot_token, webhook_url, secret_token=None):
     url = f"{API_BASE}/bot{bot_token}/setWebhook"
-    data = json.dumps({"url": webhook_url}).encode("utf-8")
+    payload = {"url": webhook_url}
+    if secret_token:
+        payload["secret_token"] = secret_token
+    data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
     try:
