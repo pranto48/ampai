@@ -35,6 +35,7 @@ from zoneinfo import ZoneInfo
 
 from auth import bootstrap_default_admin
 from agent import chat_with_agent, get_llm, get_redis_history
+from memory_indexer import MemoryIndexer
 from database import (
     add_core_memory,
     add_network_target,
@@ -1951,6 +1952,20 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             require_memory_approval=bool(policy.get("require_approval", False)),
             pii_strict_mode=bool(policy.get("pii_strict_mode", True)),
         )
+        memory_action = (result.get("memory_action") or "").strip().lower()
+        memory_fact = (result.get("memory_fact") or "").strip()
+        if memory_action == "pending_approval" and memory_fact:
+            _create_memory_candidate(user.username, request.session_id, memory_fact, confidence=0.9)
+        elif memory_action == "saved" and memory_fact:
+            try:
+                add_core_memory(memory_fact)
+            except Exception:
+                logger.exception("chat saved-memory core write failed")
+            try:
+                MemoryIndexer(request.model_type).add_fact(memory_fact)
+            except Exception:
+                logger.exception("chat saved-memory index write failed")
+
         response_text = str(result.get("response") or "")
         retrieval_meta = result.get("retrieval") or {}
         injected_chars = int(retrieval_meta.get("context_chars") or 0)
@@ -2007,6 +2022,10 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                 session_id=request.session_id,
                 details=f"count={len(created_suggestions)}",
             )
+        result["memory_status"] = {
+            "memory_action": memory_action or None,
+            "memory_fact": memory_fact or None,
+        }
         try:
             INSIGHT_QUEUE.put_nowait(request.session_id)
         except Exception:
@@ -2741,6 +2760,8 @@ def get_sessions(
         "offset": offset,
         "has_more": (offset + limit) < total,
         "categories": category_counts,
+        "saved_facts": saved_facts,
+        "pending_candidates": pending_candidates,
     }
 
 
@@ -2833,6 +2854,25 @@ def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = De
     for item in filtered:
         cat = item.get("category") or "Uncategorized"
         category_counts[cat] = category_counts.get(cat, 0) + 1
+
+    memory_rows = _load_config_list("memory_inbox_candidates")
+    pending_candidates = [
+        row for row in memory_rows
+        if (current_user.role == "admin" or row.get("username") == current_user.username)
+        and (row.get("status") or "").lower() == "pending"
+        and (not query or query.lower() in (row.get("candidate_text") or "").lower())
+    ][:20]
+    core_memories_all = get_core_memories()
+    saved_facts = []
+    for mem in core_memories_all:
+        fact = str(mem.get("fact") or "").strip()
+        if not fact:
+            continue
+        if query and query.lower() not in fact.lower():
+            continue
+        saved_facts.append({"id": mem.get("id"), "fact": fact})
+        if len(saved_facts) >= 20:
+            break
 
     log_audit_event(
         username=current_user.username,

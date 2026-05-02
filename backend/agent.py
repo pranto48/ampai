@@ -117,6 +117,10 @@ def _extract_explicit_memory_request(message: str) -> str:
         return m.group(1).strip().strip('"“”')
     return ""
 
+
+def _normalize_memory_fact(fact: str) -> str:
+    return re.sub(r"\s+", " ", (fact or "").strip())
+
 def _build_fallback_suggestion(message: str, response: str) -> List[Dict[str, Any]]:
     if not (_looks_like_task_intent(message) or _looks_like_task_intent(response)):
         return []
@@ -485,27 +489,33 @@ def chat_with_agent(
     elif match:
         fact_to_save = match.group(1).strip().rstrip('].')
 
-    if fact_to_save:
+    normalized_fact = _normalize_memory_fact(fact_to_save)
+    memory_action = ""
+    if normalized_fact:
         save_allowed = persist_memory and not require_memory_approval
         if save_allowed and allowed_categories_set:
-            inferred_category = "preferences" if re.search(r"\b(like|prefer|favorite|always|usually)\b", fact_to_save, re.IGNORECASE) else "general"
+            inferred_category = "preferences" if re.search(r"(like|prefer|favorite|always|usually)", normalized_fact, re.IGNORECASE) else "general"
             save_allowed = inferred_category in allowed_categories_set
         if save_allowed:
-            add_core_memory(fact_to_save)
+            add_core_memory(normalized_fact)
             try:
                 indexer = MemoryIndexer(model_type)
-                indexer.add_fact(fact_to_save)
+                indexer.add_fact(normalized_fact)
             except Exception as e:
                 print(f"Failed to add fact to PGVector: {e}")
+            memory_action = "saved"
+        elif require_memory_approval:
+            memory_action = "pending_approval"
+        else:
+            memory_action = "blocked_by_policy"
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
         if not content and explicit_memory_request:
-            if save_allowed:
+            if memory_action == "saved":
                 content = "Got it — I saved that to memory."
-            elif require_memory_approval:
+            elif memory_action == "pending_approval":
                 content = "Got it — I captured that and sent it for memory approval."
             else:
                 content = "I understood your memory request, but memory saving is currently disabled by policy."
-
     task_suggestions = _parse_create_task_tags(content)
     content = re.sub(r"\[CREATE_TASK:\s*.*?\]", "", content, flags=re.IGNORECASE | re.DOTALL).strip()
     if not task_suggestions:
@@ -531,4 +541,6 @@ def chat_with_agent(
         "task_suggestions": task_suggestions,
         "has_task_cues": bool(task_suggestions),
         "retrieval": retrieval_meta,
+        "memory_action": memory_action or None,
+        "memory_fact": normalized_fact or None,
     }
