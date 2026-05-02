@@ -354,6 +354,9 @@ class ImportRequest(BaseModel):
 class ConfigUpdateRequest(BaseModel):
     configs: Dict[str, str]
 
+class OrphanAdoptionRunRequest(BaseModel):
+    force: bool = False
+
 
 class MemoryExplorerQuery(BaseModel):
     query: Optional[str] = ""
@@ -2728,14 +2731,13 @@ def get_sessions(
     sessions = get_all_sessions(query=query, category=category, archived=archived)
     if current_user.role != "admin":
         accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
-        # Migration helper: adopt orphan legacy sessions (no owner mapping yet)
-        # so existing chat history remains visible after auth/access-control rollout.
         orphan_session_ids = [s.get("session_id") for s in sessions if s.get("session_id") and s.get("session_id") not in accessible_ids]
-        adopted_any = False
-        for sid in orphan_session_ids:
-            if not get_session_owner(sid):
-                if ensure_session_owner(sid, current_user.username):
-                    adopted_any = True
+        adopted_any = _run_orphan_adoption(
+            actor_username=current_user.username,
+            orphan_session_ids=orphan_session_ids,
+            sessions=sessions,
+            explicit=False,
+        )
         if adopted_any:
             accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
 
@@ -2763,6 +2765,77 @@ def get_sessions(
         "saved_facts": saved_facts,
         "pending_candidates": pending_candidates,
     }
+
+
+def _session_matches_migration_criteria(session_id: str, session_row: Dict[str, Any]) -> bool:
+    # Keep criteria explicit and deterministic so admins can manually run one-time migrations.
+    return session_id.startswith("tg_") or bool(session_row.get("archived"))
+
+
+def _run_orphan_adoption(actor_username: str, orphan_session_ids: List[str], sessions: List[Dict[str, Any]], explicit: bool, force: bool = False) -> bool:
+    raw_cutoff = (get_config("auth_orphan_adoption_cutoff_datetime", "") or "").strip()
+    cutoff_dt = _parse_iso_dt(raw_cutoff)
+    if raw_cutoff and not cutoff_dt:
+        logger.warning("Invalid auth_orphan_adoption_cutoff_datetime config value: %s", raw_cutoff)
+
+    adopted_any = False
+    adopted_count = 0
+    skipped_processed = 0
+    skipped_newer = 0
+    sessions_map = {(s.get("session_id") or ""): s for s in sessions}
+    for sid in orphan_session_ids:
+        if not sid:
+            continue
+        marker_key = f"auth_orphan_adoption_processed:{sid}"
+        if get_config(marker_key, "0") == "1" and not force:
+            skipped_processed += 1
+            continue
+        row = sessions_map.get(sid, {})
+        updated_dt = _parse_iso_dt(row.get("updated_at"))
+        meets_cutoff = bool(cutoff_dt and updated_dt and updated_dt <= cutoff_dt)
+        matches_migration = _session_matches_migration_criteria(sid, row)
+        if not (meets_cutoff or matches_migration or force):
+            skipped_newer += 1
+            continue
+        if not get_session_owner(sid) and ensure_session_owner(sid, actor_username):
+            adopted_any = True
+            adopted_count += 1
+            log_audit_event(
+                username=actor_username,
+                action="session.orphan_adoption.adopted",
+                session_id=sid,
+                details=f"explicit={explicit};cutoff={raw_cutoff or 'none'}",
+            )
+        set_config(marker_key, "1")
+    if explicit or adopted_count > 0 or skipped_processed > 0 or skipped_newer > 0:
+        log_audit_event(
+            username=actor_username,
+            action="session.orphan_adoption.run",
+            details=(
+                f"explicit={explicit};force={force};adopted={adopted_count};"
+                f"skipped_processed={skipped_processed};skipped_newer={skipped_newer};"
+                f"cutoff={raw_cutoff or 'none'}"
+            ),
+        )
+    return adopted_any
+
+
+@app.post("/api/admin/sessions/orphan-adoption/run")
+def admin_run_orphan_adoption(request: OrphanAdoptionRunRequest, user: UserContext = Depends(require_admin_user)):
+    already_run = (get_config("auth_orphan_adoption_manual_run_completed", "0") == "1")
+    if already_run and not request.force:
+        return {"status": "skipped", "reason": "already_completed"}
+    sessions = get_all_sessions()
+    orphan_session_ids = [s.get("session_id") for s in sessions if s.get("session_id") and not get_session_owner(s.get("session_id"))]
+    adopted_any = _run_orphan_adoption(
+        actor_username=user.username,
+        orphan_session_ids=orphan_session_ids,
+        sessions=sessions,
+        explicit=True,
+        force=request.force,
+    )
+    set_config("auth_orphan_adoption_manual_run_completed", "1")
+    return {"status": "success", "adopted_any": adopted_any, "processed": len(orphan_session_ids)}
 
 
 def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
