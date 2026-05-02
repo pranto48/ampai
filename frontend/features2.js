@@ -833,6 +833,18 @@ async function _fetchUpdateVersion() {
   if (currentEl) currentEl.textContent = data.current_commit || 'unknown';
   if (latestEl)  latestEl.textContent  = data.latest_commit  || 'unknown';
 
+  if (data.check_ok === false) {
+    if (badgeEl) {
+      badgeEl.textContent = '⚠ Check unavailable';
+      badgeEl.style.background = 'rgba(239,68,68,.15)';
+      badgeEl.style.color = '#ef4444';
+      badgeEl.style.border = '1px solid rgba(239,68,68,.3)';
+    }
+    if (statusEl) { statusEl.textContent = 'Version check unavailable (GitHub API or repo URL issue).'; statusEl.style.color = 'var(--red)'; }
+    if (trigBtn) { trigBtn.disabled = false; trigBtn.title = ''; }
+    return;
+  }
+
   if (data.up_to_date) {
     if (badgeEl) {
       badgeEl.textContent = '✓ Up to date';
