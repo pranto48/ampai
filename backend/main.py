@@ -2296,7 +2296,18 @@ def get_sessions(
 ):
     sessions = get_all_sessions(query=query, category=category, archived=archived)
     if current_user.role != "admin":
-        accessible_ids = get_accessible_session_ids(username=current_user.username, is_admin=False)
+        accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
+        # Migration helper: adopt orphan legacy sessions (no owner mapping yet)
+        # so existing chat history remains visible after auth/access-control rollout.
+        orphan_session_ids = [s.get("session_id") for s in sessions if s.get("session_id") and s.get("session_id") not in accessible_ids]
+        adopted_any = False
+        for sid in orphan_session_ids:
+            if not get_session_owner(sid):
+                if ensure_session_owner(sid, current_user.username):
+                    adopted_any = True
+        if adopted_any:
+            accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
+
         shared_ids = set(list_shared_sessions_for_user(current_user.username))
         sessions = [s for s in sessions if s.get("session_id") in accessible_ids]
         for session in sessions:
