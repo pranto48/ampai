@@ -49,6 +49,7 @@ from database import (
     get_memory_candidate_by_id,
     get_network_targets,
     get_duplicate_message_counts,
+    get_or_create_telegram_user,
     get_user,
     list_users as db_list_users,
     create_user as db_create_user,
@@ -114,6 +115,7 @@ from database import (
     create_restore_job,
     update_restore_job,
     list_restore_jobs,
+    lookup_username_by_telegram_user_id,
     get_restore_job,
     upsert_user_notification_preferences,
     upsert_user_memory_policy,
@@ -1507,7 +1509,13 @@ def _process_telegram_update(update: Dict[str, Any]) -> None:
         return
 
     session_id = f"tg_{chat_id}_{user_id}"
-    username = _resolve_telegram_username(user_id)
+    resolved_username = _resolve_telegram_username(user_id)
+    mapped_username = lookup_username_by_telegram_user_id(user_id)
+    username = mapped_username or get_or_create_telegram_user(
+        telegram_user_id=user_id,
+        telegram_chat_id=chat_id,
+        default_username=resolved_username,
+    ) or resolved_username
     if not get_user(username):
         db_create_user(username=username, role="user", password_hash=pwd_context.hash(uuid.uuid4().hex))
 
