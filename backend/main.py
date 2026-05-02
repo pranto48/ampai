@@ -13,6 +13,7 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta, timezone
 import shutil
 import uuid
+import urllib.parse
 import urllib.request
 import time
 import re
@@ -1364,6 +1365,7 @@ def startup_event():
     backup_worker.start()
     restore_worker = threading.Thread(target=_restore_job_worker, daemon=True, name="ampai-restore-worker")
     restore_worker.start()
+    _start_telegram_poller_if_enabled()
 
 
 def _enforce_session_access_or_403(session_id: str, current_user: UserContext) -> None:
@@ -1505,8 +1507,15 @@ TELEGRAM_MAX_WEBHOOK_BYTES = 1024 * 1024  # 1MB
 TELEGRAM_RATE_LIMIT_COUNT = 8
 TELEGRAM_RATE_LIMIT_WINDOW_SECONDS = 20
 TELEGRAM_GENERIC_FAILURE_TEXT = "Sorry, something went wrong while processing your message."
+TELEGRAM_POLL_TIMEOUT_SECONDS = 25
+TELEGRAM_POLL_SLEEP_SECONDS = 1.5
 _telegram_rate_limit_lock = threading.Lock()
 _telegram_rate_limit_buckets: Dict[str, List[float]] = {}
+_telegram_poller_started = False
+_telegram_poller_lock = threading.Lock()
+_telegram_offset_lock = threading.Lock()
+_telegram_next_update_offset = 0
+_telegram_processed_update_ids: set[int] = set()
 
 
 def _sanitize_telegram_text(value: Any) -> str:
@@ -1593,6 +1602,71 @@ def _process_telegram_update(update: Dict[str, Any]) -> None:
         except Exception:
             logger.exception("telegram provider send failure")
             log_audit_event(username=username, action="integration.telegram.provider_send_failure", session_id=session_id)
+
+
+def _mark_telegram_update_processed(update_id: Any) -> bool:
+    try:
+        normalized = int(update_id)
+    except (TypeError, ValueError):
+        return True
+    with _telegram_offset_lock:
+        if normalized in _telegram_processed_update_ids:
+            return False
+        _telegram_processed_update_ids.add(normalized)
+        if len(_telegram_processed_update_ids) > 2000:
+            floor = max(_telegram_next_update_offset - 2000, 0)
+            _telegram_processed_update_ids.difference_update({uid for uid in _telegram_processed_update_ids if uid < floor})
+    return True
+
+
+def _poll_telegram_updates_forever() -> None:
+    global _telegram_next_update_offset
+    logger.info("Starting Telegram polling worker")
+    while True:
+        try:
+            if not _config_bool("telegram_enabled", default=False) or not _config_bool("telegram_polling_enabled", default=False):
+                time.sleep(3)
+                continue
+            bot_token = (get_config("telegram_bot_token") or "").strip()
+            if not bot_token:
+                time.sleep(5)
+                continue
+            with _telegram_offset_lock:
+                offset = max(0, int(_telegram_next_update_offset or 0))
+            params = urllib.parse.urlencode({
+                "timeout": TELEGRAM_POLL_TIMEOUT_SECONDS,
+                "offset": offset,
+                "allowed_updates": json.dumps(["message", "edited_message", "callback_query"]),
+            })
+            url = f"https://api.telegram.org/bot{bot_token}/getUpdates?{params}"
+            with urllib.request.urlopen(url, timeout=TELEGRAM_POLL_TIMEOUT_SECONDS + 10) as resp:
+                payload = json.loads((resp.read() or b"{}").decode("utf-8"))
+            if not isinstance(payload, dict) or not payload.get("ok"):
+                time.sleep(TELEGRAM_POLL_SLEEP_SECONDS)
+                continue
+            for update in payload.get("result") or []:
+                update_id = update.get("update_id")
+                if not _mark_telegram_update_processed(update_id):
+                    continue
+                if isinstance(update_id, int):
+                    with _telegram_offset_lock:
+                        _telegram_next_update_offset = max(_telegram_next_update_offset, update_id + 1)
+                _process_telegram_update(update or {})
+        except Exception:
+            logger.exception("telegram polling worker iteration failed")
+            time.sleep(TELEGRAM_POLL_SLEEP_SECONDS)
+
+
+def _start_telegram_poller_if_enabled() -> None:
+    global _telegram_poller_started
+    if not _config_bool("telegram_polling_enabled", default=False):
+        return
+    with _telegram_poller_lock:
+        if _telegram_poller_started:
+            return
+        worker = threading.Thread(target=_poll_telegram_updates_forever, daemon=True, name="ampai-telegram-poller")
+        worker.start()
+        _telegram_poller_started = True
 
 
 @app.post("/api/integrations/telegram/webhook")
