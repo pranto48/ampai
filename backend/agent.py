@@ -103,6 +103,20 @@ def _parse_create_task_tags(content: str) -> List[Dict[str, Any]]:
     return suggestions
 
 
+
+
+def _extract_explicit_memory_request(message: str) -> str:
+    text = (message or "").strip()
+    if not text:
+        return ""
+    m = re.search(r'^\s*save\s+to\s+memory\s*[:\-]?\s*["“](.*?)["”]\s*$', text, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r'^\s*save\s+to\s+memory\s*[:\-]?\s*(.+)$', text, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1).strip().strip('"“”')
+    return ""
+
 def _build_fallback_suggestion(message: str, response: str) -> List[Dict[str, Any]]:
     if not (_looks_like_task_intent(message) or _looks_like_task_intent(response)):
         return []
@@ -462,10 +476,16 @@ def chat_with_agent(
         response_content=content
     )
 
+    explicit_memory_request = _extract_explicit_memory_request(message)
     match = re.search(r'\[SAVE_MEMORY:\s*(.*?)\]', content, re.IGNORECASE | re.DOTALL)
     allowed_categories_set = {str(c).strip().lower() for c in (allowed_memory_categories or []) if str(c).strip()}
-    if match:
+    fact_to_save = ""
+    if explicit_memory_request:
+        fact_to_save = explicit_memory_request
+    elif match:
         fact_to_save = match.group(1).strip().rstrip('].')
+
+    if fact_to_save:
         save_allowed = persist_memory and not require_memory_approval
         if save_allowed and allowed_categories_set:
             inferred_category = "preferences" if re.search(r"\b(like|prefer|favorite|always|usually)\b", fact_to_save, re.IGNORECASE) else "general"
@@ -478,6 +498,13 @@ def chat_with_agent(
             except Exception as e:
                 print(f"Failed to add fact to PGVector: {e}")
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
+        if not content and explicit_memory_request:
+            if save_allowed:
+                content = "Got it — I saved that to memory."
+            elif require_memory_approval:
+                content = "Got it — I captured that and sent it for memory approval."
+            else:
+                content = "I understood your memory request, but memory saving is currently disabled by policy."
 
     task_suggestions = _parse_create_task_tags(content)
     content = re.sub(r"\[CREATE_TASK:\s*.*?\]", "", content, flags=re.IGNORECASE | re.DOTALL).strip()

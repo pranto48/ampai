@@ -22,7 +22,7 @@ from queue import Queue, Empty
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
@@ -2296,7 +2296,18 @@ def get_sessions(
 ):
     sessions = get_all_sessions(query=query, category=category, archived=archived)
     if current_user.role != "admin":
-        accessible_ids = get_accessible_session_ids(username=current_user.username, is_admin=False)
+        accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
+        # Migration helper: adopt orphan legacy sessions (no owner mapping yet)
+        # so existing chat history remains visible after auth/access-control rollout.
+        orphan_session_ids = [s.get("session_id") for s in sessions if s.get("session_id") and s.get("session_id") not in accessible_ids]
+        adopted_any = False
+        for sid in orphan_session_ids:
+            if not get_session_owner(sid):
+                if ensure_session_owner(sid, current_user.username):
+                    adopted_any = True
+        if adopted_any:
+            accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
+
         shared_ids = set(list_shared_sessions_for_user(current_user.username))
         sessions = [s for s in sessions if s.get("session_id") in accessible_ids]
         for session in sessions:
@@ -3822,6 +3833,56 @@ def api_fullbackup_restore(request: FullRestoreRequest, user: UserContext = Depe
     return result
 
 
+
+
+@app.post("/api/admin/fullbackup/restore-upload")
+async def api_fullbackup_restore_upload(
+    backup_file: UploadFile = File(...),
+    restore_chats: bool = Form(True),
+    restore_memories: bool = Form(True),
+    restore_core_memories: bool = Form(True),
+    restore_users: bool = Form(True),
+    restore_configs: bool = Form(True),
+    restore_personas: bool = Form(True),
+    restore_tasks: bool = Form(True),
+    user: UserContext = Depends(require_admin_user),
+):
+    """Restore from an uploaded full-backup zip file (no server-side pre-save required)."""
+    filename = (backup_file.filename or "").strip()
+    if not filename.lower().endswith('.zip'):
+        raise HTTPException(status_code=400, detail="Please upload a .zip full backup file")
+
+    tmp_dir = tempfile.mkdtemp(prefix="ampai_restore_")
+    tmp_zip = os.path.join(tmp_dir, "uploaded_full_backup.zip")
+    try:
+        content = await backup_file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Uploaded backup file is empty")
+        with open(tmp_zip, "wb") as f:
+            f.write(content)
+
+        opts = {
+            "restore_chats": restore_chats,
+            "restore_memories": restore_memories,
+            "restore_core_memories": restore_core_memories,
+            "restore_users": restore_users,
+            "restore_configs": restore_configs,
+            "restore_personas": restore_personas,
+            "restore_tasks": restore_tasks,
+        }
+        result = restore_full_backup(tmp_zip, opts)
+        log_audit_event(username=user.username, action="admin.fullbackup.restore.upload",
+                        details=f"file={filename} ok={result.get('ok')}")
+        if not result.get("ok") and not result.get("summary"):
+            raise HTTPException(status_code=500, detail="; ".join(result.get("errors", ["Unknown restore error"])))
+        return result
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 @app.get("/api/admin/fullbackup/memory-categories")
 def api_fullbackup_memory_categories(user: UserContext = Depends(require_admin_user)):
     """Return memory category stats (count of sessions and candidates per category)."""
@@ -3889,26 +3950,41 @@ def _get_current_git_commit() -> str:
     return "unknown"
 
 
+
+
+def _extract_github_slug(repo_url: str) -> Optional[str]:
+    url = (repo_url or "").strip()
+    if not url:
+        return None
+    if url.startswith("git@github.com:"):
+        slug = url.split(":", 1)[1]
+    elif "github.com/" in url:
+        slug = url.split("github.com/", 1)[1]
+    else:
+        return None
+    slug = slug.strip().rstrip("/")
+    if slug.endswith(".git"):
+        slug = slug[:-4]
+    parts = [p for p in slug.split("/") if p]
+    if len(parts) < 2:
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
 def _fetch_remote_commit() -> str:
     """Fetch the latest commit hash from GitHub without cloning."""
-    try:
-        req = urllib.request.Request(
-            "https://api.github.com/repos/pranto48/ampai/commits/main",
-            headers={"Accept": "application/vnd.github.sha", "User-Agent": "ampai-updater/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.read().decode().strip()[:12]
-    except Exception:
-        pass
-    try:
-        req2 = urllib.request.Request(
-            "https://api.github.com/repos/pranto48/ampai/commits/master",
-            headers={"Accept": "application/vnd.github.sha", "User-Agent": "ampai-updater/1.0"},
-        )
-        with urllib.request.urlopen(req2, timeout=10) as resp:
-            return resp.read().decode().strip()[:12]
-    except Exception:
-        pass
+    slug = _extract_github_slug(REPO_URL)
+    if not slug:
+        return "unknown"
+    for branch in ["main", "master"]:
+        try:
+            req = urllib.request.Request(
+                f"https://api.github.com/repos/{slug}/commits/{branch}",
+                headers={"Accept": "application/vnd.github.sha", "User-Agent": "ampai-updater/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.read().decode().strip()[:12]
+        except Exception:
+            continue
     return "unknown"
 
 
@@ -4099,11 +4175,13 @@ def update_check_version(user: UserContext = Depends(require_admin_user)):
     """Return current and latest commit hashes."""
     current = _get_current_git_commit()
     latest = _fetch_remote_commit()
-    up_to_date = (current != "unknown" and latest != "unknown" and current == latest[:len(current)])
+    check_ok = current != "unknown" and latest != "unknown"
+    up_to_date = (check_ok and current == latest[:len(current)])
     return {
         "current_commit": current,
         "latest_commit": latest,
         "up_to_date": up_to_date,
+        "check_ok": check_ok,
         "repo_url": REPO_URL,
     }
 
