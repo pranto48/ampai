@@ -1787,34 +1787,57 @@ def admin_telegram_disconnect(current_user: UserContext = Depends(require_admin_
 
 @app.post("/api/integrations/telegram/webhook")
 def telegram_webhook(
-    request: Request,
     payload: Dict[str, Any],
     x_telegram_bot_api_secret_token: Optional[str] = Header(default=None),
 ):
     if not _config_bool("telegram_enabled", default=False):
         return {"status": "ignored", "reason": "disabled"}
-    if request.method != "POST":
-        raise HTTPException(status_code=405, detail="Method not allowed")
 
     expected_secret = (get_config("telegram_webhook_secret") or "").strip()
     if expected_secret and (x_telegram_bot_api_secret_token or "").strip() != expected_secret:
         logger.warning("telegram webhook rejected: invalid secret")
-        raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret")
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > TELEGRAM_MAX_WEBHOOK_BYTES:
-                raise HTTPException(status_code=413, detail="Payload too large")
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid Content-Length")
-    log_audit_event(username="telegram-webhook", action="integration.telegram.webhook_received")
+        return {"status": "ok"}
+
+    fields = _extract_telegram_update_fields(payload or {})
+    chat_id = fields.get("chat_id")
+    incoming_text = _sanitize_telegram_text(fields.get("text"))
+    if not chat_id or not incoming_text:
+        return {"status": "ok"}
+
+    session_id = f"tg_{chat_id}"
+    username = "telegram-bot"
+    model_type = (get_config("default_model", "ollama") or "ollama").strip().lower()
 
     try:
-        worker = threading.Thread(target=_process_telegram_update, args=(payload or {},), daemon=True)
-        worker.start()
+        result = chat_with_agent(
+            session_id=session_id,
+            message=incoming_text,
+            model_type=model_type,
+            api_key=None,
+            model_name=None,
+            memory_mode="indexed",
+            memory_top_k=5,
+            recency_bias=0.6,
+            category_filter="",
+            use_web_search=False,
+            attachments=[],
+            chat_output_mode="normal",
+            username=username,
+            is_admin=False,
+            allowed_memory_categories=[],
+            persist_memory=True,
+            require_memory_approval=False,
+            pii_strict_mode=True,
+        )
+        response_text = str((result or {}).get("response") or "").strip()
+        if response_text:
+            _send_telegram_message((get_config("telegram_bot_token") or "").strip(), chat_id, response_text)
+        ensure_session_owner(session_id, username)
+        touch_session(session_id)
+        log_audit_event(username=username, action="integration.telegram.webhook_processed", session_id=session_id)
     except Exception:
-        logger.exception("telegram webhook failed to enqueue")
-        log_audit_event(username="telegram-webhook", action="integration.telegram.webhook.enqueue_failure")
+        logger.exception("telegram webhook processing failed")
+        log_audit_event(username=username, action="integration.telegram.webhook.process_failure", session_id=session_id)
 
     return {"status": "ok"}
 
