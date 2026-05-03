@@ -1,0 +1,72 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: agent_postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=ampai
+      - POSTGRES_PASSWORD=ampai
+      - POSTGRES_DB=ampai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Use env-overridable host port to avoid conflicts (e.g. local Postgres on 5432)
+    ports:
+      - "${DB_HOST_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ampai -d ampai"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:alpine
+    container_name: agent_redis
+    restart: always
+    command: sh -c "redis-server --requirepass ${REDIS_PASSWORD:-ampairedis}"
+    ports:
+      - "${REDIS_HOST_PORT:-6380}:6379"
+    volumes:
+      - redisdata:/data
+
+  agent-web-app:
+    build: .
+    container_name: ai_agent_web
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "${APP_HOST_PORT:-8001}:8000"
+    volumes:
+      - ./agent_data/app:/app/data
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+      # Mount project root so the update endpoint can run git pull
+      - .:/app_host
+    environment:
+      - DATABASE_URL=postgresql://ampai:ampai@db:5432/ampai
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-ampairedis}@redis:6379/0
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # Auth / RBAC configuration
+      - JWT_SECRET=change-this-in-production
+      - JWT_EXPIRY_MINUTES=60
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=P@ssw0rd
+      - USER_USERNAME=user
+      - USER_PASSWORD=user123
+      # Update manager
+      - AMPAI_REPO_URL=https://github.com/pranto48/ampai.git
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/healthz\", timeout=3)'"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:

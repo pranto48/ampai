@@ -1,0 +1,8 @@
+.dyad/
+
+# Local env/secrets
+.env
+.env.*
+!.env.example
+!.env.dyad.example
+!.env.vercel.example
