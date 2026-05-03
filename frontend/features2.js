@@ -1703,6 +1703,13 @@ async function _tgcFetch() {
     apiJSON('/api/admin/integrations/telegram/status'),
   ]);
 
+  if (!sessRes.ok) {
+    const msg = sessRes.data?.detail || sessRes.error || 'Failed to load Telegram chats';
+    if (list) list.innerHTML = `<div class="card" style="text-align:center;color:var(--danger);padding:32px">
+      <div style="font-size:2rem;margin-bottom:8px">⚠️</div>${_esc(String(msg))}</div>`;
+    return;
+  }
+
   _tgcSessions = sessRes.data?.sessions || [];
   const statusData = statusRes.data || {};
 
