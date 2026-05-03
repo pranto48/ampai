@@ -237,7 +237,7 @@ async function loadSessions(query = '') {
   const list = document.getElementById('sessions-list');
   if (!list) return;
   const params = new URLSearchParams({ limit: 60, offset: 0 });
-  if (query) params.set('q', query);
+  if (query) params.set('query', query);
   const showSessions = (sessions) => {
     if (!sessions.length) {
       list.innerHTML = '<div style="padding:14px;text-align:center;font-size:.8rem;color:var(--muted)">No sessions yet.<br>Start a new chat!</div>';
