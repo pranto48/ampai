@@ -105,29 +105,107 @@ def _parse_create_task_tags(content: str) -> List[Dict[str, Any]]:
 
 
 
+# Phrases that signal an explicit memory-save command
+_EXPLICIT_MEMORY_PATTERNS = [
+    # "save to memory: ...", "save to memory '...'"  etc.
+    re.compile(
+        r'^\s*(?:please\s+)?save\s+(?:this\s+)?to\s+(?:my\s+)?memory\s*[:\-]?\s*[\"\u201c\u2018]?(.+?)[\"\u201d\u2019]?\s*$',
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # "add to memory: ..."
+    re.compile(
+        r'^\s*(?:please\s+)?add\s+(?:this\s+)?to\s+(?:my\s+)?memory\s*[:\-]?\s*[\"\u201c\u2018]?(.+?)[\"\u201d\u2019]?\s*$',
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # "remember: ...", "please remember ..."
+    re.compile(
+        r'^\s*(?:please\s+)?remember\s*[:\-]?\s*[\"\u201c\u2018]?(.+?)[\"\u201d\u2019]?\s*$',
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # "store in memory: ..."
+    re.compile(
+        r'^\s*(?:please\s+)?store\s+(?:this\s+)?in\s+(?:my\s+)?memory\s*[:\-]?\s*[\"\u201c\u2018]?(.+?)[\"\u201d\u2019]?\s*$',
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # "memorize: ..."
+    re.compile(
+        r'^\s*(?:please\s+)?memorize\s*[:\-]?\s*[\"\u201c\u2018]?(.+?)[\"\u201d\u2019]?\s*$',
+        re.IGNORECASE | re.DOTALL,
+    ),
+]
+
+
 def _extract_explicit_memory_request(message: str) -> str:
+    """Return the text the user wants saved, or empty string if not an explicit save command."""
     text = (message or "").strip()
     if not text:
         return ""
-    m = re.search(r'^\s*save\s+to\s+memory\s*[:\-]?\s*["“](.*?)["”]\s*$', text, flags=re.IGNORECASE | re.DOTALL)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r'^\s*save\s+to\s+memory\s*[:\-]?\s*(.+)$', text, flags=re.IGNORECASE | re.DOTALL)
-    if m:
-        return m.group(1).strip().strip('"“”')
+    for pattern in _EXPLICIT_MEMORY_PATTERNS:
+        m = pattern.match(text)
+        if m:
+            extracted = m.group(1).strip().strip('"\u201c\u201d\u2018\u2019')
+            if extracted:
+                return extracted
     return ""
+
+
+# ── Memory category auto-detection ─────────────────────────────────────────
+_CATEGORY_PATTERNS: List[tuple] = [
+    ("personal_info", re.compile(
+        r"\b(my name is|i('m| am)|born on|date of birth|nationality|citizen|passport|age|birthday|full name)\b",
+        re.IGNORECASE,
+    )),
+    ("work", re.compile(
+        r"\b(i work|my job|my role|i'm a|i am a|co-founder|founder|ceo|cto|chairman|manager|engineer|developer|designer|freelancer|consultant|company|organisation|organization)\b",
+        re.IGNORECASE,
+    )),
+    ("preferences", re.compile(
+        r"\b(i (like|love|prefer|enjoy|hate|dislike)|my preference|my favourite|favorite|always use|usually use)\b",
+        re.IGNORECASE,
+    )),
+    ("location", re.compile(
+        r"\b(i live|i'm based|i am based|my (home|city|country|address|location)|located in)\b",
+        re.IGNORECASE,
+    )),
+    ("contact", re.compile(
+        r"\b(my email|my phone|my number|contact me|reach me|telegram|whatsapp)\b",
+        re.IGNORECASE,
+    )),
+]
+
+
+def _infer_memory_category(fact: str) -> str:
+    """Return the best-matching memory category for a fact, or 'general'."""
+    for category, pattern in _CATEGORY_PATTERNS:
+        if pattern.search(fact or ""):
+            return category
+    return "general"
 
 
 def _normalize_memory_fact(fact: str) -> str:
     return re.sub(r"\s+", " ", (fact or "").strip())
 
-def _determine_memory_action(normalized_fact: str, persist_memory: bool, require_memory_approval: bool, allowed_memory_categories: list | None) -> str:
+def _determine_memory_action(
+    normalized_fact: str,
+    persist_memory: bool,
+    require_memory_approval: bool,
+    allowed_memory_categories: list | None,
+    force_save: bool = False,
+) -> str:
+    """Decide whether to save, pend, or block a memory fact.
+
+    Args:
+        force_save: When True (explicit user command), bypass require_memory_approval.
+    """
     if not normalized_fact:
         return ""
+    # Explicit user commands always save directly — skip approval gate.
+    if force_save and persist_memory:
+        return "saved"
     save_allowed = persist_memory and not require_memory_approval
     allowed_categories_set = {str(c).strip().lower() for c in (allowed_memory_categories or []) if str(c).strip()}
     if save_allowed and allowed_categories_set:
-        inferred_category = "preferences" if re.search(r"\b(like|prefer|favorite|always|usually)\b", normalized_fact, re.IGNORECASE) else "general"
+        inferred_category = _infer_memory_category(normalized_fact)
         save_allowed = inferred_category in allowed_categories_set
     if save_allowed:
         return "saved"
@@ -271,6 +349,7 @@ def chat_with_agent(
     use_web_search: bool = False,
     attachments: List[Dict] = None,
     chat_output_mode: str = None,
+    force_save: bool = False,
     **kwargs,
 ):
     if attachments is None:
@@ -495,6 +574,8 @@ def chat_with_agent(
     )
 
     explicit_memory_request = _extract_explicit_memory_request(message)
+    # force_save=True when the user explicitly commanded a save — bypass approval gate
+    effective_force_save = force_save or bool(explicit_memory_request)
     match = re.search(r'\[SAVE_MEMORY:\s*(.*?)\]', content, re.IGNORECASE | re.DOTALL)
     fact_to_save = ""
     if explicit_memory_request:
@@ -504,8 +585,16 @@ def chat_with_agent(
 
     normalized_fact = _normalize_memory_fact(fact_to_save)
     memory_action = ""
+    memory_category = ""
     if normalized_fact:
-        memory_action = _determine_memory_action(normalized_fact, persist_memory, require_memory_approval, allowed_memory_categories)
+        memory_category = _infer_memory_category(normalized_fact)
+        memory_action = _determine_memory_action(
+            normalized_fact,
+            persist_memory,
+            require_memory_approval,
+            allowed_memory_categories,
+            force_save=effective_force_save,
+        )
         if memory_action == "saved":
             add_core_memory(normalized_fact)
             try:
@@ -514,13 +603,17 @@ def chat_with_agent(
             except Exception as e:
                 print(f"Failed to add fact to PGVector: {e}")
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
+        # Guarantee a non-empty response so the frontend never shows "No response"
         if not content and explicit_memory_request:
             if memory_action == "saved":
-                content = "Got it — I saved that to memory."
+                content = f"\u2705 Saved to memory [{memory_category}]: {normalized_fact[:200]}"
             elif memory_action == "pending_approval":
-                content = "Got it — I captured that and sent it for memory approval."
+                content = "\U0001f4e5 Captured and queued for memory approval."
             else:
-                content = "I understood your memory request, but memory saving is currently disabled by policy."
+                content = "\u26a0\ufe0f Memory request understood, but saving is disabled by your current policy."
+        elif explicit_memory_request and memory_action == "saved" and content:
+            # Append a subtle inline confirmation if LLM wrote something
+            content = content.rstrip() + f"\n\n\u2705 Memory saved [{memory_category}]"
     task_suggestions = _parse_create_task_tags(content)
     content = re.sub(r"\[CREATE_TASK:\s*.*?\]", "", content, flags=re.IGNORECASE | re.DOTALL).strip()
     if not task_suggestions:
@@ -532,13 +625,14 @@ def chat_with_agent(
         attachment_names = [a['filename'] for a in attachments]
         message_log = f"[Attachments: {', '.join(attachment_names)}]\n" + message
 
-        pii_redaction_enabled = pii_strict_mode or str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
-        if pii_redaction_enabled:
-            message_log = redact_pii_text(message_log)
-            content = redact_pii_text(content)
+    pii_redaction_enabled = pii_strict_mode or str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    if pii_redaction_enabled:
+        message_log = redact_pii_text(message_log)
+        content = redact_pii_text(content)
 
-        sql_history.add_user_message(message_log)
-        sql_history.add_ai_message(content)
+    # Always persist every turn to SQL history (sessions load from here)
+    sql_history.add_user_message(message_log)
+    sql_history.add_ai_message(content)
 
     return {
         "response": content,
@@ -548,4 +642,5 @@ def chat_with_agent(
         "retrieval": retrieval_meta,
         "memory_action": memory_action or None,
         "memory_fact": normalized_fact or None,
+        "memory_category": memory_category or None,
     }

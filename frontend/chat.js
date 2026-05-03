@@ -377,7 +377,7 @@ async function _sendChat() {
     if (categoryFilter) payload.category_filter = categoryFilter;
   }
 
-  try {
+    try {
     const { ok, data } = await apiJSON('/api/chat', {
       method: 'POST',
       body: JSON.stringify({
@@ -396,7 +396,24 @@ async function _sendChat() {
     });
 
     if (ok) {
-      _appendMsg('ai', data.response || data.detail || 'No response');
+      const aiText = data.response || data.detail;
+      if (!aiText) {
+        _appendMsg('ai', '💬 (no text response — check your AI model settings)');
+      } else {
+        _appendMsg('ai', aiText);
+      }
+      // Show memory save feedback
+      const memStatus = data.memory_status || {};
+      const memAction = (memStatus.memory_action || data.memory_action || '').toLowerCase();
+      const memFact   = memStatus.memory_fact   || data.memory_fact   || '';
+      const memCat    = memStatus.memory_category || data.memory_category || '';
+      if (memAction === 'saved' && memFact) {
+        const snippet = memFact.length > 80 ? memFact.slice(0, 80) + '…' : memFact;
+        const catLabel = memCat ? ` [${memCat}]` : '';
+        toast(`✅ Memory saved${catLabel}: ${snippet}`, 'success');
+      } else if (memAction === 'pending_approval' && memFact) {
+        toast('📥 Memory captured — awaiting approval', 'info');
+      }
       _renderTaskSuggestions(data.task_suggestions || []);
       loadSessions(); // refresh sidebar
       _loadSessionTaskSuggestions(State.sessionId);

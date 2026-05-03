@@ -34,7 +34,7 @@ from sqlalchemy import text
 from zoneinfo import ZoneInfo
 
 from auth import bootstrap_default_admin
-from agent import chat_with_agent, get_llm, get_redis_history
+from agent import chat_with_agent, get_llm, get_redis_history, _extract_explicit_memory_request
 from memory_indexer import MemoryIndexer
 from database import (
     add_core_memory,
@@ -135,7 +135,7 @@ from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
     refresh_access_token as refresh_gmail_access_token,
 )
-from agent import chat_with_agent, get_redis_history
+
 from scheduler import start_scheduler, run_network_sweep
 from backup_helpers import (
     build_backup_payload,
@@ -599,8 +599,8 @@ def _get_memory_policy(username: str) -> Dict[str, Any]:
             pass
     return {
         "auto_capture_enabled": True,
-        "require_approval": True,
-        "pii_strict_mode": True,
+        "require_approval": False,
+        "pii_strict_mode": False,
         "retention_days": 365,
         "allowed_categories": [],
     }
@@ -1936,6 +1936,8 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         effective_recency_bias = max(0.0, min(1.0, effective_recency_bias))
         category_filter_value = (request.category_filter or request.memory_category_filter or "").strip()
         policy = _get_memory_policy(user.username)
+        # Detect whether the user is explicitly asking to save — bypass approval gate
+        explicit_save_fact = _extract_explicit_memory_request(request.message)
         result = chat_with_agent(
             session_id=request.session_id,
             message=message_for_agent,
@@ -1954,7 +1956,8 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             allowed_memory_categories=policy.get("allowed_categories") or [],
             persist_memory=bool(policy.get("auto_capture_enabled", True)),
             require_memory_approval=bool(policy.get("require_approval", False)),
-            pii_strict_mode=bool(policy.get("pii_strict_mode", True)),
+            pii_strict_mode=bool(policy.get("pii_strict_mode", False)),
+            force_save=bool(explicit_save_fact),
         )
         memory_action = (result.get("memory_action") or "").strip().lower()
         memory_fact = (result.get("memory_fact") or "").strip()
@@ -2012,8 +2015,16 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             result["response"] = cleaned or response_text
         if policy.get("auto_capture_enabled") and policy.get("require_approval"):
             user_msg = (request.message or "").strip()
-            if user_msg and re.search(r"\b(remember|preference|my name is|i prefer|always)\b", user_msg, re.IGNORECASE):
-                _create_memory_candidate(user.username, request.session_id, user_msg, confidence=0.65)
+            # Expanded heuristic: capture biographical / preference / professional facts
+            _AUTO_CAPTURE_RE = re.compile(
+                r"\b(remember|my name is|i('m| am)|i work|i live|born on|date of birth|"
+                r"i prefer|i like|i love|i dislike|my role|my job|co-founder|founder|"
+                r"chairman|ceo|cto|manager|freelancer|cybersecurity|developer|designer|"
+                r"i founded|acting|organization|company|nationality|citizen|from (dhaka|bangladesh)|always|usually)\b",
+                re.IGNORECASE,
+            )
+            if user_msg and _AUTO_CAPTURE_RE.search(user_msg):
+                _create_memory_candidate(user.username, request.session_id, user_msg, confidence=0.75)
         ensure_session_owner(request.session_id, user.username)
         touch_session(request.session_id)
         created_suggestions = _append_session_suggestions(request.session_id, result.get("task_suggestions") or [])
@@ -2029,6 +2040,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         result["memory_status"] = {
             "memory_action": memory_action or None,
             "memory_fact": memory_fact or None,
+            "memory_category": (result.get("memory_category") or None),
         }
         try:
             INSIGHT_QUEUE.put_nowait(request.session_id)
