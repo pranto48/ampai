@@ -1227,112 +1227,11 @@ function _fmtRelative(iso) {
 }
 
 // ═══════════════════════════════════════════════════
-// TELEGRAM INTEGRATION (admin/settings embedding)
+// TELEGRAM INTEGRATION — see improved implementation below
 // ═══════════════════════════════════════════════════
-let _telegramSettingsBound = false;
+let _telegramSettingsBound = false;  // kept for legacy compatibility
 let _telegramTokenSaved = false;
 let _telegramLastTestResult = '—';
-
-async function telegramSettingsLoad() {
-  await _fetchTelegramStatus();
-  await _fetchTelegramSettings();
-  if (_telegramSettingsBound) return;
-  _telegramSettingsBound = true;
-
-  document.getElementById('tg-save-btn')?.addEventListener('click', _saveTelegramSettings);
-  document.getElementById('tg-test-btn')?.addEventListener('click', _testTelegramGetMe);
-  document.getElementById('tg-register-btn')?.addEventListener('click', _registerTelegramWebhook);
-  document.getElementById('tg-remove-btn')?.addEventListener('click', _removeTelegramWebhook);
-}
-
-async function _fetchTelegramSettings() {
-  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/status');
-  if (!ok) return;
-  document.getElementById('tg-enabled') && (document.getElementById('tg-enabled').checked = !!data.enabled);
-  document.getElementById('tg-webhook-url') && (document.getElementById('tg-webhook-url').value = data.webhook_url || '');
-  const maskedToken = data.bot_token_masked || data.token_masked || "";
-  _telegramTokenSaved = !!maskedToken || !!data.token_saved || !!data.token_configured;
-  if (maskedToken) {
-    const tokenEl = document.getElementById('tg-bot-token');
-    if (tokenEl && !tokenEl.value) tokenEl.placeholder = maskedToken;
-  }
-}
-
-async function _saveTelegramSettings() {
-  const tokenEl = document.getElementById('tg-bot-token');
-  const payload = {
-    enabled: !!document.getElementById('tg-enabled')?.checked,
-    bot_token: tokenEl?.value?.trim() || undefined,
-    webhook_url: document.getElementById('tg-webhook-url')?.value?.trim() || '',
-    secret_token: document.getElementById('tg-secret-token')?.value?.trim() || '',
-  };
-  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/save', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-  toast(ok ? 'Telegram settings saved' : (data?.detail || 'Failed to save Telegram settings'), ok ? 'success' : 'error');
-  if (ok) {
-    _telegramTokenSaved = _telegramTokenSaved || !!payload.bot_token;
-    if (tokenEl) tokenEl.value = '';
-    const secretEl = document.getElementById('tg-secret-token'); if (secretEl) secretEl.value = '';
-    _fetchTelegramSettings();
-    _fetchTelegramStatus();
-  }
-}
-
-async function _testTelegramGetMe() {
-  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/test', { method: 'POST' });
-  _telegramLastTestResult = ok ? `Passed (${new Date().toLocaleTimeString()})` : `Failed (${new Date().toLocaleTimeString()})`;
-  toast(ok ? `Connected as @${data?.username || data?.bot_username || data?.result?.username || 'bot'}` : (data?.detail || 'Telegram getMe failed'), ok ? 'success' : 'error');
-  _fetchTelegramStatus();
-}
-
-async function _registerTelegramWebhook() {
-  const payload = {
-    webhook_url: document.getElementById('tg-webhook-url')?.value?.trim() || '',
-    secret_token: document.getElementById('tg-secret-token')?.value?.trim() || '',
-  };
-  if (!payload.webhook_url) return toast('Webhook URL is required', 'error');
-  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/connect', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-  toast(ok ? 'Webhook registered' : (data?.detail || 'Failed to register webhook'), ok ? 'success' : 'error');
-  if (ok) _fetchTelegramStatus();
-}
-
-async function _removeTelegramWebhook() {
-  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/disconnect', { method: 'POST' });
-  toast(ok ? 'Webhook removed' : (data?.detail || 'Failed to remove webhook'), ok ? 'success' : 'error');
-  if (ok) _fetchTelegramStatus();
-}
-
-async function _fetchTelegramStatus() {
-  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/status');
-  const enabledEl = document.getElementById('tg-status-enabled');
-  const tokenEl = document.getElementById('tg-status-token');
-  const lastTestEl = document.getElementById('tg-status-last-test');
-  if (!enabledEl || !tokenEl || !lastTestEl) return;
-
-  if (!ok) {
-    enabledEl.textContent = 'Disabled';
-    enabledEl.className = 'badge badge-red';
-    tokenEl.textContent = _telegramTokenSaved ? 'Saved' : 'Not saved';
-    tokenEl.className = _telegramTokenSaved ? 'badge badge-green' : 'badge badge-red';
-    lastTestEl.textContent = _telegramLastTestResult;
-    return;
-  }
-
-  const enabled = !!(data.enabled ?? data.connected ?? data.ok);
-  enabledEl.textContent = enabled ? 'Enabled' : 'Disabled';
-  enabledEl.className = enabled ? 'badge badge-green' : 'badge badge-red';
-
-  _telegramTokenSaved = _telegramTokenSaved || !!data.bot_token_masked || !!data.token_masked || !!data.token_saved || !!data.token_configured;
-  tokenEl.textContent = _telegramTokenSaved ? 'Saved' : 'Not saved';
-  tokenEl.className = _telegramTokenSaved ? 'badge badge-green' : 'badge badge-red';
-
-  lastTestEl.textContent = data.last_test_result || _telegramLastTestResult;
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AGENT MEMORY VAULT
@@ -1495,31 +1394,8 @@ function _amvRenderPb(pbFiles, q) {
   list.innerHTML = html || `<div class="card" style="text-align:center;color:var(--muted);padding:24px">No results match your search.</div>`;
 }
 
-function _amvRenderCore(memories, q) {
-  const list = document.getElementById('amv-core-list');
-  if (!list) return;
-  const filtered = q
-    ? memories.filter(m => (m.fact || '').toLowerCase().includes(q))
-    : memories;
+// _amvRenderCore — see improved version with edit/save below
 
-  if (!filtered.length) {
-    list.innerHTML = `<div style="text-align:center;color:var(--muted);padding:24px;font-size:.875rem">
-      ${q ? 'No core memories match your search.' : '✨ No core memories saved yet. Chat with AmpAI and it will save key facts here.'}
-    </div>`;
-    return;
-  }
-
-  list.innerHTML = filtered.map(m => `
-<div style="display:flex;align-items:flex-start;gap:10px;background:var(--bg-2);border:1px solid var(--border);
-  border-radius:10px;padding:12px 16px;transition:border-color .15s"
-  onmouseenter="this.style.borderColor='rgba(16,185,129,.4)'"
-  onmouseleave="this.style.borderColor='var(--border)'">
-  <span style="font-size:.95rem;margin-top:1px">🧠</span>
-  <div style="flex:1;font-size:.875rem;line-height:1.55;word-break:break-word">${_esc(m.fact || '')}</div>
-  <button class="btn btn-danger btn-sm" style="font-size:.72rem;flex-shrink:0"
-    onclick="_amvDeleteCore(${m.id})">🗑</button>
-</div>`).join('');
-}
 
 function _amvToggleFile(id) {
   const el = document.getElementById(id);
@@ -1578,4 +1454,356 @@ function _fmtBytes(bytes) {
 function _safeSet(id, val) {
   const el = document.getElementById(id);
   if (el) el.textContent = String(val ?? '—');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORE MEMORY — EDIT support for Agent Memory Vault
+// ═══════════════════════════════════════════════════════════════════════════
+function _amvRenderCore(memories, q) {
+  const list = document.getElementById('amv-core-list');
+  if (!list) return;
+  const filtered = q
+    ? memories.filter(m => (m.fact || '').toLowerCase().includes(q))
+    : memories;
+
+  if (!filtered.length) {
+    list.innerHTML = `<div style="text-align:center;color:var(--muted);padding:24px;font-size:.875rem">
+      ${q ? 'No core memories match your search.' : '✨ No core memories saved yet.'}
+    </div>`;
+    return;
+  }
+
+  list.innerHTML = filtered.map(m => `
+<div id="amv-core-row-${m.id}" style="display:flex;align-items:flex-start;gap:10px;background:var(--bg-2);border:1px solid var(--border);
+  border-radius:10px;padding:12px 16px;transition:border-color .15s"
+  onmouseenter="this.style.borderColor='rgba(16,185,129,.4)'"
+  onmouseleave="this.style.borderColor='var(--border)'">
+  <span style="font-size:.95rem;margin-top:1px">🧠</span>
+  <div style="flex:1;font-size:.875rem;line-height:1.55;word-break:break-word" id="amv-core-text-${m.id}">${_esc(m.fact || '')}</div>
+  <div style="display:flex;gap:6px;flex-shrink:0">
+    <button class="btn btn-ghost btn-sm" style="font-size:.72rem" onclick="_amvEditCore(${m.id})">✏️</button>
+    <button class="btn btn-danger btn-sm" style="font-size:.72rem" onclick="_amvDeleteCore(${m.id})">🗑</button>
+  </div>
+</div>`).join('');
+}
+
+function _amvEditCore(id) {
+  const row = document.getElementById(`amv-core-row-${id}`);
+  const textEl = document.getElementById(`amv-core-text-${id}`);
+  if (!row || !textEl) return;
+  const current = textEl.textContent;
+  textEl.outerHTML = `<textarea id="amv-core-edit-${id}" style="flex:1;font-size:.875rem;line-height:1.55;
+    background:var(--bg-3);border:1px solid rgba(99,102,241,.4);border-radius:6px;padding:6px 8px;
+    color:var(--text);font-family:inherit;resize:vertical;min-height:60px">${current}</textarea>`;
+  // swap buttons
+  const btns = row.querySelector('div[style*="flex-shrink"]');
+  if (btns) btns.innerHTML = `
+    <button class="btn btn-primary btn-sm" style="font-size:.72rem" onclick="_amvSaveEdit(${id})">💾 Save</button>
+    <button class="btn btn-ghost btn-sm" style="font-size:.72rem" onclick="_amvFetch()">✕</button>`;
+}
+
+async function _amvSaveEdit(id) {
+  const ta = document.getElementById(`amv-core-edit-${id}`);
+  const fact = ta?.value.trim();
+  if (!fact) { toast('Fact cannot be empty', 'error'); return; }
+  const { ok } = await apiJSON(`/api/core-memories/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ fact }),
+  });
+  if (ok) { toast('Memory updated ✓', 'success'); await _amvFetch(); }
+  else toast('Failed to update memory', 'error');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TELEGRAM SETTINGS — improved with wizard, mode select, webhook-info
+// ═══════════════════════════════════════════════════════════════════════════
+let _tgBound = false;
+let _tgCurrentMode = 'polling'; // 'polling' | 'webhook'
+
+function _tgSelectMode(mode) {
+  _tgCurrentMode = mode;
+  const pollingCard = document.getElementById('tg-mode-polling-card');
+  const webhookCard = document.getElementById('tg-mode-webhook-card');
+  if (pollingCard) pollingCard.style.borderColor = mode === 'polling' ? '#818cf8' : 'var(--border)';
+  if (webhookCard) webhookCard.style.borderColor = mode === 'webhook' ? '#818cf8' : 'var(--border)';
+}
+
+async function telegramSettingsLoad() {
+  await _fetchTelegramStatus();
+  await _fetchTelegramSettings();
+  if (_tgBound) return;
+  _tgBound = true;
+
+  document.getElementById('tg-save-btn')?.addEventListener('click', _saveTelegramSettings);
+  document.getElementById('tg-test-btn')?.addEventListener('click', _testTelegramGetMe);
+  document.getElementById('tg-register-btn')?.addEventListener('click', _registerTelegramWebhook);
+  document.getElementById('tg-remove-btn')?.addEventListener('click', _removeTelegramWebhook);
+  document.getElementById('tg-enable-polling-btn')?.addEventListener('click', _enableTelegramPolling);
+  document.getElementById('tg-webhook-info-btn')?.addEventListener('click', _showWebhookInfo);
+}
+
+async function _fetchTelegramSettings() {
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/status');
+  if (!ok) return;
+  const enabledEl = document.getElementById('tg-enabled');
+  if (enabledEl) enabledEl.checked = !!data.enabled;
+  const webhookEl = document.getElementById('tg-webhook-url');
+  if (webhookEl && data.webhook_url) webhookEl.value = data.webhook_url;
+  const masked = data.bot_token_masked || data.token_masked || '';
+  _telegramTokenSaved = !!masked || !!data.token_configured;
+  if (masked) {
+    const inp = document.getElementById('tg-bot-token');
+    if (inp && !inp.value) inp.placeholder = masked;
+    const hint = document.getElementById('tg-token-hint');
+    if (hint) hint.textContent = `Token saved (${masked}). Leave blank to keep.`;
+  }
+  // Highlight active mode
+  const isPolling = !!data.polling_enabled;
+  _tgSelectMode(isPolling ? 'polling' : 'webhook');
+}
+
+async function _saveTelegramSettings() {
+  const tokenEl = document.getElementById('tg-bot-token');
+  const payload = {
+    enabled: !!document.getElementById('tg-enabled')?.checked,
+    bot_token: tokenEl?.value?.trim() || undefined,
+    webhook_url: document.getElementById('tg-webhook-url')?.value?.trim() || '',
+    secret_token: document.getElementById('tg-secret-token')?.value?.trim() || '',
+  };
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/save', {
+    method: 'POST', body: JSON.stringify(payload),
+  });
+  toast(ok ? '✓ Telegram settings saved' : (data?.detail || 'Failed to save'), ok ? 'success' : 'error');
+  if (ok) {
+    _telegramTokenSaved = _telegramTokenSaved || !!payload.bot_token;
+    if (tokenEl) tokenEl.value = '';
+    const secEl = document.getElementById('tg-secret-token');
+    if (secEl) secEl.value = '';
+    await _fetchTelegramSettings();
+    await _fetchTelegramStatus();
+  }
+}
+
+async function _testTelegramGetMe() {
+  const btn = document.getElementById('tg-test-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Testing…'; }
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/test', { method: 'POST' });
+  if (btn) { btn.disabled = false; btn.textContent = '🔍 Verify Token'; }
+  _telegramLastTestResult = ok ? `Passed (${new Date().toLocaleTimeString()})` : `Failed (${new Date().toLocaleTimeString()})`;
+  const botName = data?.bot_username || data?.username || '';
+  toast(ok ? `✓ Connected as @${botName || 'bot'}` : (data?.detail || 'Telegram getMe failed'), ok ? 'success' : 'error');
+  const botnameEl = document.getElementById('tg-status-botname');
+  if (botnameEl && botName) botnameEl.textContent = '@' + botName;
+  await _fetchTelegramStatus();
+}
+
+async function _registerTelegramWebhook() {
+  const webhookUrl = document.getElementById('tg-webhook-url')?.value?.trim() || '';
+  if (!webhookUrl) { toast('Enter webhook URL first', 'error'); _tgSelectMode('webhook'); return; }
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/connect', { method: 'POST', body: JSON.stringify({ webhook_url: webhookUrl }) });
+  toast(ok ? '✓ Webhook registered' : (data?.detail || 'Failed'), ok ? 'success' : 'error');
+  if (ok) { await _fetchTelegramStatus(); _tgSelectMode('webhook'); }
+}
+
+async function _enableTelegramPolling() {
+  const btn = document.getElementById('tg-enable-polling-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/enable-polling', { method: 'POST' });
+  if (btn) { btn.disabled = false; btn.textContent = 'Enable Polling'; }
+  toast(ok ? '✓ Polling mode enabled' : (data?.detail || 'Failed'), ok ? 'success' : 'error');
+  if (ok) { await _fetchTelegramStatus(); _tgSelectMode('polling'); }
+}
+
+async function _removeTelegramWebhook() {
+  if (!confirm('Disconnect Telegram webhook?')) return;
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/disconnect', { method: 'POST' });
+  toast(ok ? '✓ Webhook removed' : (data?.detail || 'Failed'), ok ? 'success' : 'error');
+  if (ok) await _fetchTelegramStatus();
+}
+
+async function _showWebhookInfo() {
+  const panel = document.getElementById('tg-webhook-info-panel');
+  const content = document.getElementById('tg-webhook-info-content');
+  if (!panel) return;
+  const visible = panel.style.display !== 'none';
+  if (visible) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  if (content) content.textContent = 'Loading…';
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/webhook-info');
+  if (!ok) { if (content) content.innerHTML = `<span style="color:var(--red)">${_esc(data?.detail || 'Failed to fetch webhook info')}</span>`; return; }
+  if (content) {
+    const rows = [
+      ['URL', data.url || '(none)'],
+      ['Pending updates', data.pending_update_count ?? 0],
+      ['Last error', data.last_error_message || '—'],
+      ['Max connections', data.max_connections ?? '—'],
+      ['Custom cert', data.has_custom_certificate ? 'Yes' : 'No'],
+    ];
+    content.innerHTML = rows.map(([k, v]) => `
+      <div style="display:flex;gap:10px;padding:4px 0;border-bottom:1px solid var(--border)">
+        <span style="color:var(--muted);min-width:130px">${k}</span>
+        <span style="word-break:break-all">${_esc(String(v))}</span>
+      </div>`).join('');
+  }
+}
+
+async function _fetchTelegramStatus() {
+  const { ok, data } = await apiJSON('/api/admin/integrations/telegram/status');
+  const enabledEl  = document.getElementById('tg-status-enabled');
+  const tokenEl    = document.getElementById('tg-status-token');
+  const modeEl     = document.getElementById('tg-status-mode');
+  const lastTestEl = document.getElementById('tg-status-last-test');
+  if (!enabledEl || !tokenEl || !lastTestEl) return;
+
+  if (!ok) {
+    enabledEl.textContent = 'Disabled'; enabledEl.className = 'badge badge-red';
+    tokenEl.textContent = _telegramTokenSaved ? 'Saved' : 'Not saved';
+    tokenEl.className = _telegramTokenSaved ? 'badge badge-green' : 'badge badge-red';
+    lastTestEl.textContent = _telegramLastTestResult;
+    return;
+  }
+  const enabled = !!(data.enabled ?? data.ok);
+  enabledEl.textContent = enabled ? 'Enabled' : 'Disabled';
+  enabledEl.className = enabled ? 'badge badge-green' : 'badge badge-red';
+
+  _telegramTokenSaved = _telegramTokenSaved || !!data.token_masked || !!data.token_configured;
+  tokenEl.textContent = _telegramTokenSaved ? 'Saved' : 'Not saved';
+  tokenEl.className = _telegramTokenSaved ? 'badge badge-green' : 'badge badge-red';
+
+  if (modeEl) {
+    const polling = !!data.polling_enabled;
+    modeEl.textContent = polling ? '🔄 Polling' : (data.webhook_url ? '🌐 Webhook' : '—');
+    _tgSelectMode(polling ? 'polling' : 'webhook');
+  }
+  lastTestEl.textContent = data.last_test_result || _telegramLastTestResult;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TELEGRAM CHATS PAGE
+// ═══════════════════════════════════════════════════════════════════════════
+let _tgcBound = false;
+let _tgcSessions = [];
+
+async function tgChatsLoad() {
+  if (!_tgcBound) {
+    _tgcBound = true;
+    document.getElementById('tgc-refresh-btn')?.addEventListener('click', _tgcFetch);
+    document.getElementById('tgc-search')?.addEventListener('input', _tgcRenderList);
+  }
+  await _tgcFetch();
+}
+
+async function _tgcFetch() {
+  const list = document.getElementById('tgc-list');
+  if (list) list.innerHTML = `<div class="card" style="text-align:center;color:var(--muted);padding:32px">
+    <div style="font-size:2rem;margin-bottom:8px">⏳</div>Loading…</div>`;
+
+  const [sessRes, statusRes] = await Promise.all([
+    apiJSON('/api/admin/integrations/telegram/sessions'),
+    apiJSON('/api/admin/integrations/telegram/status'),
+  ]);
+
+  _tgcSessions = sessRes.data?.sessions || [];
+  const statusData = statusRes.data || {};
+
+  // Stats
+  const now = Date.now();
+  const sevenDaysAgo = now - 7 * 24 * 3600 * 1000;
+  const active = _tgcSessions.filter(s => s.updated_at && new Date(s.updated_at).getTime() > sevenDaysAgo).length;
+  _safeSet('tgc-stat-total',  _tgcSessions.length);
+  _safeSet('tgc-stat-active', active);
+  _safeSet('tgc-stat-mode',   statusData.polling_enabled ? '🔄 Polling' : (statusData.webhook_url ? '🌐 Webhook' : '—'));
+
+  const badge = document.getElementById('tgc-count-badge');
+  if (badge) { badge.textContent = `${_tgcSessions.length} chat${_tgcSessions.length !== 1 ? 's' : ''}`; badge.style.display = ''; }
+
+  // Fetch webhook info for pending + error
+  const whRes = await apiJSON('/api/admin/integrations/telegram/webhook-info').catch(() => ({ ok: false, data: {} }));
+  if (whRes.ok) {
+    _safeSet('tgc-stat-pending', whRes.data?.pending_update_count ?? 0);
+    const errMsg = whRes.data?.last_error_message || '';
+    const healthBar = document.getElementById('tgc-health-bar');
+    const healthErr = document.getElementById('tgc-health-error');
+    if (healthBar) healthBar.style.display = errMsg ? '' : 'none';
+    if (healthErr) healthErr.textContent = errMsg;
+  }
+
+  _tgcRenderList();
+}
+
+function _tgcRenderList() {
+  const list = document.getElementById('tgc-list');
+  if (!list) return;
+  const q = (document.getElementById('tgc-search')?.value || '').toLowerCase();
+  const items = _tgcSessions.filter(s =>
+    !q || (s.session_id || '').toLowerCase().includes(q) || (s.owner || '').toLowerCase().includes(q)
+  );
+
+  if (!items.length) {
+    list.innerHTML = `<div class="card" style="text-align:center;color:var(--muted);padding:40px">
+      <div style="font-size:3rem;margin-bottom:12px">✈️</div>
+      <div style="font-size:.95rem;font-weight:600;margin-bottom:6px">No Telegram chats yet</div>
+      <div style="font-size:.8rem">Messages from your Telegram bot will appear here.</div>
+      <button class="btn btn-primary btn-sm" style="margin-top:16px" onclick="navigate('settings')">⚙️ Configure Bot</button>
+    </div>`;
+    return;
+  }
+
+  list.innerHTML = items.map(s => {
+    const sid     = s.session_id || '';
+    const parts   = sid.replace(/^tg_/, '').split('_');
+    const chatId  = parts[0] || '?';
+    const userId  = parts[1] || '';
+    const owner   = s.owner || 'telegram-bot';
+    const updated = s.updated_at ? _fmtRelative(s.updated_at) : '—';
+    const cat     = s.category || 'General';
+    return `
+<div style="background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;
+  display:flex;align-items:center;gap:14px;transition:border-color .15s;cursor:pointer"
+  onmouseenter="this.style.borderColor='rgba(99,102,241,.45)'"
+  onmouseleave="this.style.borderColor='var(--border)'"
+  onclick="_tgcOpenChat('${_esc(sid)}','${_esc(chatId)}','${_esc(userId)}')">
+  <div style="width:42px;height:42px;border-radius:50%;background:linear-gradient(135deg,#818cf8,#c084fc);
+    display:flex;align-items:center;justify-content:center;font-size:1.1rem;flex-shrink:0">✈️</div>
+  <div style="flex:1;min-width:0">
+    <div style="font-weight:700;font-size:.9rem;margin-bottom:3px">Chat ${chatId}${userId ? ` · User ${userId}` : ''}</div>
+    <div style="font-size:.75rem;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap">
+      <span>👤 ${_esc(owner)}</span>
+      <span>🏷️ ${_esc(cat)}</span>
+      <span>🕐 ${updated}</span>
+    </div>
+  </div>
+  <button class="btn btn-primary btn-sm" style="flex-shrink:0">View Chat</button>
+</div>`;
+  }).join('');
+}
+
+async function _tgcOpenChat(sessionId, chatId, userId) {
+  const modal    = document.getElementById('modal-tg-chat');
+  const body     = document.getElementById('tgc-modal-body');
+  const titleEl  = document.getElementById('tgc-modal-title');
+  const sidEl    = document.getElementById('tgc-modal-session-id');
+  if (!modal || !body) return;
+
+  if (titleEl) titleEl.textContent = `Telegram Chat ${chatId}${userId ? ' · User ' + userId : ''}`;
+  if (sidEl) sidEl.textContent = sessionId;
+  body.innerHTML = `<div style="text-align:center;color:var(--muted);padding:32px">Loading messages…</div>`;
+  modal.style.display = 'flex';
+
+  const { ok, data } = await apiJSON(`/api/history/${encodeURIComponent(sessionId)}`);
+  if (!ok) { body.innerHTML = `<div style="color:var(--red);text-align:center;padding:24px">Failed to load chat.</div>`; return; }
+
+  const msgs = data.messages || [];
+  if (!msgs.length) { body.innerHTML = `<div style="text-align:center;color:var(--muted);padding:24px">No messages yet.</div>`; return; }
+
+  body.innerHTML = msgs.map(m => {
+    const isUser = m.type === 'human';
+    return `<div style="padding:10px 14px;border-radius:10px;font-size:.875rem;line-height:1.6;max-width:88%;
+      ${isUser
+        ? 'background:linear-gradient(135deg,rgba(99,102,241,.2),rgba(192,132,252,.15));align-self:flex-end;text-align:right'
+        : 'background:var(--bg-3);border:1px solid var(--border);align-self:flex-start'}">
+      <div style="font-size:.68rem;font-weight:700;color:var(--muted);margin-bottom:4px">${isUser ? '👤 User' : '🤖 AmpAI'}</div>
+      <div>${_esc(m.content || '').replace(/\n/g, '<br>')}</div>
+    </div>`;
+  }).join('');
 }

@@ -48,12 +48,13 @@ function closeModal(id) { document.getElementById(id)?.classList.remove('open');
 // ── Navigation ─────────────────────────────────────
 // Two top-level pages: #page-login and #page-shell.
 // Sub-pages live inside #page-shell as .subpage divs.
-const SUBPAGES = ['chat','memory','inbox','agentmemory','brief','tasks','personas','workspace','analytics','network','models','settings','admin','dockerupdate','fullbackup'];
+const SUBPAGES = ['chat','memory','inbox','agentmemory','brief','tasks','personas','workspace','analytics','network','models','settings','admin','dockerupdate','fullbackup','tgchats'];
 const PAGE_TITLES = {
   chat:'Chat', memory:'Memory Explorer', inbox:'Memory Inbox', agentmemory:'Agent Memory Vault',
   brief:'Daily Brief', tasks:'Task Manager',
   personas:'Persona Library', workspace:'Workspaces', analytics:'Analytics', network:'Network Monitor',
-  models:'AI Models', settings:'Settings', admin:'Admin Panel', dockerupdate:'Docker Update', fullbackup:'Full Backup'
+  models:'AI Models', settings:'Settings', admin:'Admin Panel', dockerupdate:'Docker Update',
+  fullbackup:'Full Backup', tgchats:'Telegram Chats'
 };
 
 function navigate(page) {
@@ -120,6 +121,7 @@ function _onPageEnter(page) {
   if (page === 'settings')     settingsLoad();
   if (page === 'dockerupdate') dockerUpdateLoad();
   if (page === 'fullbackup')   fullBackupLoad();
+  if (page === 'tgchats')      tgChatsLoad();
 }
 
 // ── Auth ───────────────────────────────────────────
@@ -331,6 +333,9 @@ function _shellHTML() {
         <button class="nav-item admin-only hidden" data-page="fullbackup">
           <span class="icon">💾</span><span class="sidebar-label">Full Backup</span>
         </button>
+        <button class="nav-item admin-only hidden" data-page="tgchats">
+          <span class="icon">✈️</span><span class="sidebar-label">Telegram Chats</span>
+        </button>
       </nav>
       <div class="sidebar-footer">
         <button class="nav-item w-full" id="logout-btn">
@@ -390,6 +395,7 @@ function _shellHTML() {
       <div id="sp-admin"         class="subpage hidden page-content">${buildAdminPage()}</div>
       <div id="sp-dockerupdate"  class="subpage hidden page-content">${buildDockerUpdatePage()}</div>
       <div id="sp-fullbackup"    class="subpage hidden page-content">${buildFullBackupPage()}</div>
+      <div id="sp-tgchats"       class="subpage hidden page-content">${buildTelegramChatsPage()}</div>
     </div>
   </div>
 </div>

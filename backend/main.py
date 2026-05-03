@@ -41,6 +41,7 @@ from database import (
     add_network_target,
     create_task,
     delete_core_memory,
+    update_core_memory,
     delete_network_target,
     delete_session_metadata,
     delete_task,
@@ -1725,10 +1726,12 @@ def admin_telegram_status(current_user: UserContext = Depends(require_admin_user
     bot_token = (get_config("telegram_bot_token") or "").strip()
     webhook_url = (get_config("telegram_webhook_url") or "").strip()
     enabled = _config_bool("telegram_enabled", default=False)
+    polling_enabled = _config_bool("telegram_polling_enabled", default=False)
     log_audit_event(username=current_user.username, action="integration.telegram.admin_status")
     return {
         "ok": True,
         "enabled": enabled,
+        "polling_enabled": polling_enabled,
         "webhook_url": webhook_url,
         "token_configured": bool(bot_token),
         "token_masked": _mask_telegram_token(bot_token),
@@ -1742,14 +1745,77 @@ def admin_telegram_save(request: TelegramIntegrationSaveRequest, current_user: U
     set_config("telegram_webhook_url", (request.webhook_url or "").strip())
     set_config("telegram_webhook_secret", (request.secret_token or "").strip())
     set_config("telegram_enabled", "true" if request.enabled else "false")
+    # Preserve polling_enabled — it is managed separately via /enable-polling endpoint
     log_audit_event(username=current_user.username, action="integration.telegram.admin_save")
     return {
         "ok": True,
         "enabled": bool(request.enabled),
+        "polling_enabled": _config_bool("telegram_polling_enabled", default=False),
         "webhook_url": (request.webhook_url or "").strip(),
         "token_configured": bool((request.bot_token or "").strip()),
         "token_masked": _mask_telegram_token(request.bot_token or ""),
     }
+
+
+@app.post("/api/admin/integrations/telegram/enable-polling")
+def admin_telegram_enable_polling(current_user: UserContext = Depends(require_admin_user)):
+    """Switch to long-polling mode (disables webhook)."""
+    token = (get_config("telegram_bot_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Telegram bot token is required")
+    # Optionally clear any existing webhook so Telegram doesn't dual-deliver
+    try:
+        delete_webhook(token)
+    except Exception:
+        pass
+    set_config("telegram_polling_enabled", "true")
+    set_config("telegram_enabled", "true")
+    _start_telegram_poller_if_enabled()
+    log_audit_event(username=current_user.username, action="integration.telegram.enable_polling")
+    return {"ok": True, "mode": "polling"}
+
+
+@app.post("/api/admin/integrations/telegram/disable-polling")
+def admin_telegram_disable_polling(current_user: UserContext = Depends(require_admin_user)):
+    set_config("telegram_polling_enabled", "false")
+    log_audit_event(username=current_user.username, action="integration.telegram.disable_polling")
+    return {"ok": True, "mode": "webhook"}
+
+
+@app.get("/api/admin/integrations/telegram/webhook-info")
+def admin_telegram_webhook_info(current_user: UserContext = Depends(require_admin_user)):
+    """Returns live webhook status from Telegram's getWebhookInfo."""
+    token = (get_config("telegram_bot_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Telegram bot token not configured")
+    try:
+        url = f"https://api.telegram.org/bot{token}/getWebhookInfo"
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            payload = json.loads((resp.read() or b"{}").decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Telegram API error: {exc}") from exc
+    result = payload.get("result") or {}
+    return {
+        "ok": True,
+        "url": result.get("url", ""),
+        "pending_update_count": result.get("pending_update_count", 0),
+        "last_error_date": result.get("last_error_date"),
+        "last_error_message": result.get("last_error_message", ""),
+        "max_connections": result.get("max_connections"),
+        "has_custom_certificate": result.get("has_custom_certificate", False),
+        "allowed_updates": result.get("allowed_updates", []),
+    }
+
+
+@app.get("/api/admin/integrations/telegram/sessions")
+def admin_telegram_sessions(current_user: UserContext = Depends(require_admin_user)):
+    """Lists all Telegram chat sessions and their message counts."""
+    all_sessions = get_all_sessions(limit=500, offset=0)
+    tg_sessions = [
+        s for s in (all_sessions.get("sessions") or [])
+        if (s.get("session_id") or "").startswith("tg_")
+    ]
+    return {"sessions": tg_sessions, "total": len(tg_sessions)}
 
 
 @app.post("/api/admin/integrations/telegram/test")
@@ -3757,6 +3823,30 @@ def api_add_core_memory(request: dict, user=Depends(require_authenticated_user))
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save core memory")
     log_audit_event(username=user.username, action="memory.write.core", details=f"fact_len={len(fact)}")
+    return {"status": "success"}
+
+
+@app.patch("/api/core-memories/{mem_id}")
+def api_edit_core_memory(mem_id: int, request: dict, user=Depends(require_authenticated_user)):
+    fact = (request.get("fact") or "").strip()
+    if not fact:
+        raise HTTPException(status_code=400, detail="fact is required")
+    success = update_core_memory(mem_id, fact)
+    if not success:
+        raise HTTPException(status_code=404, detail="Memory not found or unchanged")
+    log_audit_event(username=user.username, action="memory.edit.core", details=f"id={mem_id}")
+    return {"status": "success"}
+
+
+@app.patch("/api/admin/core-memories/{mem_id}")
+def api_admin_edit_core_memory(mem_id: int, request: dict, user=Depends(require_admin_user)):
+    fact = (request.get("fact") or "").strip()
+    if not fact:
+        raise HTTPException(status_code=400, detail="fact is required")
+    success = update_core_memory(mem_id, fact)
+    if not success:
+        raise HTTPException(status_code=404, detail="Memory not found or unchanged")
+    log_audit_event(username=user.username, action="memory.edit.core.admin", details=f"id={mem_id}")
     return {"status": "success"}
 
 

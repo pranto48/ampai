@@ -1347,6 +1347,21 @@ def delete_core_memory(mem_id: int):
         return False
 
 
+def update_core_memory(mem_id: int, fact: str):
+    if not engine: return False
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("UPDATE core_memories SET fact = :f WHERE id = :id"),
+                {"f": fact, "id": mem_id}
+            )
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.warning(f"Error updating core memory {mem_id}: {e}")
+        return False
+
+
 def get_network_targets():
     if not engine: return []
     try:

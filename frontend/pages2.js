@@ -645,44 +645,148 @@ function buildAgentMemoryViewerPage() {
 </div>`;
 }
 
-// ── Telegram Integration Card (for admin/settings embedding) ───────────────
+// ── Telegram Integration Card (improved wizard) ─────────────────────────────
 function buildTelegramIntegrationCard() {
   return `
-<div class="card" id="telegram-integration-card" style="margin-top:16px">
-  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px">
-    <div class="card-title">📨 Telegram</div>
-    <label style="display:flex;align-items:center;gap:8px;font-size:.82rem;color:var(--muted)">
-      <input id="tg-enabled" type="checkbox" style="accent-color:var(--accent)"/>
-      Enable
+<div class="card" id="telegram-integration-card" style="margin-top:16px;border:1px solid rgba(99,102,241,.2)">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:1.5rem">✈️</span>
+      <div>
+        <div class="card-title" style="margin-bottom:2px">Telegram Bot</div>
+        <div style="font-size:.75rem;color:var(--muted)">Connect your bot · choose polling or webhook</div>
+      </div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:.82rem;cursor:pointer">
+      <input id="tg-enabled" type="checkbox" style="accent-color:var(--accent);width:16px;height:16px"/>
+      <span>Enable</span>
     </label>
   </div>
 
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
-    <div class="fg" style="margin:0">
-      <label class="lbl">Bot token</label>
-      <input id="tg-bot-token" type="password" class="input" placeholder="123456:ABCDEF..." autocomplete="off"/>
-    </div>
-    <div class="fg" style="margin:0">
-      <label class="lbl">Webhook URL</label>
-      <input id="tg-webhook-url" class="input" placeholder="https://example.com/api/integrations/telegram/webhook"/>
-    </div>
-    <div class="fg" style="margin:0;grid-column:1 / -1;">
-      <label class="lbl">Secret token (optional)</label>
-      <input id="tg-secret-token" type="password" class="input" placeholder="optional webhook secret" autocomplete="off"/>
-    </div>
-  </div>
-
-  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-    <button id="tg-save-btn" class="btn btn-primary btn-sm">Save</button>
-    <button id="tg-test-btn" class="btn btn-secondary btn-sm">Test Bot</button>
-    <button id="tg-register-btn" class="btn btn-secondary btn-sm">Connect Webhook</button>
-    <button id="tg-remove-btn" class="btn btn-danger btn-sm">Disconnect</button>
-  </div>
-
-  <div style="display:grid;grid-template-columns:repeat(3,minmax(140px,1fr));gap:8px;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:10px;font-size:.8rem">
-    <div><span style="color:var(--muted)">Status:</span> <span id="tg-status-enabled" class="badge badge-yellow">Unknown</span></div>
+  <!-- Status strip -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:.8rem">
+    <div><span style="color:var(--muted)">Integration:</span> <span id="tg-status-enabled" class="badge badge-yellow">Unknown</span></div>
     <div><span style="color:var(--muted)">Token:</span> <span id="tg-status-token" class="badge badge-yellow">Unknown</span></div>
+    <div><span style="color:var(--muted)">Mode:</span> <span id="tg-status-mode" class="badge" style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3)">—</span></div>
+    <div><span style="color:var(--muted)">Bot:</span> <span id="tg-status-botname" style="color:var(--text)">—</span></div>
     <div><span style="color:var(--muted)">Last test:</span> <span id="tg-status-last-test">—</span></div>
+  </div>
+
+  <!-- Step 1: Token -->
+  <div style="margin-bottom:14px;padding:12px 14px;background:var(--bg-2);border:1px solid var(--border);border-radius:10px">
+    <div style="font-size:.78rem;font-weight:700;color:var(--muted);margin-bottom:8px">① BOT TOKEN</div>
+    <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end">
+      <div>
+        <label class="lbl">Bot Token <span style="font-size:.7rem;color:var(--muted)">(from @BotFather)</span></label>
+        <input id="tg-bot-token" type="password" class="input" placeholder="123456:ABCDef…" autocomplete="new-password"/>
+        <div id="tg-token-hint" style="font-size:.72rem;color:var(--muted);margin-top:4px">Leave blank to keep existing token.</div>
+      </div>
+      <button id="tg-test-btn" class="btn btn-secondary btn-sm" style="white-space:nowrap">🔍 Verify Token</button>
+    </div>
+  </div>
+
+  <!-- Step 2: Mode -->
+  <div style="margin-bottom:14px;padding:12px 14px;background:var(--bg-2);border:1px solid var(--border);border-radius:10px">
+    <div style="font-size:.78rem;font-weight:700;color:var(--muted);margin-bottom:10px">② CONNECTION MODE</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div id="tg-mode-polling-card" style="border:2px solid rgba(99,102,241,.3);border-radius:10px;padding:12px;cursor:pointer;transition:all .2s"
+        onclick="_tgSelectMode('polling')">
+        <div style="font-weight:700;font-size:.875rem;margin-bottom:4px">🔄 Long Polling</div>
+        <div style="font-size:.72rem;color:var(--muted);line-height:1.5">Best for local / Docker setups. No public URL required. Server pulls updates automatically.</div>
+        <button id="tg-enable-polling-btn" class="btn btn-primary btn-sm" style="margin-top:10px;width:100%">Enable Polling</button>
+      </div>
+      <div id="tg-mode-webhook-card" style="border:2px solid var(--border);border-radius:10px;padding:12px;cursor:pointer;transition:all .2s"
+        onclick="_tgSelectMode('webhook')">
+        <div style="font-weight:700;font-size:.875rem;margin-bottom:4px">🌐 Webhook</div>
+        <div style="font-size:.72rem;color:var(--muted);line-height:1.5">Best for public HTTPS servers. Telegram pushes updates to your URL instantly.</div>
+        <div style="margin-top:10px">
+          <input id="tg-webhook-url" class="input" placeholder="https://example.com/api/integrations/telegram/webhook" style="font-size:.78rem"/>
+          <input id="tg-secret-token" type="password" class="input" placeholder="optional webhook secret" autocomplete="new-password" style="font-size:.78rem;margin-top:6px"/>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 3: Actions -->
+  <div style="padding:12px 14px;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;margin-bottom:14px">
+    <div style="font-size:.78rem;font-weight:700;color:var(--muted);margin-bottom:10px">③ SAVE & CONNECT</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button id="tg-save-btn" class="btn btn-primary btn-sm">💾 Save Settings</button>
+      <button id="tg-register-btn" class="btn btn-secondary btn-sm">🔗 Register Webhook</button>
+      <button id="tg-webhook-info-btn" class="btn btn-ghost btn-sm">📡 Webhook Info</button>
+      <button id="tg-remove-btn" class="btn btn-danger btn-sm">⛔ Disconnect</button>
+    </div>
+  </div>
+
+  <!-- Webhook Info Panel (collapsed) -->
+  <div id="tg-webhook-info-panel" style="display:none;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:12px 14px;font-size:.8rem">
+    <div style="font-weight:700;margin-bottom:8px">📡 Live Webhook Status</div>
+    <div id="tg-webhook-info-content" style="color:var(--muted)">Loading…</div>
+  </div>
+</div>`;
+}
+
+
+// ── Telegram Chats Page ──────────────────────────────────────────────────────
+function buildTelegramChatsPage() {
+  return `
+<div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:14px;margin-bottom:24px">
+  <div>
+    <h2 style="font-size:1.18rem;font-weight:800;display:flex;align-items:center;gap:10px">
+      ✈️ Telegram Chats
+      <span id="tgc-count-badge" style="padding:3px 10px;border-radius:999px;font-size:.72rem;font-weight:600;
+        background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3);display:none">0 chats</span>
+    </h2>
+    <p style="font-size:.82rem;color:var(--muted);margin-top:4px">
+      Browse and search all Telegram conversations flowing through your AmpAI bot.
+    </p>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button id="tgc-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+    <button id="tgc-settings-btn" class="btn btn-ghost btn-sm" onclick="navigate('settings')">⚙️ Bot Settings</button>
+  </div>
+</div>
+
+<!-- Stats row -->
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:20px">
+  <div class="stat-card"><div id="tgc-stat-total" class="stat-value">—</div><div class="stat-label">Total Chats</div></div>
+  <div class="stat-card"><div id="tgc-stat-active" class="stat-value">—</div><div class="stat-label">Active (7d)</div></div>
+  <div class="stat-card"><div id="tgc-stat-pending" class="stat-value">—</div><div class="stat-label">Pending Updates</div></div>
+  <div class="stat-card"><div id="tgc-stat-mode"  class="stat-value" style="font-size:.85rem">—</div><div class="stat-label">Mode</div></div>
+</div>
+
+<!-- Telegram connection health bar -->
+<div id="tgc-health-bar" style="display:none;margin-bottom:16px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);
+  border-radius:10px;padding:10px 14px;font-size:.82rem;color:#fbbf24">
+  <strong>⚠️ Webhook Error:</strong> <span id="tgc-health-error"></span>
+</div>
+
+<!-- Search + filter -->
+<div style="display:flex;gap:8px;margin-bottom:16px">
+  <input id="tgc-search" class="input" placeholder="Search by session ID or user…" style="flex:1;max-width:380px"/>
+</div>
+
+<!-- Chat list -->
+<div id="tgc-list" style="display:flex;flex-direction:column;gap:10px">
+  <div class="card" style="text-align:center;color:var(--muted);padding:32px">
+    <div style="font-size:2.5rem;margin-bottom:10px">✈️</div>
+    Loading Telegram chats…
+  </div>
+</div>
+
+<!-- Chat log modal (shared with admin) -->
+<div id="modal-tg-chat" class="modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:var(--bg-2);border:1px solid var(--border);border-radius:16px;width:min(96vw,720px);max-height:88vh;display:flex;flex-direction:column">
+    <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+      <div>
+        <div style="font-weight:700;font-size:.95rem" id="tgc-modal-title">Telegram Chat</div>
+        <div style="font-size:.75rem;color:var(--muted);margin-top:2px" id="tgc-modal-session-id"></div>
+      </div>
+      <button onclick="document.getElementById('modal-tg-chat').style.display='none'" class="btn btn-ghost btn-sm">✕ Close</button>
+    </div>
+    <div id="tgc-modal-body" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px">
+      <div style="text-align:center;color:var(--muted);padding:24px">Loading…</div>
+    </div>
   </div>
 </div>`;
 }
