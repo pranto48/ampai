@@ -48,9 +48,10 @@ function closeModal(id) { document.getElementById(id)?.classList.remove('open');
 // ── Navigation ─────────────────────────────────────
 // Two top-level pages: #page-login and #page-shell.
 // Sub-pages live inside #page-shell as .subpage divs.
-const SUBPAGES = ['chat','memory','inbox','brief','tasks','personas','workspace','analytics','network','models','settings','admin','dockerupdate','fullbackup'];
+const SUBPAGES = ['chat','memory','inbox','agentmemory','brief','tasks','personas','workspace','analytics','network','models','settings','admin','dockerupdate','fullbackup'];
 const PAGE_TITLES = {
-  chat:'Chat', memory:'Memory Explorer', inbox:'Memory Inbox', brief:'Daily Brief', tasks:'Task Manager',
+  chat:'Chat', memory:'Memory Explorer', inbox:'Memory Inbox', agentmemory:'Agent Memory Vault',
+  brief:'Daily Brief', tasks:'Task Manager',
   personas:'Persona Library', workspace:'Workspaces', analytics:'Analytics', network:'Network Monitor',
   models:'AI Models', settings:'Settings', admin:'Admin Panel', dockerupdate:'Docker Update', fullbackup:'Full Backup'
 };
@@ -107,6 +108,7 @@ function _onPageEnter(page) {
   if (page === 'chat')         chatInit();
   if (page === 'memory')       memoryLoad();
   if (page === 'inbox')        memoryInboxLoad();
+  if (page === 'agentmemory')  agentMemoryLoad();
   if (page === 'brief')        dailyBriefLoad();
   if (page === 'tasks')        tasksLoad();
   if (page === 'personas')     personasLoad();
@@ -290,6 +292,9 @@ function _shellHTML() {
         <button class="nav-item" data-page="inbox">
           <span class="icon">📥</span><span class="sidebar-label">Memory Inbox</span>
         </button>
+        <button class="nav-item" data-page="agentmemory">
+          <span class="icon">🔐</span><span class="sidebar-label">Agent Memory Vault</span>
+        </button>
         <button class="nav-item" data-page="brief">
           <span class="icon">📰</span><span class="sidebar-label">Daily Brief</span>
         </button>
@@ -371,7 +376,8 @@ function _shellHTML() {
         ${buildChatPage()}
       </div>
       <div id="sp-memory"   class="subpage hidden page-content">${buildMemoryPage()}</div>
-      <div id="sp-inbox"    class="subpage hidden page-content">${buildMemoryInboxPage()}</div>
+      <div id="sp-inbox"       class="subpage hidden page-content">${buildMemoryInboxPage()}</div>
+      <div id="sp-agentmemory" class="subpage hidden page-content">${buildAgentMemoryViewerPage()}</div>
       <div id="sp-brief"    class="subpage hidden page-content">${buildDailyBriefPage()}</div>
       <div id="sp-tasks"    class="subpage hidden page-content">${buildTasksPage()}</div>
       <div id="sp-personas" class="subpage hidden page-content">${buildPersonasPage()}</div>

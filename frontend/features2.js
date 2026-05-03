@@ -1333,3 +1333,249 @@ async function _fetchTelegramStatus() {
 
   lastTestEl.textContent = data.last_test_result || _telegramLastTestResult;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AGENT MEMORY VAULT
+// ═══════════════════════════════════════════════════════════════════════════
+let _amvBound       = false;
+let _amvData        = null;   // cached API response
+let _amvActiveTab   = 'pb';   // 'pb' | 'core'
+
+async function agentMemoryLoad() {
+  if (!_amvBound) {
+    _amvBound = true;
+    document.getElementById('amv-refresh-btn')?.addEventListener('click', _amvFetch);
+    document.getElementById('amv-search-btn')?.addEventListener('click', _amvFilter);
+    document.getElementById('amv-search')?.addEventListener('input',  _amvFilter);
+    document.getElementById('amv-add-fact-btn')?.addEventListener('click', _amvAddFact);
+    document.getElementById('amv-new-fact')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') _amvAddFact();
+    });
+    // Tab buttons
+    document.querySelectorAll('.amv-tab').forEach(btn => {
+      btn.addEventListener('click', () => _amvSwitchTab(btn.dataset.tab));
+    });
+  }
+  await _amvFetch();
+}
+
+async function _amvFetch() {
+  const pbList = document.getElementById('amv-pb-list');
+  if (pbList) pbList.innerHTML = `<div class="card" style="text-align:center;color:var(--muted);padding:32px">
+    <div style="font-size:2rem;margin-bottom:8px">⏳</div>Fetching from server…</div>`;
+
+  const { ok, data } = await apiJSON('/api/agent-memories');
+  if (!ok) {
+    if (pbList) pbList.innerHTML = `<div class="card" style="color:var(--red);padding:20px;text-align:center">
+      Failed to load: ${_esc(data.detail || 'Unknown error')}</div>`;
+    return;
+  }
+  _amvData = data;
+  _amvRender();
+}
+
+function _amvRender() {
+  if (!_amvData) return;
+  const q = (document.getElementById('amv-search')?.value || '').toLowerCase().trim();
+  _amvRenderStats(_amvData, q);
+  _amvRenderPb(_amvData.agent_pb_memories || [], q);
+  _amvRenderCore(_amvData.core_memories || [], q);
+}
+
+function _amvFilter() { _amvRender(); }
+
+function _amvSwitchTab(tab) {
+  _amvActiveTab = tab;
+  const pbPanel   = document.getElementById('amv-panel-pb');
+  const corePanel = document.getElementById('amv-panel-core');
+  document.querySelectorAll('.amv-tab').forEach(btn => {
+    const isActive = btn.dataset.tab === tab;
+    btn.className = `btn ${isActive ? 'btn-primary' : 'btn-ghost'} btn-sm amv-tab`;
+    btn.style.borderRadius = '7px';
+  });
+  if (pbPanel)   pbPanel.style.display   = (tab === 'pb')   ? '' : 'none';
+  if (corePanel) corePanel.style.display = (tab === 'core') ? '' : 'none';
+}
+
+function _amvRenderStats(data, q) {
+  const files     = data.pb_file_count   ?? 0;
+  const readable  = data.pb_readable_count ?? 0;
+  const allPbs    = data.agent_pb_memories || [];
+  const strCount  = allPbs.reduce((n, f) => n + (f.strings?.length ?? 0), 0);
+  const coreCount = (data.core_memories || []).length;
+
+  _safeSet('amv-stat-pb-files',    files);
+  _safeSet('amv-stat-pb-readable', readable);
+  _safeSet('amv-stat-pb-strings',  strCount);
+  _safeSet('amv-stat-core',        coreCount);
+
+  const badge = document.getElementById('amv-pb-badge');
+  if (badge) {
+    badge.textContent = `${files} file${files !== 1 ? 's' : ''}${data.pb_dir_accessible === false ? ' 🔒' : ''}`;
+    badge.style.display = '';
+    badge.style.background = data.pb_dir_accessible === false ? 'rgba(245,158,11,.15)' : '';
+    badge.style.color      = data.pb_dir_accessible === false ? '#fbbf24' : '';
+    badge.style.borderColor= data.pb_dir_accessible === false ? 'rgba(245,158,11,.4)' : '';
+  }
+}
+
+function _amvRenderPb(pbFiles, q) {
+  const list = document.getElementById('amv-pb-list');
+  if (!list) return;
+
+  let allPermDenied = pbFiles.length > 0 && pbFiles.every(f => f.error === 'permission_denied');
+  const permNote = document.getElementById('amv-pb-permission-note');
+  if (permNote) permNote.style.display = allPermDenied ? '' : 'none';
+
+  if (!pbFiles.length) {
+    list.innerHTML = `<div class="card" style="text-align:center;color:var(--muted);padding:32px">
+      <div style="font-size:2.5rem;margin-bottom:10px">🗂️</div>
+      <div>No .pb files found in <code>~/.gemini/antigravity/implicit/</code></div>
+      <div style="font-size:.8rem;margin-top:6px">Antigravity memories appear here after the AI saves them.</div>
+    </div>`;
+    return;
+  }
+
+  let html = '';
+  pbFiles.forEach((file, fi) => {
+    const strings = (file.strings || []).filter(s =>
+      !q || s.text.toLowerCase().includes(q)
+    );
+
+    const hasError = !!file.error;
+    const fileId   = `amv-file-${fi}`;
+    const sizeStr  = file.size_bytes ? _fmtBytes(file.size_bytes) : '—';
+
+    const accentColor = hasError ? '#f59e0b' : strings.length ? '#818cf8' : '#64748b';
+
+    html += `
+<div class="card" style="border-left:3px solid ${accentColor};padding:16px 18px">
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:${strings.length ? 12 : 0}px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:1.1rem">${hasError ? '⚠️' : strings.length ? '📄' : '📋'}</span>
+      <div>
+        <div style="font-weight:700;font-size:.9rem;font-family:monospace">${_esc(file.file)}</div>
+        <div style="font-size:.72rem;color:var(--muted);margin-top:2px">${sizeStr} · ${strings.length} string${strings.length !== 1 ? 's' : ''} decoded</div>
+      </div>
+    </div>
+    ${strings.length ? `<button class="btn btn-ghost btn-sm" onclick="_amvToggleFile('${fileId}')">▼ Collapse</button>` : ''}
+  </div>
+
+  ${hasError ? `
+  <div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:10px 14px;font-size:.82rem;color:#fbbf24">
+    ${file.error === 'permission_denied'
+      ? `🔒 macOS denied read access to this file.<br>
+         ${file.fix ? `<span style="color:#e2e8f0;margin-top:4px;display:block">${_esc(file.fix)}</span>` :
+           'Fix: System Preferences → Privacy & Security → Full Disk Access → add Terminal or Python.'}`
+      : `Error: ${_esc(file.error || 'unknown')}`}
+  </div>` : ''}
+
+  ${strings.length ? `
+  <div id="${fileId}" style="display:flex;flex-direction:column;gap:8px">
+    ${strings.map((s, si) => `
+    <div style="background:var(--bg-3);border:1px solid var(--border);border-radius:8px;padding:10px 14px;
+      transition:border-color .15s" onmouseenter="this.style.borderColor='rgba(99,102,241,.45)'"
+      onmouseleave="this.style.borderColor='var(--border)'">
+      <div style="display:flex;align-items:flex-start;gap:10px">
+        <span style="font-size:.68rem;color:var(--muted);background:var(--bg-2);padding:2px 6px;border-radius:4px;margin-top:2px;white-space:nowrap">f${s.field}</span>
+        <div style="font-size:.875rem;line-height:1.55;flex:1;word-break:break-word">${_esc(s.text)}</div>
+        <button class="btn btn-primary btn-sm" style="font-size:.72rem;white-space:nowrap;flex-shrink:0"
+          onclick="_amvPromoteToCore(${JSON.stringify(s.text).replace(/"/g,'&quot;')})">
+          → Save to Core
+        </button>
+      </div>
+    </div>`).join('')}
+  </div>` : (!hasError ? `
+  <div style="font-size:.82rem;color:var(--muted);padding:8px 0">
+    No readable strings found in this file.
+  </div>` : '')}
+</div>`;
+  });
+
+  list.innerHTML = html || `<div class="card" style="text-align:center;color:var(--muted);padding:24px">No results match your search.</div>`;
+}
+
+function _amvRenderCore(memories, q) {
+  const list = document.getElementById('amv-core-list');
+  if (!list) return;
+  const filtered = q
+    ? memories.filter(m => (m.fact || '').toLowerCase().includes(q))
+    : memories;
+
+  if (!filtered.length) {
+    list.innerHTML = `<div style="text-align:center;color:var(--muted);padding:24px;font-size:.875rem">
+      ${q ? 'No core memories match your search.' : '✨ No core memories saved yet. Chat with AmpAI and it will save key facts here.'}
+    </div>`;
+    return;
+  }
+
+  list.innerHTML = filtered.map(m => `
+<div style="display:flex;align-items:flex-start;gap:10px;background:var(--bg-2);border:1px solid var(--border);
+  border-radius:10px;padding:12px 16px;transition:border-color .15s"
+  onmouseenter="this.style.borderColor='rgba(16,185,129,.4)'"
+  onmouseleave="this.style.borderColor='var(--border)'">
+  <span style="font-size:.95rem;margin-top:1px">🧠</span>
+  <div style="flex:1;font-size:.875rem;line-height:1.55;word-break:break-word">${_esc(m.fact || '')}</div>
+  <button class="btn btn-danger btn-sm" style="font-size:.72rem;flex-shrink:0"
+    onclick="_amvDeleteCore(${m.id})">🗑</button>
+</div>`).join('');
+}
+
+function _amvToggleFile(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const collapsed = el.style.display === 'none';
+  el.style.display = collapsed ? '' : 'none';
+  const btn = el.previousElementSibling?.querySelector('button');
+  if (btn) btn.textContent = collapsed ? '▼ Collapse' : '▶ Expand';
+}
+
+async function _amvAddFact() {
+  const inp  = document.getElementById('amv-new-fact');
+  const fact = inp?.value.trim();
+  if (!fact) { toast('Enter a fact first', 'info'); return; }
+  const { ok } = await apiJSON('/api/core-memories', {
+    method: 'POST',
+    body:   JSON.stringify({ fact }),
+  });
+  if (ok) {
+    inp.value = '';
+    toast('Core memory saved ✓', 'success');
+    await _amvFetch();
+    _amvSwitchTab('core');
+  } else {
+    toast('Failed to save memory', 'error');
+  }
+}
+
+async function _amvDeleteCore(id) {
+  if (!confirm('Delete this core memory?')) return;
+  const { ok } = await apiJSON(`/api/admin/core-memories/${id}`, { method: 'DELETE' });
+  if (ok) { toast('Deleted', 'success'); await _amvFetch(); }
+  else    toast('Failed to delete', 'error');
+}
+
+async function _amvPromoteToCore(text) {
+  const { ok } = await apiJSON('/api/core-memories', {
+    method: 'POST',
+    body:   JSON.stringify({ fact: text }),
+  });
+  if (ok) {
+    toast('Promoted to Core Memory ✓', 'success');
+    await _amvFetch();
+    _amvSwitchTab('core');
+  } else {
+    toast('Failed to promote', 'error');
+  }
+}
+
+function _fmtBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+function _safeSet(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = String(val ?? '—');
+}

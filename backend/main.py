@@ -3748,6 +3748,174 @@ def api_get_core_memories_self(user=Depends(require_authenticated_user)):
     return {"core_memories": get_core_memories()}
 
 
+@app.post("/api/core-memories")
+def api_add_core_memory(request: dict, user=Depends(require_authenticated_user)):
+    fact = (request.get("fact") or "").strip()
+    if not fact:
+        raise HTTPException(status_code=400, detail="fact is required")
+    success = add_core_memory(fact)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to save core memory")
+    log_audit_event(username=user.username, action="memory.write.core", details=f"fact_len={len(fact)}")
+    return {"status": "success"}
+
+
+# ── Agent Memory Viewer ────────────────────────────────────────────────────────
+def _decode_pb_strings(data: bytes) -> list:
+    """
+    Best-effort Protocol Buffer decoder that extracts all length-delimited
+    UTF-8 strings from a raw .pb file without a schema.
+    Returns a list of (field_number, text) tuples.
+    """
+    import struct
+    results = []
+    pos = 0
+
+    def read_varint(d, p):
+        result, shift = 0, 0
+        while p < len(d):
+            b = d[p]; p += 1
+            result |= (b & 0x7F) << shift
+            if not (b & 0x80):
+                break
+            shift += 7
+        return result, p
+
+    while pos < len(data):
+        try:
+            tag_wire, pos = read_varint(data, pos)
+            field_num = tag_wire >> 3
+            wire_type = tag_wire & 0x7
+            if wire_type == 0:           # varint
+                _, pos = read_varint(data, pos)
+            elif wire_type == 1:         # 64-bit
+                pos += 8
+            elif wire_type == 5:         # 32-bit
+                pos += 4
+            elif wire_type == 2:         # length-delimited
+                length, pos = read_varint(data, pos)
+                raw = data[pos:pos + length]
+                pos += length
+                try:
+                    text = raw.decode("utf-8")
+                    if len(text) >= 10:
+                        results.append({"field": field_num, "text": text})
+                    else:
+                        # try nested
+                        nested = _decode_pb_strings(raw)
+                        results.extend(nested)
+                except UnicodeDecodeError:
+                    nested = _decode_pb_strings(raw)
+                    results.extend(nested)
+            else:
+                break
+        except Exception:
+            break
+    return results
+
+
+@app.get("/api/agent-memories")
+def get_agent_memories(current_user: UserContext = Depends(require_authenticated_user)):
+    """
+    Returns:
+      - core_memories: memories explicitly saved by the AI via [SAVE_MEMORY:] tag
+      - agent_pb_memories: memories decoded from Antigravity implicit .pb files
+      - pb_file_count / pb_readable_count: stats for transparency
+    """
+    import glob
+
+    # 1. Core memories from DB
+    core = get_core_memories()
+
+    # 2. Antigravity implicit .pb files
+    # Try multiple candidate paths (the actual data dir varies by install type)
+    candidate_dirs = [
+        os.path.expanduser("~/.gemini/antigravity/implicit"),
+        os.path.expandvars("$HOME/.gemini/antigravity/implicit"),
+    ]
+    # Also check environment variable overrides
+    env_dir = os.getenv("ANTIGRAVITY_MEMORY_DIR", "")
+    if env_dir:
+        candidate_dirs.insert(0, env_dir)
+
+    pb_dir = None
+    pb_dir_accessible = False
+    for candidate in candidate_dirs:
+        try:
+            if os.path.isdir(candidate):
+                os.listdir(candidate)   # test access
+                pb_dir = candidate
+                pb_dir_accessible = True
+                break
+        except PermissionError:
+            pb_dir = candidate          # store for error reporting
+        except Exception:
+            pass
+
+    pb_memories = []
+    pb_file_count = 0
+    pb_readable_count = 0
+
+    if pb_dir_accessible:
+        try:
+            pb_files = sorted(glob.glob(os.path.join(pb_dir, "*.pb")))
+            pb_file_count = len(pb_files)
+            for fpath in pb_files:
+                fname = os.path.basename(fpath)
+                try:
+                    with open(fpath, "rb") as f:
+                        raw = f.read()
+                    strings = _decode_pb_strings(raw)
+                    seen = set()
+                    texts = []
+                    for item in strings:
+                        t = item["text"].strip()
+                        if t and t not in seen and len(t) >= 15:
+                            seen.add(t)
+                            texts.append({"field": item["field"], "text": t})
+                    if texts:
+                        pb_readable_count += 1
+                    pb_memories.append({
+                        "file": fname,
+                        "size_bytes": len(raw),
+                        "strings": texts,
+                    })
+                except PermissionError:
+                    pb_memories.append({"file": fname, "size_bytes": 0, "strings": [], "error": "permission_denied"})
+                except Exception as exc:
+                    pb_memories.append({"file": fname, "size_bytes": 0, "strings": [], "error": str(exc)[:120]})
+        except Exception as exc:
+            logger.warning("agent-memories: error reading pb dir: %s", exc)
+    elif pb_dir:
+        # Directory exists but TCC denies access
+        pb_memories = [{
+            "file": "~/.gemini/antigravity/implicit/",
+            "size_bytes": 0,
+            "strings": [],
+            "error": "permission_denied",
+            "fix": (
+                "macOS TCC denies access to ~/.gemini/antigravity/implicit/. "
+                "Grant Full Disk Access to Terminal (or your Python/uvicorn process) "
+                "in System Preferences → Privacy & Security → Full Disk Access. "
+                "Or set the ANTIGRAVITY_MEMORY_DIR env var to a readable copy."
+            ),
+        }]
+
+    log_audit_event(
+        username=current_user.username,
+        action="memory.read.agent_memories",
+        details=f"pb_files={pb_file_count};readable={pb_readable_count};core={len(core)};accessible={pb_dir_accessible}",
+    )
+    return {
+        "core_memories": core,
+        "agent_pb_memories": pb_memories,
+        "pb_file_count": pb_file_count,
+        "pb_readable_count": pb_readable_count,
+        "pb_dir": pb_dir or "~/.gemini/antigravity/implicit",
+        "pb_dir_accessible": pb_dir_accessible,
+    }
+
+
 @app.delete("/api/admin/core-memories/{mem_id}")
 def api_delete_core_memory(mem_id: int, user=Depends(require_admin_user)):
     success = delete_core_memory(mem_id)

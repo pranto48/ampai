@@ -578,6 +578,73 @@ function buildFullBackupPage() {
 </div>`;
 }
 
+// ── Agent Memory Vault Page ────────────────────────────────────────────────
+function buildAgentMemoryViewerPage() {
+  return `
+<div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:14px;margin-bottom:24px">
+  <div>
+    <h2 style="font-size:1.18rem;font-weight:800;display:flex;align-items:center;gap:10px">
+      🔐 Agent Memory Vault
+      <span id="amv-pb-badge" style="padding:3px 11px;border-radius:999px;font-size:.72rem;font-weight:600;
+        background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3);display:none">
+        — files
+      </span>
+    </h2>
+    <p style="font-size:.82rem;color:var(--muted);margin-top:4px">
+      View every memory saved by Antigravity (AI assistant) and AmpAI's own core memory store.
+    </p>
+  </div>
+  <button id="amv-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+</div>
+
+<!-- Stats strip -->
+<div id="amv-stats-strip" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:22px">
+  <div class="stat-card"><div id="amv-stat-pb-files" class="stat-value">—</div><div class="stat-label">PB Files</div></div>
+  <div class="stat-card"><div id="amv-stat-pb-readable" class="stat-value">—</div><div class="stat-label">Decoded</div></div>
+  <div class="stat-card"><div id="amv-stat-pb-strings" class="stat-value">—</div><div class="stat-label">Memory Strings</div></div>
+  <div class="stat-card"><div id="amv-stat-core" class="stat-value">—</div><div class="stat-label">Core Memories</div></div>
+</div>
+
+<!-- Tabs -->
+<div style="display:flex;gap:4px;margin-bottom:18px;background:var(--bg-2);padding:4px;border-radius:10px;width:fit-content">
+  <button id="amv-tab-pb"   class="btn btn-primary  btn-sm amv-tab" data-tab="pb"   style="border-radius:7px">🤖 Antigravity (.pb)</button>
+  <button id="amv-tab-core" class="btn btn-ghost btn-sm amv-tab" data-tab="core" style="border-radius:7px">🧠 AmpAI Core</button>
+</div>
+
+<!-- Search bar -->
+<div style="display:flex;gap:8px;margin-bottom:16px">
+  <input id="amv-search" class="input" placeholder="Search memories…" style="flex:1;max-width:400px"/>
+  <button id="amv-search-btn" class="btn btn-secondary btn-sm">Search</button>
+</div>
+
+<!-- Antigravity PB panel -->
+<div id="amv-panel-pb">
+  <div id="amv-pb-permission-note" style="display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);
+    border-radius:10px;padding:14px 18px;font-size:.84rem;color:#fbbf24;margin-bottom:16px">
+    ⚠️ <strong>Permission Denied</strong> — macOS TCC is blocking access to <code>~/.gemini/antigravity/implicit/</code>.<br>
+    Grant full-disk access to your terminal/Python in <em>System Preferences → Privacy & Security → Full Disk Access</em>.
+  </div>
+  <div id="amv-pb-list" style="display:flex;flex-direction:column;gap:14px">
+    <div class="card" style="text-align:center;color:var(--muted);padding:32px">
+      <div style="font-size:2rem;margin-bottom:8px">⏳</div>Loading Antigravity memories…
+    </div>
+  </div>
+</div>
+
+<!-- AmpAI Core panel -->
+<div id="amv-panel-core" style="display:none">
+  <div class="card" style="margin-bottom:16px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <input id="amv-new-fact" class="input" placeholder="Add a core memory fact…" style="flex:1"/>
+      <button id="amv-add-fact-btn" class="btn btn-primary btn-sm">＋ Add</button>
+    </div>
+  </div>
+  <div id="amv-core-list" style="display:flex;flex-direction:column;gap:8px">
+    <div style="text-align:center;color:var(--muted);padding:24px">Loading…</div>
+  </div>
+</div>`;
+}
+
 // ── Telegram Integration Card (for admin/settings embedding) ───────────────
 function buildTelegramIntegrationCard() {
   return `
