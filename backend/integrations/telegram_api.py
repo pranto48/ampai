@@ -35,6 +35,13 @@ def _do_request(url: str, data: bytes = None, method: str = "GET", timeout: int 
         ctx = ssl.create_default_context()
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        # In some environments cert verification failures are surfaced as URLError
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in str(reason):
+            with urllib.request.urlopen(req, timeout=timeout, context=_build_ctx()) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        raise
     except ssl.SSLError:
         # Fallback: skip cert verification (common inside Docker)
         with urllib.request.urlopen(req, timeout=timeout, context=_build_ctx()) as resp:
