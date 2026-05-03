@@ -1250,10 +1250,11 @@ async function _fetchTelegramSettings() {
   if (!ok) return;
   document.getElementById('tg-enabled') && (document.getElementById('tg-enabled').checked = !!data.enabled);
   document.getElementById('tg-webhook-url') && (document.getElementById('tg-webhook-url').value = data.webhook_url || '');
-  _telegramTokenSaved = !!data.bot_token_masked || !!data.token_saved;
-  if (data.bot_token_masked) {
+  const maskedToken = data.bot_token_masked || data.token_masked || "";
+  _telegramTokenSaved = !!maskedToken || !!data.token_saved || !!data.token_configured;
+  if (maskedToken) {
     const tokenEl = document.getElementById('tg-bot-token');
-    if (tokenEl && !tokenEl.value) tokenEl.placeholder = data.bot_token_masked;
+    if (tokenEl && !tokenEl.value) tokenEl.placeholder = maskedToken;
   }
 }
 
@@ -1282,7 +1283,7 @@ async function _saveTelegramSettings() {
 async function _testTelegramGetMe() {
   const { ok, data } = await apiJSON('/api/admin/integrations/telegram/test', { method: 'POST' });
   _telegramLastTestResult = ok ? `Passed (${new Date().toLocaleTimeString()})` : `Failed (${new Date().toLocaleTimeString()})`;
-  toast(ok ? `Connected as @${data?.username || data?.result?.username || 'bot'}` : (data?.detail || 'Telegram getMe failed'), ok ? 'success' : 'error');
+  toast(ok ? `Connected as @${data?.username || data?.bot_username || data?.result?.username || 'bot'}` : (data?.detail || 'Telegram getMe failed'), ok ? 'success' : 'error');
   _fetchTelegramStatus();
 }
 
@@ -1326,7 +1327,7 @@ async function _fetchTelegramStatus() {
   enabledEl.textContent = enabled ? 'Enabled' : 'Disabled';
   enabledEl.className = enabled ? 'badge badge-green' : 'badge badge-red';
 
-  _telegramTokenSaved = _telegramTokenSaved || !!data.bot_token_masked || !!data.token_saved;
+  _telegramTokenSaved = _telegramTokenSaved || !!data.bot_token_masked || !!data.token_masked || !!data.token_saved || !!data.token_configured;
   tokenEl.textContent = _telegramTokenSaved ? 'Saved' : 'Not saved';
   tokenEl.className = _telegramTokenSaved ? 'badge badge-green' : 'badge badge-red';
 

@@ -2770,8 +2770,6 @@ def get_sessions(
         "offset": offset,
         "has_more": (offset + limit) < total,
         "categories": category_counts,
-        "saved_facts": saved_facts,
-        "pending_candidates": pending_candidates,
         "needs_migration": needs_migration,
     }
 

@@ -442,6 +442,7 @@ def restore_full_backup(zip_path: str, options: Dict) -> Dict[str, Any]:
     summary: Dict[str, int] = {}
 
     do = lambda k: options.get(k, True)
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     try:
         with zipfile.ZipFile(zip_path) as zf:
@@ -475,9 +476,9 @@ def restore_full_backup(zip_path: str, options: Dict) -> Dict[str, Any]:
                         # Upsert session metadata
                         conn.execute(text(
                             "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) "
-                            "VALUES (:s,:c,FALSE,FALSE,NOW()) "
+                            "VALUES (:s,:c,FALSE,FALSE,:ts) "
                             "ON CONFLICT (session_id) DO UPDATE SET category=EXCLUDED.category"
-                        ), {"s": sid, "c": cat})
+                        ), {"s": sid, "c": cat, "ts": now_iso})
                         for msg in sess.get("messages", []):
                             raw = json.dumps({"type": msg["type"],
                                               "data": {"content": msg.get("content", "")}})
@@ -499,13 +500,14 @@ def restore_full_backup(zip_path: str, options: Dict) -> Dict[str, Any]:
                             conn.execute(text(
                                 "INSERT INTO memory_candidates "
                                 "(username, session_id, candidate_text, confidence, status, created_at) "
-                                "VALUES (:u,:s,:t,:c,:st,NOW()) ON CONFLICT DO NOTHING"
+                                "VALUES (:u,:s,:t,:c,:st,:ts) ON CONFLICT DO NOTHING"
                             ), {
                                 "u": m.get("username", "system"),
                                 "s": m.get("session_id", ""),
                                 "t": (m.get("candidate_text") or "")[:2000],
                                 "c": str(m.get("confidence", "")),
                                 "st": m.get("status", "approved"),
+                                "ts": now_iso,
                             })
                             n_mems += 1
                         except Exception as ex:
@@ -532,10 +534,10 @@ def restore_full_backup(zip_path: str, options: Dict) -> Dict[str, Any]:
                     try:
                         conn.execute(text(
                             "INSERT INTO users (username, role, password_hash, created_at, updated_at) "
-                            "VALUES (:u,:r,:p,NOW(),NOW()) "
+                            "VALUES (:u,:r,:p,:ts,:ts) "
                             "ON CONFLICT (username) DO UPDATE SET role=EXCLUDED.role"
                         ), {"u": u["username"], "r": u.get("role", "user"),
-                            "p": u.get("password_hash", "")})
+                            "p": u.get("password_hash", ""), "ts": now_iso})
                         n_users += 1
                     except Exception as ex:
                         errors.append(f"user: {ex}")
@@ -564,10 +566,10 @@ def restore_full_backup(zip_path: str, options: Dict) -> Dict[str, Any]:
                         conn.execute(text(
                             "INSERT INTO persona_presets "
                             "(username, name, system_prompt, tags, is_default, created_at) "
-                            "VALUES (:u,:n,:sp,:t,:d,NOW()) ON CONFLICT DO NOTHING"
+                            "VALUES (:u,:n,:sp,:t,:d,:ts) ON CONFLICT DO NOTHING"
                         ), {"u": p.get("username"), "n": p.get("name", ""),
                             "sp": p.get("system_prompt", ""), "t": p.get("tags", ""),
-                            "d": bool(p.get("is_default"))})
+                            "d": bool(p.get("is_default")), "ts": now_iso})
                         n_p += 1
                     except Exception as ex:
                         errors.append(f"persona: {ex}")
@@ -581,10 +583,10 @@ def restore_full_backup(zip_path: str, options: Dict) -> Dict[str, Any]:
                         conn.execute(text(
                             "INSERT INTO tasks (title, description, status, priority, "
                             "due_at, session_id, created_at, updated_at) "
-                            "VALUES (:ti,:de,:st,:pr,:du,:se,NOW(),NOW()) ON CONFLICT DO NOTHING"
+                            "VALUES (:ti,:de,:st,:pr,:du,:se,:ts,:ts) ON CONFLICT DO NOTHING"
                         ), {"ti": t.get("title", ""), "de": t.get("description", ""),
                             "st": t.get("status", "todo"), "pr": t.get("priority", "medium"),
-                            "du": t.get("due_at"), "se": t.get("session_id")})
+                            "du": t.get("due_at"), "se": t.get("session_id"), "ts": now_iso})
                         n_t += 1
                     except Exception as ex:
                         errors.append(f"task: {ex}")

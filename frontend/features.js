@@ -945,10 +945,12 @@ async function settingsLoad() {
   if (window._settingsBound) {
     // Re-load values but don't re-bind
     _loadSettingsValues();
+    if (typeof telegramSettingsLoad === 'function') telegramSettingsLoad();
     return;
   }
   window._settingsBound = true;
   await _loadSettingsValues();
+  if (typeof telegramSettingsLoad === 'function') await telegramSettingsLoad();
 
   document.getElementById('save-agent-settings-btn')?.addEventListener('click', async () => {
     const configs = {
