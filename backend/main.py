@@ -2770,8 +2770,6 @@ def get_sessions(
         "offset": offset,
         "has_more": (offset + limit) < total,
         "categories": category_counts,
-        "saved_facts": saved_facts,
-        "pending_candidates": pending_candidates,
         "needs_migration": needs_migration,
     }
 
@@ -3743,6 +3741,10 @@ def get_model_options(_: UserContext = Depends(require_authenticated_user)):
 
 @app.get("/api/admin/core-memories")
 def api_get_core_memories(user=Depends(require_admin_user)):
+    return {"core_memories": get_core_memories()}
+
+@app.get("/api/core-memories")
+def api_get_core_memories_self(user=Depends(require_authenticated_user)):
     return {"core_memories": get_core_memories()}
 
 

@@ -381,6 +381,7 @@ function _modelCard(icon, name, sub, bg, fields) {
 
 // ── Settings inner HTML ────────────────────────────
 function buildSettingsPage() {
+  const telegramCard = (typeof buildTelegramIntegrationCard === 'function') ? buildTelegramIntegrationCard() : '';
   return `
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
   <h2 style="font-size:1.15rem;font-weight:700">⚙️ Settings</h2>
@@ -492,7 +493,9 @@ function buildSettingsPage() {
       <button id="save-email-cfg-btn" class="btn btn-primary btn-sm">Save Email Config</button>
     </div>
   </div>
-</div>`;
+</div>
+
+${telegramCard}`;
 }
 
 // ── Admin inner HTML ───────────────────────────────
