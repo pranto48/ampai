@@ -1810,9 +1810,9 @@ def admin_telegram_webhook_info(current_user: UserContext = Depends(require_admi
 @app.get("/api/admin/integrations/telegram/sessions")
 def admin_telegram_sessions(current_user: UserContext = Depends(require_admin_user)):
     """Lists all Telegram chat sessions and their message counts."""
-    all_sessions = get_all_sessions(limit=500, offset=0)
+    all_sessions = get_all_sessions()
     tg_sessions = [
-        s for s in (all_sessions.get("sessions") or [])
+        s for s in (all_sessions or [])
         if (s.get("session_id") or "").startswith("tg_")
     ]
     return {"sessions": tg_sessions, "total": len(tg_sessions)}
