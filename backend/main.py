@@ -3743,6 +3743,10 @@ def get_model_options(_: UserContext = Depends(require_authenticated_user)):
 def api_get_core_memories(user=Depends(require_admin_user)):
     return {"core_memories": get_core_memories()}
 
+@app.get("/api/core-memories")
+def api_get_core_memories_self(user=Depends(require_authenticated_user)):
+    return {"core_memories": get_core_memories()}
+
 
 @app.delete("/api/admin/core-memories/{mem_id}")
 def api_delete_core_memory(mem_id: int, user=Depends(require_admin_user)):

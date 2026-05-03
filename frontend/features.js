@@ -376,7 +376,12 @@ async function loadAdminSessions() {
 async function loadCoreMemories() {
   const el = document.getElementById('core-memories-list');
   if (!el) return;
-  const { ok, data } = await apiJSON('/api/admin/core-memories');
+  let { ok, data } = await apiJSON('/api/admin/core-memories');
+  if (!ok) {
+    const fallback = await apiJSON('/api/core-memories');
+    ok = fallback.ok;
+    data = fallback.data;
+  }
   if (!ok) { el.innerHTML = '<span class="text-muted text-sm">Failed to load</span>'; return; }
   const mems = data.core_memories || [];
   el.innerHTML = mems.length ? mems.map(m => `
