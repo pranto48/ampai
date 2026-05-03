@@ -356,6 +356,7 @@ class ConfigUpdateRequest(BaseModel):
 
 class OrphanAdoptionRunRequest(BaseModel):
     force: bool = False
+    batch_size: int = 100
 
 
 class MemoryExplorerQuery(BaseModel):
@@ -2729,23 +2730,18 @@ def get_sessions(
     current_user: UserContext = Depends(require_authenticated_user),
 ):
     sessions = get_all_sessions(query=query, category=category, archived=archived)
+    needs_migration = False
     if current_user.role != "admin":
         accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
-        orphan_session_ids = [s.get("session_id") for s in sessions if s.get("session_id") and s.get("session_id") not in accessible_ids]
-        adopted_any = _run_orphan_adoption(
-            actor_username=current_user.username,
-            orphan_session_ids=orphan_session_ids,
-            sessions=sessions,
-            explicit=False,
-        )
-        if adopted_any:
-            accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
-
-        shared_ids = set(list_shared_sessions_for_user(current_user.username))
-        sessions = [s for s in sessions if s.get("session_id") in accessible_ids]
-        for session in sessions:
-            if session["session_id"] in shared_ids:
-                session["shared_via_group"] = True
+        if not accessible_ids:
+            needs_migration = True
+            sessions = []
+        else:
+            shared_ids = set(list_shared_sessions_for_user(current_user.username))
+            sessions = [s for s in sessions if s.get("session_id") in accessible_ids]
+            for session in sessions:
+                if session["session_id"] in shared_ids:
+                    session["shared_via_group"] = True
     category_counts: Dict[str, int] = {}
     for session in sessions:
         cat = session.get("category") or "Uncategorized"
@@ -2764,6 +2760,7 @@ def get_sessions(
         "categories": category_counts,
         "saved_facts": saved_facts,
         "pending_candidates": pending_candidates,
+        "needs_migration": needs_migration,
     }
 
 
@@ -2772,20 +2769,24 @@ def _session_matches_migration_criteria(session_id: str, session_row: Dict[str, 
     return session_id.startswith("tg_") or bool(session_row.get("archived"))
 
 
-def _run_orphan_adoption(actor_username: str, orphan_session_ids: List[str], sessions: List[Dict[str, Any]], explicit: bool, force: bool = False) -> bool:
+def _run_orphan_adoption(actor_username: str, orphan_session_ids: List[str], sessions: List[Dict[str, Any]], explicit: bool, force: bool = False, batch_size: int = 100) -> Dict[str, int]:
     raw_cutoff = (get_config("auth_orphan_adoption_cutoff_datetime", "") or "").strip()
     cutoff_dt = _parse_iso_dt(raw_cutoff)
     if raw_cutoff and not cutoff_dt:
         logger.warning("Invalid auth_orphan_adoption_cutoff_datetime config value: %s", raw_cutoff)
 
-    adopted_any = False
     adopted_count = 0
     skipped_processed = 0
     skipped_newer = 0
+    failed = 0
+    processed = 0
     sessions_map = {(s.get("session_id") or ""): s for s in sessions}
     for sid in orphan_session_ids:
         if not sid:
             continue
+        if processed >= batch_size:
+            break
+        processed += 1
         marker_key = f"auth_orphan_adoption_processed:{sid}"
         if get_config(marker_key, "0") == "1" and not force:
             skipped_processed += 1
@@ -2797,45 +2798,62 @@ def _run_orphan_adoption(actor_username: str, orphan_session_ids: List[str], ses
         if not (meets_cutoff or matches_migration or force):
             skipped_newer += 1
             continue
-        if not get_session_owner(sid) and ensure_session_owner(sid, actor_username):
-            adopted_any = True
-            adopted_count += 1
+        try:
+            if not get_session_owner(sid) and ensure_session_owner(sid, actor_username):
+                adopted_count += 1
+                log_audit_event(
+                    username=actor_username,
+                    action="session.orphan_adoption.adopted",
+                    session_id=sid,
+                    details=f"explicit={explicit};cutoff={raw_cutoff or 'none'}",
+                )
+            set_config(marker_key, "1")
+        except Exception as exc:
+            failed += 1
+            logger.exception("Orphan adoption failed for session_id=%s", sid)
             log_audit_event(
                 username=actor_username,
-                action="session.orphan_adoption.adopted",
+                action="session.orphan_adoption.failed",
                 session_id=sid,
-                details=f"explicit={explicit};cutoff={raw_cutoff or 'none'}",
+                details=f"error={str(exc)[:200]}",
             )
-        set_config(marker_key, "1")
-    if explicit or adopted_count > 0 or skipped_processed > 0 or skipped_newer > 0:
-        log_audit_event(
-            username=actor_username,
-            action="session.orphan_adoption.run",
-            details=(
-                f"explicit={explicit};force={force};adopted={adopted_count};"
-                f"skipped_processed={skipped_processed};skipped_newer={skipped_newer};"
-                f"cutoff={raw_cutoff or 'none'}"
-            ),
-        )
-    return adopted_any
+
+    log_audit_event(
+        username=actor_username,
+        action="session.orphan_adoption.run",
+        details=(
+            f"explicit={explicit};force={force};processed={processed};adopted={adopted_count};"
+            f"skipped_processed={skipped_processed};skipped_newer={skipped_newer};failed={failed};"
+            f"cutoff={raw_cutoff or 'none'}"
+        ),
+    )
+    return {
+        "processed": processed,
+        "adopted": adopted_count,
+        "skipped_processed": skipped_processed,
+        "skipped_newer": skipped_newer,
+        "failed": failed,
+    }
 
 
-@app.post("/api/admin/sessions/orphan-adoption/run")
-def admin_run_orphan_adoption(request: OrphanAdoptionRunRequest, user: UserContext = Depends(require_admin_user)):
-    already_run = (get_config("auth_orphan_adoption_manual_run_completed", "0") == "1")
-    if already_run and not request.force:
-        return {"status": "skipped", "reason": "already_completed"}
+@app.post("/api/admin/sessions/adopt-orphans")
+def admin_adopt_orphan_sessions(request: OrphanAdoptionRunRequest, user: UserContext = Depends(require_admin_user)):
     sessions = get_all_sessions()
     orphan_session_ids = [s.get("session_id") for s in sessions if s.get("session_id") and not get_session_owner(s.get("session_id"))]
-    adopted_any = _run_orphan_adoption(
+    summary = _run_orphan_adoption(
         actor_username=user.username,
         orphan_session_ids=orphan_session_ids,
         sessions=sessions,
         explicit=True,
         force=request.force,
+        batch_size=max(1, min(request.batch_size, 1000)),
     )
-    set_config("auth_orphan_adoption_manual_run_completed", "1")
-    return {"status": "success", "adopted_any": adopted_any, "processed": len(orphan_session_ids)}
+    return {
+        "status": "success",
+        "orphans_found": len(orphan_session_ids),
+        "batch_size": max(1, min(request.batch_size, 1000)),
+        "summary": summary,
+    }
 
 
 def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
