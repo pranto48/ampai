@@ -6,6 +6,7 @@ let chatAttachments = [];
 let _chatHandlersBound = false;
 const PERSONA_PREF_KEY = 'ampai_persona_id';
 const WEB_SEARCH_PREF_KEY = 'ampai_web_search_enabled';
+const SESSIONS_CACHE_KEY = 'ampai_cached_sessions';
 let chatOutputMode = 'normal';
 
 function chatInit() {
@@ -233,60 +234,94 @@ function _updateChatSessionDisplay() {
 
 // ── Sessions ───────────────────────────────────────
 async function loadSessions(query = '') {
-  const params = new URLSearchParams({ limit: 60, offset: 0 });
-  if (query) params.set('q', query);
-  const { ok, data } = await apiJSON('/api/sessions?' + params.toString());
   const list = document.getElementById('sessions-list');
   if (!list) return;
-  if (!ok) {
-    list.innerHTML = '<div style="padding:12px;font-size:.8rem;color:var(--red)">Failed to load sessions</div>';
-    return;
-  }
-  const sessions = data.sessions || [];
-  if (!sessions.length) {
-    list.innerHTML = '<div style="padding:14px;text-align:center;font-size:.8rem;color:var(--muted)">No sessions yet.<br>Start a new chat!</div>';
-    return;
-  }
-  list.innerHTML = sessions.map(s => `
-    <div class="session-item ${s.session_id === State.sessionId ? 'active' : ''}"
-      data-sid="${s.session_id}" style="padding:10px 12px;border-radius:8px;cursor:pointer;
-      margin-bottom:2px;transition:all .15s;border-left:2px solid transparent">
-      <div style="font-size:.85rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-        ${s.session_id}
+  const params = new URLSearchParams({ limit: 60, offset: 0 });
+  if (query) params.set('q', query);
+  const showSessions = (sessions) => {
+    if (!sessions.length) {
+      list.innerHTML = '<div style="padding:14px;text-align:center;font-size:.8rem;color:var(--muted)">No sessions yet.<br>Start a new chat!</div>';
+      return;
+    }
+    list.innerHTML = sessions.map(s => `
+      <div class="session-item ${s.session_id === State.sessionId ? 'active' : ''}"
+        data-sid="${s.session_id}" style="padding:10px 12px;border-radius:8px;cursor:pointer;
+        margin-bottom:2px;transition:all .15s;border-left:2px solid transparent">
+        <div style="font-size:.85rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          ${s.session_id}
+        </div>
+        <div style="font-size:.72rem;margin-top:3px;display:flex;align-items:center;gap:6px">
+          <span style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.25);
+            padding:2px 6px;border-radius:999px;font-size:.68rem;font-weight:600">${s.category || 'Uncategorized'}</span>
+          ${s.pinned ? '📌' : ''}
+        </div>
       </div>
-      <div style="font-size:.72rem;margin-top:3px;display:flex;align-items:center;gap:6px">
-        <span style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.25);
-          padding:2px 6px;border-radius:999px;font-size:.68rem;font-weight:600">${s.category || 'Uncategorized'}</span>
-        ${s.pinned ? '📌' : ''}
-      </div>
-    </div>
-  `).join('');
+    `).join('');
 
-  list.querySelectorAll('.session-item').forEach(item => {
-    // Hover style
-    item.addEventListener('mouseenter', () => {
-      if (!item.classList.contains('active')) item.style.background = 'var(--bg-3)';
-    });
-    item.addEventListener('mouseleave', () => {
-      if (!item.classList.contains('active')) item.style.background = '';
-    });
-
-    item.addEventListener('click', () => {
-      State.sessionId = item.dataset.sid;
-      localStorage.setItem('ampai_session_id', State.sessionId);
-      _updateChatSessionDisplay();
-      _loadSessionHistory(State.sessionId);
-      _loadSessionTaskSuggestions(State.sessionId);
-      list.querySelectorAll('.session-item').forEach(i => {
-        i.classList.remove('active');
-        i.style.background = '';
-        i.style.borderLeft = '2px solid transparent';
+    list.querySelectorAll('.session-item').forEach(item => {
+      item.addEventListener('mouseenter', () => {
+        if (!item.classList.contains('active')) item.style.background = 'var(--bg-3)';
       });
-      item.classList.add('active');
-      item.style.background  = 'rgba(99,102,241,.12)';
-      item.style.borderLeft  = '2px solid var(--accent)';
+      item.addEventListener('mouseleave', () => {
+        if (!item.classList.contains('active')) item.style.background = '';
+      });
+      item.addEventListener('click', () => {
+        State.sessionId = item.dataset.sid;
+        localStorage.setItem('ampai_session_id', State.sessionId);
+        _updateChatSessionDisplay();
+        _loadSessionHistory(State.sessionId);
+        _loadSessionTaskSuggestions(State.sessionId);
+        list.querySelectorAll('.session-item').forEach(i => {
+          i.classList.remove('active');
+          i.style.background = '';
+          i.style.borderLeft = '2px solid transparent';
+        });
+        item.classList.add('active');
+        item.style.background  = 'rgba(99,102,241,.12)';
+        item.style.borderLeft  = '2px solid var(--accent)';
+      });
     });
-  });
+  };
+
+  const loadFromCache = () => {
+    try {
+      const raw = localStorage.getItem(SESSIONS_CACHE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+  const saveCache = (sessions) => {
+    try { localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify(sessions)); } catch {}
+  };
+
+  let response = await apiJSON('/api/sessions?' + params.toString());
+  if (!response.ok) {
+    await new Promise(r => setTimeout(r, 300));
+    response = await apiJSON('/api/sessions?' + params.toString());
+  }
+  if (!response.ok) {
+    const cached = loadFromCache();
+    if (cached.length) showSessions(cached);
+    else list.innerHTML = '<div style="padding:12px;font-size:.8rem;color:var(--red)">Failed to load sessions</div>';
+    toast('Session list may be stale. Failed to refresh sessions.', 'warning');
+    if (window.__DEV__) {
+      console.warn('Failed to load sessions after retry', {
+        status: response.data?.status || response.data?.status_code || 'unknown',
+        detail: response.data?.detail || response.data?.error || 'No error detail',
+      });
+    }
+    return;
+  }
+  const sessions = response.data.sessions || [];
+  if (response.data?.needs_migration) {
+    const cta = State.role === 'admin' ? ' <a href="#admin" style="color:var(--accent)">Open Admin</a>' : '';
+    toast('Session migration required.' + cta, 'warning');
+  }
+  saveCache(sessions);
+  showSessions(sessions);
 }
 
 async function _loadSessionHistory(sessionId) {

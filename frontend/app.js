@@ -839,13 +839,42 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function loadSessions() {
+        const cacheKey = 'ampai_cached_sessions_app';
+        const isDev = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+        const readCached = () => {
+            try {
+                const raw = localStorage.getItem(cacheKey);
+                return raw ? JSON.parse(raw) : null;
+            } catch {
+                return null;
+            }
+        };
         try {
             const query = encodeURIComponent(sessionSearchInput ? sessionSearchInput.value.trim() : '');
             const archived = showArchivedToggle && showArchivedToggle.checked ? 'true' : 'false';
             const category = encodeURIComponent(sessionPaging.selectedCategory || '');
-            const response = await apiFetch(`/api/sessions?query=${query}&archived=${archived}&category=${category}&limit=${sessionPaging.limit}&offset=${sessionPaging.offset}`);
+            const url = `/api/sessions?query=${query}&archived=${archived}&category=${category}&limit=${sessionPaging.limit}&offset=${sessionPaging.offset}`;
+            let response = await apiFetch(url);
+            if (!response.ok) {
+                await new Promise((r) => setTimeout(r, 300));
+                response = await apiFetch(url);
+            }
+            if (!response.ok) {
+                const cached = readCached();
+                if (cached) {
+                    response = { ok: true, json: async () => cached };
+                    toast('Session list may be stale. Failed to refresh sessions.', 'warning');
+                } else {
+                    throw new Error('Failed to load sessions');
+                }
+                if (isDev) console.warn('Failed to load sessions', { status: response.status });
+            }
             const data = await response.json();
             sessionPaging.total = Number(data.total || 0);
+            try { localStorage.setItem(cacheKey, JSON.stringify(data)); } catch {}
+            if (data.needs_migration && ((window.State && window.State.role === 'admin') || (window.currentUserRole === 'admin'))) {
+                toast('Session migration required', 'warning');
+            }
 
             sessionsList.innerHTML = '';
             if (data.sessions && data.sessions.length > 0) {
@@ -983,6 +1012,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (memoryNextPageBtn) memoryNextPageBtn.disabled = true;
             }
         } catch (error) {
+            toast('Failed to load sessions', 'warning');
             console.error('Failed to load sessions', error);
         }
     }
