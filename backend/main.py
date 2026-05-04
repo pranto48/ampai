@@ -1999,7 +1999,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         effective_model_type = (request.model_type or "ollama").strip().lower()
         if effective_model_type == "ollama":
             configured_default = (get_config("default_model") or "").strip().lower()
-            if configured_default and configured_default != "ollama":
+            if configured_default and configured_default != "ollama" and not local_only_mode:
                 effective_model_type = configured_default
                 logger.info("Auto-resolved model_type from 'ollama' to configured default '%s'", effective_model_type)
             else:
@@ -2009,6 +2009,11 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                     import urllib.request as _ur
                     _ur.urlopen(ollama_url, timeout=2)
                 except Exception:
+                    if local_only_mode:
+                        raise HTTPException(
+                            status_code=503,
+                            detail="Local-only mode is enabled, but Ollama is unreachable. Start local model runtime or disable local-only mode.",
+                        )
                     # Ollama not reachable — try known providers in priority order
                     provider_keys = [
                         ("openrouter", "openrouter_api_key"),
