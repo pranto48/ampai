@@ -217,6 +217,15 @@ export default function ChatPage() {
     loadNudges();
   }, [loadNudges, token]);
 
+  const ackNudge = useCallback(async (nudgeId: number) => {
+    await fetch("/api/nudges/ack", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ nudge_id: nudgeId }),
+    });
+    loadNudges();
+  }, [loadNudges, token]);
+
   // Handle sending a message
   const handleSend = async () => {
     if ((!inputValue.trim() && attachments.length === 0) || isLoading) return;
