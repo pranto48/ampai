@@ -17,6 +17,7 @@ from database import (
     list_pending_reply_notifications_for_digest,
     mark_pending_reply_notifications_delivered,
     summarize_approved_memories,
+    create_curator_nudge,
 )
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -239,6 +240,35 @@ def run_memory_summarizer():
     )
 
 
+def run_curator_nudges():
+    due_tasks = list_tasks(status='todo')
+    now = datetime.now(timezone.utc)
+    enable = str(get_config("curator_nudges_enabled", "true") or "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not enable:
+        return
+    for task in due_tasks[:100]:
+        due_at = task.get("due_at")
+        if not due_at:
+            continue
+        try:
+            due_dt = datetime.fromisoformat(str(due_at).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if due_dt > now:
+            continue
+        create_curator_nudge(
+            username=task.get("username") or "admin",
+            session_id=task.get("session_id"),
+            nudge_type="overdue_task",
+            payload={
+                "task_id": task.get("id"),
+                "title": task.get("title"),
+                "due_at": due_dt.isoformat(),
+                "message": f"Task '{task.get('title')}' is overdue. Do you want me to create a follow-up plan?",
+            },
+        )
+
+
 def start_scheduler():
     if not scheduler.running:
         scheduler.add_job(run_network_sweep, 'cron', hour=9, minute=0)
@@ -246,6 +276,7 @@ def start_scheduler():
         scheduler.add_job(run_chat_reply_digest, 'interval', minutes=5)
         scheduler.add_job(run_memory_summarizer, 'cron', day_of_week='sun', hour=3, minute=0)
         scheduler.add_job(run_memory_summarizer, 'cron', hour=3, minute=30)
+        scheduler.add_job(run_curator_nudges, 'interval', minutes=20)
         scheduler.start()
         logger.info("Background scheduler started")
 
