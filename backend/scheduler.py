@@ -243,6 +243,9 @@ def run_memory_summarizer():
 def run_curator_nudges():
     due_tasks = list_tasks(status='todo')
     now = datetime.now(timezone.utc)
+    enable = str(get_config("curator_nudges_enabled", "true") or "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not enable:
+        return
     for task in due_tasks[:100]:
         due_at = task.get("due_at")
         if not due_at:

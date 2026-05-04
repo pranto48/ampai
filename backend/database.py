@@ -3823,7 +3823,31 @@ def create_curator_nudge(username: str, session_id: Optional[str], nudge_type: s
     if not engine:
         return None
     ensure_curator_nudges_table()
+    dedupe_key = str((payload or {}).get("task_id") or (payload or {}).get("message") or "").strip()
     with engine.begin() as conn:
+        if dedupe_key:
+            existing = conn.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM curator_nudges
+                    WHERE username = :username
+                      AND nudge_type = :nudge_type
+                      AND acknowledged_at IS NULL
+                      AND payload_json LIKE :needle
+                      AND created_at >= NOW() - INTERVAL '12 hours'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "username": username,
+                    "nudge_type": nudge_type,
+                    "needle": f"%{dedupe_key}%",
+                },
+            ).first()
+            if existing:
+                return int(existing[0])
         row = conn.execute(
             text(
                 """

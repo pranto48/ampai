@@ -3781,6 +3781,7 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "notification_default_digest_mode": configs.get("notification_default_digest_mode", "immediate"),
         "notification_default_digest_interval_minutes": configs.get("notification_default_digest_interval_minutes", "30"),
         "local_only_mode": configs.get("local_only_mode", "true"),
+        "curator_nudges_enabled": configs.get("curator_nudges_enabled", "true"),
     }
 
 
@@ -3870,16 +3871,20 @@ def _parse_config_list(raw_value: Optional[str], defaults: List[str]) -> List[st
 @app.get("/api/models/options")
 def get_model_options(_: UserContext = Depends(require_authenticated_user)):
     configs = get_all_configs()
+    local_only_mode = str(configs.get("local_only_mode", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    providers = [
+        {"value": "ollama", "label": "Ollama (Local)"},
+        {"value": "generic", "label": "LM Studio / OpenAI-Compatible (Local)"},
+        {"value": "anythingllm", "label": "AnythingLLM (Local Workspace)"},
+        {"value": "openrouter", "label": "OpenRouter (Free Models)"},
+        {"value": "openai", "label": "OpenAI"},
+        {"value": "gemini", "label": "Google Gemini"},
+        {"value": "anthropic", "label": "Anthropic"},
+    ]
+    if local_only_mode:
+        providers = [p for p in providers if p["value"] in {"ollama", "generic", "anythingllm"}]
     return {
-        "providers": [
-            {"value": "ollama", "label": "Ollama (Local)"},
-            {"value": "generic", "label": "LM Studio / OpenAI-Compatible (Local)"},
-            {"value": "anythingllm", "label": "AnythingLLM (Local Workspace)"},
-            {"value": "openrouter", "label": "OpenRouter (Free Models)"},
-            {"value": "openai", "label": "OpenAI"},
-            {"value": "gemini", "label": "Google Gemini"},
-            {"value": "anthropic", "label": "Anthropic"},
-        ],
+        "providers": providers,
         "models": {
             "ollama": _parse_config_list(
                 configs.get("ollama_model_list"),

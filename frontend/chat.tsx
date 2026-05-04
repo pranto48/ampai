@@ -77,7 +77,7 @@ export default function ChatPage() {
   const [categoryFilter, setCategoryFilter] = useState("");
 
   // Options
-  const [modelOptions] = useState<ModelOption[]>([
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([
     { value: "ollama", label: "🦙 Ollama" },
     { value: "openai", label: "✨ OpenAI" },
     { value: "gemini", label: "🌟 Gemini" },
@@ -184,6 +184,20 @@ export default function ChatPage() {
     }
   }, [token]);
 
+  const loadModelOptions = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/models/options`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await response.json();
+      if (response.ok && Array.isArray(data.providers)) {
+        setModelOptions(data.providers);
+      }
+    } catch (error) {
+      console.error("Failed to load model options:", error);
+    }
+  }, [token]);
+
   // Initialize
   useEffect(() => {
     loadSessions();
@@ -191,7 +205,17 @@ export default function ChatPage() {
     loadPersonas();
     loadNudges();
     loadConfigStatus();
-  }, [loadSessions, loadSessionHistory, loadPersonas, sessionId]);
+    loadModelOptions();
+  }, [loadSessions, loadSessionHistory, loadPersonas, loadNudges, loadConfigStatus, loadModelOptions, sessionId]);
+
+  const ackNudge = useCallback(async (nudgeId: number) => {
+    await fetch("/api/nudges/ack", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ nudge_id: nudgeId }),
+    });
+    loadNudges();
+  }, [loadNudges, token]);
 
   const ackNudge = useCallback(async (nudgeId: number) => {
     await fetch("/api/nudges/ack", {
