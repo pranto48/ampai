@@ -130,6 +130,9 @@ from database import (
     get_memory_rollup_metrics,
     list_curator_nudges,
     acknowledge_curator_nudge,
+    create_agent_skill,
+    list_agent_skills,
+    ensure_skill_registry_tables,
     engine,
 )
 from memory_persistence import memory_persistence_manager
@@ -232,6 +235,16 @@ class MemoryInboxUpdateRequest(BaseModel):
 
 class CuratorNudgeAckRequest(BaseModel):
     nudge_id: int
+
+
+class SkillSynthesisRequest(BaseModel):
+    session_id: str
+    min_messages: int = 4
+    auto_activate_threshold: float = 0.8
+
+
+class SkillStatusUpdateRequest(BaseModel):
+    status: str
 
 
 class TelegramIntegrationSaveRequest(BaseModel):
@@ -3782,6 +3795,68 @@ def ack_nudge(request: CuratorNudgeAckRequest, user=Depends(require_authenticate
     if not ok:
         raise HTTPException(status_code=404, detail="Nudge not found")
     return {"status": "ok"}
+
+
+def _synthesize_skill_from_session(session_id: str, username: str, min_messages: int = 4) -> Dict[str, Any]:
+    messages = list_chat_messages(session_id=session_id, dedupe=True)
+    if len(messages) < max(2, min_messages):
+        raise HTTPException(status_code=400, detail="Not enough messages to synthesize skill")
+
+    suggestion_rows = _load_session_suggestions(session_id)
+    selected = [s for s in suggestion_rows if (s.get("title") or "").strip()]
+    title = (selected[0].get("title") if selected else "Session Workflow").strip()
+    desc = (selected[0].get("description") if selected else "Derived from successful session flow.").strip()
+    trigger_patterns = [title.lower(), "follow-up", "workflow"]
+    tool_requirements = ["chat", "tasks"]
+    instruction_lines = [
+        f"Goal: {title}",
+        f"Context: {desc}",
+        "Procedure:",
+        "1) Clarify user's objective and constraints.",
+        "2) Propose a concise, ordered action plan.",
+        "3) Create/track tasks when milestones are identified.",
+        "4) Confirm completion criteria and next follow-up.",
+    ]
+    instructions = "\n".join(instruction_lines)
+    confidence = 0.85 if selected else 0.65
+    quality_score = min(0.95, 0.55 + (len(messages) / 40.0))
+    skill_id = create_agent_skill(
+        name=f"Skill: {title[:80]}",
+        instructions=instructions,
+        trigger_patterns=trigger_patterns,
+        tool_requirements=tool_requirements,
+        confidence=confidence,
+        quality_score=quality_score,
+        status="active" if confidence >= 0.8 else "draft",
+        source_session_id=session_id,
+        created_by=username,
+    )
+    if not skill_id:
+        raise HTTPException(status_code=500, detail="Failed to create synthesized skill")
+    return {"skill_id": skill_id, "confidence": confidence, "quality_score": quality_score}
+
+
+@app.post("/api/skills/synthesize")
+def synthesize_skill(request: SkillSynthesisRequest, user=Depends(require_authenticated_user)):
+    _ensure_session_owner_for_user(request.session_id, user)
+    outcome = _synthesize_skill_from_session(
+        session_id=request.session_id,
+        username=user.username,
+        min_messages=request.min_messages,
+    )
+    log_audit_event(
+        username=user.username,
+        action="skill.synthesize",
+        session_id=request.session_id,
+        details=f"skill_id={outcome['skill_id']};confidence={outcome['confidence']:.3f}",
+    )
+    return {"status": "success", **outcome}
+
+
+@app.get("/api/skills")
+def get_skills(status: Optional[str] = None, limit: int = 100, user=Depends(require_authenticated_user)):
+    ensure_skill_registry_tables()
+    return {"skills": list_agent_skills(status=status, limit=limit)}
 
 
 def _parse_config_list(raw_value: Optional[str], defaults: List[str]) -> List[str]:

@@ -3889,3 +3889,107 @@ def acknowledge_curator_nudge(nudge_id: int, username: str) -> bool:
             {"id": int(nudge_id), "username": username},
         )
     return result.rowcount > 0
+
+
+def ensure_skill_registry_tables() -> None:
+    if not engine:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS agent_skills (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                trigger_patterns TEXT NOT NULL DEFAULT '[]',
+                instructions TEXT NOT NULL,
+                tool_requirements TEXT NOT NULL DEFAULT '[]',
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+                quality_score DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+                status TEXT NOT NULL DEFAULT 'draft',
+                source_session_id TEXT,
+                created_by TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS skill_versions (
+                id SERIAL PRIMARY KEY,
+                skill_id INTEGER NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                instructions TEXT NOT NULL,
+                trigger_patterns TEXT NOT NULL DEFAULT '[]',
+                quality_score DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+                change_note TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+
+
+def create_agent_skill(
+    name: str,
+    instructions: str,
+    trigger_patterns: List[str],
+    tool_requirements: List[str],
+    confidence: float = 0.6,
+    quality_score: float = 0.5,
+    status: str = "draft",
+    source_session_id: Optional[str] = None,
+    created_by: Optional[str] = None,
+) -> Optional[int]:
+    if not engine:
+        return None
+    ensure_skill_registry_tables()
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            INSERT INTO agent_skills
+            (name, trigger_patterns, instructions, tool_requirements, confidence, quality_score, status, source_session_id, created_by, updated_at)
+            VALUES (:name, :trigger_patterns, :instructions, :tool_requirements, :confidence, :quality_score, :status, :source_session_id, :created_by, NOW())
+            RETURNING id
+        """), {
+            "name": name.strip() or "Unnamed Skill",
+            "trigger_patterns": json.dumps(trigger_patterns or []),
+            "instructions": instructions.strip() or "No instructions provided.",
+            "tool_requirements": json.dumps(tool_requirements or []),
+            "confidence": max(0.0, min(float(confidence), 1.0)),
+            "quality_score": max(0.0, min(float(quality_score), 1.0)),
+            "status": (status or "draft").strip().lower(),
+            "source_session_id": source_session_id,
+            "created_by": created_by,
+        }).first()
+        skill_id = int(row[0]) if row else None
+        if skill_id:
+            conn.execute(text("""
+                INSERT INTO skill_versions (skill_id, version, instructions, trigger_patterns, quality_score, change_note)
+                VALUES (:skill_id, 1, :instructions, :trigger_patterns, :quality_score, :change_note)
+            """), {
+                "skill_id": skill_id,
+                "instructions": instructions.strip() or "No instructions provided.",
+                "trigger_patterns": json.dumps(trigger_patterns or []),
+                "quality_score": max(0.0, min(float(quality_score), 1.0)),
+                "change_note": "Initial skill synthesis",
+            })
+    return skill_id
+
+
+def list_agent_skills(status: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    ensure_skill_registry_tables()
+    query = """
+        SELECT id, name, trigger_patterns, instructions, tool_requirements, confidence, quality_score, status, source_session_id, created_by, created_at, updated_at
+        FROM agent_skills
+    """
+    params: Dict[str, Any] = {"limit": max(1, min(limit, 500))}
+    if status:
+        query += " WHERE status = :status"
+        params["status"] = status
+    query += " ORDER BY updated_at DESC LIMIT :limit"
+    with engine.begin() as conn:
+        rows = conn.execute(text(query), params).mappings().all()
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["trigger_patterns"] = json.loads(item.get("trigger_patterns") or "[]")
+        item["tool_requirements"] = json.loads(item.get("tool_requirements") or "[]")
+        items.append(item)
+    return items
