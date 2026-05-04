@@ -3799,3 +3799,93 @@ def delete_user(user_identifier):
     except Exception as e:
         logger.exception("Error deleting user", exc_info=e)
         return False
+
+
+def ensure_curator_nudges_table() -> None:
+    if not engine:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS curator_nudges (
+                id SERIAL PRIMARY KEY,
+                username TEXT NOT NULL,
+                session_id TEXT,
+                nudge_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                delivered_at TIMESTAMPTZ,
+                acknowledged_at TIMESTAMPTZ
+            )
+        """))
+
+
+def create_curator_nudge(username: str, session_id: Optional[str], nudge_type: str, payload: Dict[str, Any]) -> Optional[int]:
+    if not engine:
+        return None
+    ensure_curator_nudges_table()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                INSERT INTO curator_nudges (username, session_id, nudge_type, payload_json)
+                VALUES (:username, :session_id, :nudge_type, :payload_json)
+                RETURNING id
+                """
+            ),
+            {
+                "username": username,
+                "session_id": session_id,
+                "nudge_type": nudge_type,
+                "payload_json": json.dumps(payload or {}),
+            },
+        ).first()
+    return int(row[0]) if row else None
+
+
+def list_curator_nudges(username: str, session_id: Optional[str] = None, only_unacked: bool = True, limit: int = 25) -> List[Dict[str, Any]]:
+    if not engine:
+        return []
+    ensure_curator_nudges_table()
+    where = ["username = :username"]
+    params: Dict[str, Any] = {"username": username, "limit": max(1, min(limit, 200))}
+    if session_id:
+        where.append("session_id = :session_id")
+        params["session_id"] = session_id
+    if only_unacked:
+        where.append("acknowledged_at IS NULL")
+    sql = text(f"""
+        SELECT id, username, session_id, nudge_type, payload_json, created_at, delivered_at, acknowledged_at
+        FROM curator_nudges
+        WHERE {' AND '.join(where)}
+        ORDER BY created_at DESC
+        LIMIT :limit
+    """)
+    with engine.begin() as conn:
+        rows = conn.execute(sql, params).mappings().all()
+    output = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["payload"] = json.loads(item.pop("payload_json") or "{}")
+        except Exception:
+            item["payload"] = {}
+        output.append(item)
+    return output
+
+
+def acknowledge_curator_nudge(nudge_id: int, username: str) -> bool:
+    if not engine:
+        return False
+    ensure_curator_nudges_table()
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                """
+                UPDATE curator_nudges
+                SET acknowledged_at = NOW(), delivered_at = COALESCE(delivered_at, NOW())
+                WHERE id = :id AND username = :username
+                """
+            ),
+            {"id": int(nudge_id), "username": username},
+        )
+    return result.rowcount > 0
