@@ -89,6 +89,8 @@ export default function ChatPage() {
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [nudges, setNudges] = useState<CuratorNudge[]>([]);
   const [localOnlyMode, setLocalOnlyMode] = useState(true);
+  const [recallQuery, setRecallQuery] = useState("");
+  const [recallSummary, setRecallSummary] = useState("");
 
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -216,6 +218,21 @@ export default function ChatPage() {
     });
     loadNudges();
   }, [loadNudges, token]);
+
+  const runRecallSearch = useCallback(async () => {
+    if (!recallQuery.trim()) return;
+    try {
+      const response = await fetch("/api/recall/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ q: recallQuery.trim(), session_id: "", limit: 12 }),
+      });
+      const data = await response.json();
+      if (response.ok) setRecallSummary(data.summary || "");
+    } catch (error) {
+      console.error("Recall search failed:", error);
+    }
+  }, [recallQuery, token]);
 
   // Handle sending a message
   const handleSend = async () => {
@@ -781,6 +798,14 @@ export default function ChatPage() {
           gap: "20px",
           scrollBehavior: "smooth"
         }}>
+          <div style={{ border: "1px solid var(--border)", borderRadius: "10px", padding: "8px", marginBottom: "10px" }}>
+            <div style={{ fontSize: ".78rem", marginBottom: "6px" }}>Cross-session recall</div>
+            <div style={{ display: "flex", gap: "6px" }}>
+              <input value={recallQuery} onChange={(e) => setRecallQuery(e.target.value)} placeholder="Search prior sessions..." style={{ flex: 1 }} />
+              <button onClick={runRecallSearch}>Search</button>
+            </div>
+            {recallSummary && <pre style={{ whiteSpace: "pre-wrap", marginTop: "8px", fontSize: ".76rem" }}>{recallSummary}</pre>}
+          </div>
           {nudges.slice(0, 2).map((nudge) => (
             <div key={`nudge-${nudge.id}`} style={{ border: "1px solid var(--border)", borderRadius: "10px", padding: "10px" }}>
               <div style={{ fontSize: ".78rem", fontWeight: 600 }}>Curator nudge</div>
