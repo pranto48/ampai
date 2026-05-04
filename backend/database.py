@@ -3947,6 +3947,20 @@ def ensure_skill_registry_tables() -> None:
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS skill_runs (
+                id SERIAL PRIMARY KEY,
+                skill_id INTEGER NOT NULL,
+                skill_version_id INTEGER,
+                username TEXT,
+                session_id TEXT,
+                status TEXT NOT NULL DEFAULT 'success',
+                latency_ms INTEGER,
+                user_feedback INTEGER,
+                notes TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
 
 
 def create_agent_skill(
@@ -4017,3 +4031,93 @@ def list_agent_skills(status: Optional[str] = None, limit: int = 100) -> List[Di
         item["tool_requirements"] = json.loads(item.get("tool_requirements") or "[]")
         items.append(item)
     return items
+
+
+def record_skill_run(
+    skill_id: int,
+    skill_version_id: Optional[int],
+    username: Optional[str],
+    session_id: Optional[str],
+    status: str,
+    latency_ms: Optional[int] = None,
+    user_feedback: Optional[int] = None,
+    notes: Optional[str] = None,
+) -> Optional[int]:
+    if not engine:
+        return None
+    ensure_skill_registry_tables()
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            INSERT INTO skill_runs (skill_id, skill_version_id, username, session_id, status, latency_ms, user_feedback, notes)
+            VALUES (:skill_id, :skill_version_id, :username, :session_id, :status, :latency_ms, :user_feedback, :notes)
+            RETURNING id
+        """), {
+            "skill_id": int(skill_id),
+            "skill_version_id": skill_version_id,
+            "username": username,
+            "session_id": session_id,
+            "status": (status or "success").strip().lower(),
+            "latency_ms": latency_ms,
+            "user_feedback": user_feedback,
+            "notes": notes,
+        }).first()
+    return int(row[0]) if row else None
+
+
+def get_skill_performance(skill_id: int, lookback_days: int = 14) -> Dict[str, Any]:
+    if not engine:
+        return {"runs": 0, "success_rate": 0.0, "avg_feedback": 0.0}
+    ensure_skill_registry_tables()
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT
+                COUNT(*) AS runs,
+                AVG(CASE WHEN status IN ('success','ok') THEN 1.0 ELSE 0.0 END) AS success_rate,
+                AVG(COALESCE(user_feedback, 0)) AS avg_feedback
+            FROM skill_runs
+            WHERE skill_id = :skill_id
+              AND created_at >= NOW() - (:lookback_days || ' days')::interval
+        """), {"skill_id": int(skill_id), "lookback_days": max(1, int(lookback_days))}).mappings().first()
+    return {
+        "runs": int((row or {}).get("runs") or 0),
+        "success_rate": float((row or {}).get("success_rate") or 0.0),
+        "avg_feedback": float((row or {}).get("avg_feedback") or 0.0),
+    }
+
+
+def create_skill_version(skill_id: int, instructions: str, trigger_patterns: List[str], quality_score: float, change_note: str) -> Optional[int]:
+    if not engine:
+        return None
+    ensure_skill_registry_tables()
+    with engine.begin() as conn:
+        version_row = conn.execute(
+            text("SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM skill_versions WHERE skill_id = :skill_id"),
+            {"skill_id": int(skill_id)},
+        ).mappings().first()
+        next_version = int((version_row or {}).get("next_version") or 1)
+        row = conn.execute(text("""
+            INSERT INTO skill_versions (skill_id, version, instructions, trigger_patterns, quality_score, change_note)
+            VALUES (:skill_id, :version, :instructions, :trigger_patterns, :quality_score, :change_note)
+            RETURNING id
+        """), {
+            "skill_id": int(skill_id),
+            "version": next_version,
+            "instructions": instructions,
+            "trigger_patterns": json.dumps(trigger_patterns or []),
+            "quality_score": max(0.0, min(float(quality_score), 1.0)),
+            "change_note": change_note,
+        }).first()
+        conn.execute(text("""
+            UPDATE agent_skills
+            SET instructions = :instructions,
+                trigger_patterns = :trigger_patterns,
+                quality_score = :quality_score,
+                updated_at = NOW()
+            WHERE id = :skill_id
+        """), {
+            "skill_id": int(skill_id),
+            "instructions": instructions,
+            "trigger_patterns": json.dumps(trigger_patterns or []),
+            "quality_score": max(0.0, min(float(quality_score), 1.0)),
+        })
+    return int(row[0]) if row else None

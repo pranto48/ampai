@@ -18,6 +18,10 @@ from database import (
     mark_pending_reply_notifications_delivered,
     summarize_approved_memories,
     create_curator_nudge,
+    list_agent_skills,
+    get_skill_performance,
+    set_config,
+    get_config,
 )
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -269,6 +273,31 @@ def run_curator_nudges():
         )
 
 
+def run_skill_rollout_guard():
+    for skill in list_agent_skills(limit=300):
+        skill_id = int(skill.get("id"))
+        raw = (get_config(f"skill_rollout_{skill_id}", "") or "").strip()
+        if not raw:
+            continue
+        try:
+            rollout = json.loads(raw)
+        except Exception:
+            continue
+        if rollout.get("status") != "canary":
+            continue
+        perf = get_skill_performance(skill_id=skill_id, lookback_days=7)
+        if perf.get("runs", 0) < 5:
+            continue
+        if perf.get("success_rate", 0.0) < 0.6:
+            rollout["status"] = "rolled_back_auto"
+            rollout["ended_at"] = datetime.now(timezone.utc).isoformat()
+            set_config(f"skill_rollout_{skill_id}", json.dumps(rollout))
+        elif perf.get("success_rate", 0.0) >= 0.75:
+            rollout["status"] = "promoted"
+            rollout["ended_at"] = datetime.now(timezone.utc).isoformat()
+            set_config(f"skill_rollout_{skill_id}", json.dumps(rollout))
+
+
 def start_scheduler():
     if not scheduler.running:
         scheduler.add_job(run_network_sweep, 'cron', hour=9, minute=0)
@@ -277,6 +306,7 @@ def start_scheduler():
         scheduler.add_job(run_memory_summarizer, 'cron', day_of_week='sun', hour=3, minute=0)
         scheduler.add_job(run_memory_summarizer, 'cron', hour=3, minute=30)
         scheduler.add_job(run_curator_nudges, 'interval', minutes=20)
+        scheduler.add_job(run_skill_rollout_guard, 'interval', minutes=30)
         scheduler.start()
         logger.info("Background scheduler started")
 
