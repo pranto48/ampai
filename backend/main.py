@@ -128,9 +128,18 @@ from database import (
     update_persona,
     delete_persona,
     get_memory_rollup_metrics,
+    list_curator_nudges,
+    acknowledge_curator_nudge,
+    create_agent_skill,
+    list_agent_skills,
+    ensure_skill_registry_tables,
+    record_skill_run,
+    get_skill_performance,
+    create_skill_version,
     engine,
 )
 from memory_persistence import memory_persistence_manager
+from session_recall import index_chat_turn, search_recall, summarize_hits
 from integrations.telegram_api import get_me, set_webhook, delete_webhook, send_message
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
@@ -226,6 +235,43 @@ class ChatRequest(BaseModel):
 class MemoryInboxUpdateRequest(BaseModel):
     status: str
     edited_text: Optional[str] = ""
+
+
+class CuratorNudgeAckRequest(BaseModel):
+    nudge_id: int
+
+
+class SkillSynthesisRequest(BaseModel):
+    session_id: str
+    min_messages: int = 4
+    auto_activate_threshold: float = 0.8
+
+
+class SkillStatusUpdateRequest(BaseModel):
+    status: str
+
+
+class SkillRunRequest(BaseModel):
+    skill_id: int
+    skill_version_id: Optional[int] = None
+    session_id: Optional[str] = None
+    status: str = "success"
+    latency_ms: Optional[int] = None
+    user_feedback: Optional[int] = None
+    notes: Optional[str] = None
+
+
+class SkillOptimizeRequest(BaseModel):
+    lookback_days: int = 14
+    min_runs: int = 5
+    success_threshold: float = 0.7
+    canary_fraction: float = 0.2
+
+
+class RecallSearchRequest(BaseModel):
+    q: str
+    session_id: Optional[str] = None
+    limit: int = 20
 
 
 class TelegramIntegrationSaveRequest(BaseModel):
@@ -1942,6 +1988,11 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         logger.info("CHAT REQUEST model_type=%s, model_name=%s, memory_mode=%s, user=%s",
                      request.model_type, request.model_name, request.memory_mode, user.username)
 
+        local_only_mode = str(get_config("local_only_mode", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        if local_only_mode and (request.model_type or "").strip().lower() not in {"", "ollama", "generic", "anythingllm"}:
+            logger.info("Local-only mode enabled. Forcing model_type '%s' -> 'ollama'", request.model_type)
+            request.model_type = "ollama"
+
         # Auto-resolve model_type: if frontend sends "ollama" but no Ollama is
         # running, prefer the admin-configured default_model or any provider
         # that has a valid API key.
@@ -2103,6 +2154,11 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                 session_id=request.session_id,
                 details=f"count={len(created_suggestions)}",
             )
+        try:
+            index_chat_turn(request.session_id, user.username, "user", request.message or "", tags="chat")
+            index_chat_turn(request.session_id, user.username, "assistant", str(result.get("response") or ""), tags="chat")
+        except Exception:
+            logger.exception("session recall indexing failed")
         result["memory_status"] = {
             "memory_action": memory_action or None,
             "memory_fact": memory_fact or None,
@@ -3756,7 +3812,158 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "notification_default_minimum_notify_interval_seconds": configs.get("notification_default_minimum_notify_interval_seconds", "300"),
         "notification_default_digest_mode": configs.get("notification_default_digest_mode", "immediate"),
         "notification_default_digest_interval_minutes": configs.get("notification_default_digest_interval_minutes", "30"),
+        "local_only_mode": configs.get("local_only_mode", "true"),
+        "curator_nudges_enabled": configs.get("curator_nudges_enabled", "true"),
     }
+
+
+@app.get("/api/nudges")
+def get_nudges(session_id: Optional[str] = None, user=Depends(require_authenticated_user)):
+    return {"nudges": list_curator_nudges(username=user.username, session_id=session_id, only_unacked=True, limit=50)}
+
+
+@app.post("/api/nudges/ack")
+def ack_nudge(request: CuratorNudgeAckRequest, user=Depends(require_authenticated_user)):
+    ok = acknowledge_curator_nudge(nudge_id=request.nudge_id, username=user.username)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Nudge not found")
+    return {"status": "ok"}
+
+
+def _synthesize_skill_from_session(session_id: str, username: str, min_messages: int = 4) -> Dict[str, Any]:
+    messages = list_chat_messages(session_id=session_id, dedupe=True)
+    if len(messages) < max(2, min_messages):
+        raise HTTPException(status_code=400, detail="Not enough messages to synthesize skill")
+
+    suggestion_rows = _load_session_suggestions(session_id)
+    selected = [s for s in suggestion_rows if (s.get("title") or "").strip()]
+    title = (selected[0].get("title") if selected else "Session Workflow").strip()
+    desc = (selected[0].get("description") if selected else "Derived from successful session flow.").strip()
+    trigger_patterns = [title.lower(), "follow-up", "workflow"]
+    tool_requirements = ["chat", "tasks"]
+    instruction_lines = [
+        f"Goal: {title}",
+        f"Context: {desc}",
+        "Procedure:",
+        "1) Clarify user's objective and constraints.",
+        "2) Propose a concise, ordered action plan.",
+        "3) Create/track tasks when milestones are identified.",
+        "4) Confirm completion criteria and next follow-up.",
+    ]
+    instructions = "\n".join(instruction_lines)
+    confidence = 0.85 if selected else 0.65
+    quality_score = min(0.95, 0.55 + (len(messages) / 40.0))
+    skill_id = create_agent_skill(
+        name=f"Skill: {title[:80]}",
+        instructions=instructions,
+        trigger_patterns=trigger_patterns,
+        tool_requirements=tool_requirements,
+        confidence=confidence,
+        quality_score=quality_score,
+        status="active" if confidence >= 0.8 else "draft",
+        source_session_id=session_id,
+        created_by=username,
+    )
+    if not skill_id:
+        raise HTTPException(status_code=500, detail="Failed to create synthesized skill")
+    return {"skill_id": skill_id, "confidence": confidence, "quality_score": quality_score}
+
+
+@app.post("/api/skills/synthesize")
+def synthesize_skill(request: SkillSynthesisRequest, user=Depends(require_authenticated_user)):
+    _ensure_session_owner_for_user(request.session_id, user)
+    outcome = _synthesize_skill_from_session(
+        session_id=request.session_id,
+        username=user.username,
+        min_messages=request.min_messages,
+    )
+    log_audit_event(
+        username=user.username,
+        action="skill.synthesize",
+        session_id=request.session_id,
+        details=f"skill_id={outcome['skill_id']};confidence={outcome['confidence']:.3f}",
+    )
+    return {"status": "success", **outcome}
+
+
+@app.get("/api/skills")
+def get_skills(status: Optional[str] = None, limit: int = 100, user=Depends(require_authenticated_user)):
+    ensure_skill_registry_tables()
+    return {"skills": list_agent_skills(status=status, limit=limit)}
+
+
+@app.post("/api/skills/runs")
+def log_skill_run(request: SkillRunRequest, user=Depends(require_authenticated_user)):
+    run_id = record_skill_run(
+        skill_id=request.skill_id,
+        skill_version_id=request.skill_version_id,
+        username=user.username,
+        session_id=request.session_id,
+        status=request.status,
+        latency_ms=request.latency_ms,
+        user_feedback=request.user_feedback,
+        notes=request.notes,
+    )
+    if not run_id:
+        raise HTTPException(status_code=500, detail="Failed to record skill run")
+    return {"status": "success", "run_id": run_id}
+
+
+@app.post("/api/skills/{skill_id}/optimize")
+def optimize_skill(skill_id: int, request: SkillOptimizeRequest, user=Depends(require_authenticated_user)):
+    skills = [s for s in list_agent_skills(limit=500) if int(s.get("id")) == int(skill_id)]
+    if not skills:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    skill = skills[0]
+    perf = get_skill_performance(skill_id=skill_id, lookback_days=request.lookback_days)
+    if perf["runs"] < max(1, request.min_runs):
+        return {"status": "skipped", "reason": "insufficient_runs", "performance": perf}
+    if perf["success_rate"] >= float(request.success_threshold):
+        return {"status": "skipped", "reason": "already_healthy", "performance": perf}
+
+    improved_instructions = (
+        f"{skill.get('instructions', '').strip()}\n\n"
+        "Self-improvement patch:\n"
+        "- Ask one clarifying question before execution.\n"
+        "- Add explicit verification checkpoint before final answer.\n"
+        "- If uncertainty remains, provide two alternatives with tradeoffs."
+    ).strip()
+    new_quality = min(1.0, max(0.0, float(skill.get("quality_score") or 0.5) + 0.05))
+    version_id = create_skill_version(
+        skill_id=skill_id,
+        instructions=improved_instructions,
+        trigger_patterns=skill.get("trigger_patterns") or [],
+        quality_score=new_quality,
+        change_note=f"Auto-refinement from optimization loop by {user.username}",
+    )
+    rollout_config = {
+        "skill_id": skill_id,
+        "candidate_version_id": version_id,
+        "canary_fraction": max(0.05, min(float(request.canary_fraction), 1.0)),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "status": "canary",
+    }
+    set_config(f"skill_rollout_{skill_id}", json.dumps(rollout_config))
+    return {"status": "optimized", "new_version_id": version_id, "performance": perf, "rollout": rollout_config}
+
+
+@app.post("/api/skills/{skill_id}/rollback")
+def rollback_skill(skill_id: int, user=Depends(require_admin_user)):
+    set_config(f"skill_rollout_{skill_id}", "")
+    log_audit_event(username=user.username, action="skill.rollback", details=f"skill_id={skill_id}")
+    return {"status": "rolled_back", "skill_id": skill_id}
+
+
+@app.post("/api/recall/search")
+def recall_search(request: RecallSearchRequest, user=Depends(require_authenticated_user)):
+    hits = search_recall(
+        query=request.q,
+        username=user.username,
+        session_id=request.session_id,
+        limit=request.limit,
+    )
+    summary = summarize_hits(hits, max_items=5)
+    return {"hits": hits, "summary": summary}
 
 
 def _parse_config_list(raw_value: Optional[str], defaults: List[str]) -> List[str]:
@@ -3770,16 +3977,20 @@ def _parse_config_list(raw_value: Optional[str], defaults: List[str]) -> List[st
 @app.get("/api/models/options")
 def get_model_options(_: UserContext = Depends(require_authenticated_user)):
     configs = get_all_configs()
+    local_only_mode = str(configs.get("local_only_mode", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    providers = [
+        {"value": "ollama", "label": "Ollama (Local)"},
+        {"value": "generic", "label": "LM Studio / OpenAI-Compatible (Local)"},
+        {"value": "anythingllm", "label": "AnythingLLM (Local Workspace)"},
+        {"value": "openrouter", "label": "OpenRouter (Free Models)"},
+        {"value": "openai", "label": "OpenAI"},
+        {"value": "gemini", "label": "Google Gemini"},
+        {"value": "anthropic", "label": "Anthropic"},
+    ]
+    if local_only_mode:
+        providers = [p for p in providers if p["value"] in {"ollama", "generic", "anythingllm"}]
     return {
-        "providers": [
-            {"value": "ollama", "label": "Ollama (Local)"},
-            {"value": "generic", "label": "LM Studio / OpenAI-Compatible (Local)"},
-            {"value": "anythingllm", "label": "AnythingLLM (Local Workspace)"},
-            {"value": "openrouter", "label": "OpenRouter (Free Models)"},
-            {"value": "openai", "label": "OpenAI"},
-            {"value": "gemini", "label": "Google Gemini"},
-            {"value": "anthropic", "label": "Anthropic"},
-        ],
+        "providers": providers,
         "models": {
             "ollama": _parse_config_list(
                 configs.get("ollama_model_list"),
