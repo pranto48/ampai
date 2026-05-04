@@ -128,6 +128,8 @@ from database import (
     update_persona,
     delete_persona,
     get_memory_rollup_metrics,
+    list_curator_nudges,
+    acknowledge_curator_nudge,
     engine,
 )
 from memory_persistence import memory_persistence_manager
@@ -226,6 +228,10 @@ class ChatRequest(BaseModel):
 class MemoryInboxUpdateRequest(BaseModel):
     status: str
     edited_text: Optional[str] = ""
+
+
+class CuratorNudgeAckRequest(BaseModel):
+    nudge_id: int
 
 
 class TelegramIntegrationSaveRequest(BaseModel):
@@ -1941,6 +1947,11 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
         logger.info("CHAT REQUEST model_type=%s, model_name=%s, memory_mode=%s, user=%s",
                      request.model_type, request.model_name, request.memory_mode, user.username)
+
+        local_only_mode = str(get_config("local_only_mode", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        if local_only_mode and (request.model_type or "").strip().lower() not in {"", "ollama", "generic", "anythingllm"}:
+            logger.info("Local-only mode enabled. Forcing model_type '%s' -> 'ollama'", request.model_type)
+            request.model_type = "ollama"
 
         # Auto-resolve model_type: if frontend sends "ollama" but no Ollama is
         # running, prefer the admin-configured default_model or any provider
@@ -3756,7 +3767,21 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "notification_default_minimum_notify_interval_seconds": configs.get("notification_default_minimum_notify_interval_seconds", "300"),
         "notification_default_digest_mode": configs.get("notification_default_digest_mode", "immediate"),
         "notification_default_digest_interval_minutes": configs.get("notification_default_digest_interval_minutes", "30"),
+        "local_only_mode": configs.get("local_only_mode", "true"),
     }
+
+
+@app.get("/api/nudges")
+def get_nudges(session_id: Optional[str] = None, user=Depends(require_authenticated_user)):
+    return {"nudges": list_curator_nudges(username=user.username, session_id=session_id, only_unacked=True, limit=50)}
+
+
+@app.post("/api/nudges/ack")
+def ack_nudge(request: CuratorNudgeAckRequest, user=Depends(require_authenticated_user)):
+    ok = acknowledge_curator_nudge(nudge_id=request.nudge_id, username=user.username)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Nudge not found")
+    return {"status": "ok"}
 
 
 def _parse_config_list(raw_value: Optional[str], defaults: List[str]) -> List[str]:
