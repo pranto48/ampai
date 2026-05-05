@@ -2951,8 +2951,13 @@ def get_sessions(
             if adopted > 0:
                 accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
             if not accessible_ids:
-                needs_migration = True
-                sessions = []
+                # Fallback for legacy single-user deployments:
+                # show existing sessions even if ownership metadata is missing.
+                # This avoids "No sessions yet" for users with historical chats.
+                fallback_open = str(get_config("auth_open_session_fallback", "true")).strip().lower() in {"1", "true", "yes", "on"}
+                if not fallback_open:
+                    needs_migration = True
+                    sessions = []
         if accessible_ids:
             shared_ids = set(list_shared_sessions_for_user(current_user.username))
             sessions = [s for s in sessions if s.get("session_id") in accessible_ids]
