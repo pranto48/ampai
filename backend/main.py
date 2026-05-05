@@ -139,7 +139,7 @@ from database import (
     engine,
 )
 from memory_persistence import memory_persistence_manager
-from session_recall import index_chat_turn, search_recall, summarize_hits
+from session_recall import index_chat_turn, search_recall, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions
 from integrations.telegram_api import get_me, set_webhook, delete_webhook, send_message
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
@@ -1989,13 +1989,13 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                      request.model_type, request.model_name, request.memory_mode, user.username)
 
         local_only_mode = str(get_config("local_only_mode", "true")).strip().lower() in {"1", "true", "yes", "on"}
-        if local_only_mode and (request.model_type or "").strip().lower() not in {"", "ollama", "generic", "anythingllm"}:
+        if local_only_mode and (request.model_type or "").strip().lower() not in {"", "ollama", "generic", "anythingllm", "ampai_default"}:
             logger.info("Local-only mode enabled. Forcing model_type '%s' -> 'ollama'", request.model_type)
             request.model_type = "ollama"
 
         # Auto-resolve model_type: if frontend sends "ollama" but no Ollama is
         # running, prefer the admin-configured default_model or any provider
-        # that has a valid API key.
+        # that has a valid API key. Final fallback: ampai_default (built-in engine).
         effective_model_type = (request.model_type or "ollama").strip().lower()
         if effective_model_type == "ollama":
             configured_default = (get_config("default_model") or "").strip().lower()
@@ -2005,29 +2005,70 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             else:
                 # Check if Ollama is reachable; if not, try to find an alternative
                 ollama_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+                ollama_alive = False
                 try:
                     import urllib.request as _ur
                     _ur.urlopen(ollama_url, timeout=2)
+                    ollama_alive = True
                 except Exception:
+                    pass
+                if not ollama_alive:
                     if local_only_mode:
-                        raise HTTPException(
-                            status_code=503,
-                            detail="Local-only mode is enabled, but Ollama is unreachable. Start local model runtime or disable local-only mode.",
-                        )
-                    # Ollama not reachable — try known providers in priority order
-                    provider_keys = [
-                        ("openrouter", "openrouter_api_key"),
-                        ("openai", "openai_api_key"),
-                        ("gemini", "gemini_api_key"),
-                        ("anthropic", "anthropic_api_key"),
-                        ("generic", "generic_api_key"),
-                    ]
-                    for prov, key_name in provider_keys:
-                        if get_config(key_name):
-                            effective_model_type = prov
-                            logger.info("Ollama unreachable; auto-resolved model_type to '%s'", prov)
-                            break
+                        # In local-only mode, fall back to built-in AmpAI engine instead of 503
+                        effective_model_type = "ampai_default"
+                        logger.info("Ollama unreachable in local-only mode — switching to ampai_default engine")
+                    else:
+                        # Try known providers in priority order
+                        provider_keys = [
+                            ("openrouter", "openrouter_api_key"),
+                            ("openai", "openai_api_key"),
+                            ("gemini", "gemini_api_key"),
+                            ("anthropic", "anthropic_api_key"),
+                            ("generic", "generic_api_key"),
+                        ]
+                        resolved = False
+                        for prov, key_name in provider_keys:
+                            if get_config(key_name):
+                                effective_model_type = prov
+                                logger.info("Ollama unreachable; auto-resolved model_type to '%s'", prov)
+                                resolved = True
+                                break
+                        if not resolved:
+                            # No API keys either — use built-in AmpAI engine
+                            effective_model_type = "ampai_default"
+                            logger.info("No AI provider available — using built-in ampai_default engine")
         request.model_type = effective_model_type
+
+        # ── AmpAI Default Mode: built-in engine, no model needed ──────────────
+        if effective_model_type == "ampai_default":
+            from ampai_default_engine import ampai_default_chat
+            from database import get_core_memories
+            _ensure_session_owner_for_user(request.session_id, user)
+            core_mems = get_core_memories()
+            default_result = ampai_default_chat(
+                message=request.message,
+                session_id=request.session_id,
+                username=user.username,
+                core_mems=core_mems,
+            )
+            # Handle memory candidate from built-in engine
+            if default_result.get("memory_action") == "pending_approval" and default_result.get("memory_fact"):
+                _create_memory_candidate(user.username, request.session_id, default_result["memory_fact"], confidence=0.75)
+            return {
+                "response": default_result["response"],
+                "web_search": default_result.get("web_search", {}),
+                "task_suggestions": [],
+                "has_task_cues": False,
+                "retrieval": default_result.get("retrieval", {}),
+                "memory_action": default_result.get("memory_action"),
+                "memory_fact": default_result.get("memory_fact"),
+                "memory_category": None,
+                "skill_opportunity": None,
+                "recall_used": False,
+                "ampai_default_mode": True,
+                "intent": default_result.get("intent_detected", "general"),
+                "model_used": "AmpAI Built-in",
+            }
 
         _ensure_session_owner_for_user(request.session_id, user)
         persona_prompt = ""
@@ -5287,6 +5328,317 @@ def update_delete_backup(backup_name: str, user: UserContext = Depends(require_a
     log_audit_event(username=user.username, action="admin.docker.backup.delete", details=f"backup={backup_name}")
     return {"deleted": backup_name}
 
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  AmpAI AUTONOMOUS AGENT ENDPOINTS
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── Identity / Health ────────────────────────────────────────────────────────
+
+@app.get("/api/ampai/identity")
+def get_ampai_identity():
+    """Return AmpAI identity info including local Ollama status and capabilities."""
+    from ampai_identity import get_identity_info
+    return get_identity_info()
+
+
+@app.get("/api/ampai/health/ollama")
+def check_ollama_health():
+    """Ping the local Ollama instance and return available models."""
+    from ampai_identity import check_ollama_alive, get_available_local_models, get_recommended_local_model
+    alive = check_ollama_alive()
+    models = get_available_local_models() if alive else []
+    return {
+        "alive": alive,
+        "models": models,
+        "recommended": get_recommended_local_model() if alive else None,
+    }
+
+
+# ── Skills ───────────────────────────────────────────────────────────────────
+
+class SkillCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+    system_prompt: str
+    trigger_pattern: str = ""
+    parameters: Optional[Dict[str, Any]] = None
+    tags: str = ""
+
+
+class SkillUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    system_prompt: Optional[str] = None
+    trigger_pattern: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+    tags: Optional[str] = None
+    status: Optional[str] = None
+
+
+class SkillExecuteRequest(BaseModel):
+    user_message: str
+    session_id: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+    model_type: str = "ollama"
+
+
+class SkillAutoCreateRequest(BaseModel):
+    session_id: str
+    skill_name: str
+    description: str = ""
+    model_type: str = "ollama"
+
+
+@app.get("/api/skills")
+def api_list_skills(
+    status: str = "active",
+    user: UserContext = Depends(get_current_user),
+):
+    """List all agent skills."""
+    from skill_engine import list_skills
+    return list_skills(status=status)
+
+
+@app.post("/api/skills")
+def api_create_skill(
+    req: SkillCreateRequest,
+    user: UserContext = Depends(get_current_user),
+):
+    """Create a new agent skill manually."""
+    from skill_engine import create_skill
+    skill = create_skill(
+        name=req.name,
+        description=req.description,
+        system_prompt=req.system_prompt,
+        trigger_pattern=req.trigger_pattern,
+        parameters=req.parameters,
+        tags=req.tags,
+        created_by=user.username,
+    )
+    if not skill:
+        raise HTTPException(status_code=400, detail="Failed to create skill (name may already exist)")
+    return skill
+
+
+@app.get("/api/skills/{skill_id}")
+def api_get_skill(skill_id: int, user: UserContext = Depends(get_current_user)):
+    """Get a single skill by ID."""
+    from skill_engine import get_skill
+    skill = get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return skill
+
+
+@app.put("/api/skills/{skill_id}")
+def api_update_skill(
+    skill_id: int,
+    req: SkillUpdateRequest,
+    user: UserContext = Depends(get_current_user),
+):
+    """Update a skill's fields."""
+    from skill_engine import update_skill
+    updates = {k: v for k, v in req.dict().items() if v is not None}
+    ok = update_skill(skill_id, **updates)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Update failed")
+    return {"ok": True}
+
+
+@app.delete("/api/skills/{skill_id}")
+def api_delete_skill(skill_id: int, user: UserContext = Depends(get_current_user)):
+    """Soft-delete a skill."""
+    from skill_engine import delete_skill
+    ok = delete_skill(skill_id)
+    return {"ok": ok}
+
+
+@app.post("/api/skills/{skill_id}/run")
+def api_run_skill(
+    skill_id: int,
+    req: SkillExecuteRequest,
+    user: UserContext = Depends(get_current_user),
+):
+    """Execute a skill against a user message."""
+    from skill_engine import run_skill
+    from database import get_core_memories
+    core_mems = get_core_memories()
+    core_facts = "\n".join(f"- {m['fact']}" for m in core_mems) if core_mems else ""
+    result = run_skill(
+        skill_id=skill_id,
+        user_message=req.user_message,
+        session_id=req.session_id,
+        username=user.username,
+        parameters=req.parameters,
+        model_type=req.model_type,
+        core_facts=core_facts,
+    )
+    return result
+
+
+@app.post("/api/skills/{skill_id}/improve")
+def api_improve_skill(
+    skill_id: int,
+    user: UserContext = Depends(get_current_user),
+):
+    """Manually trigger self-improvement for a specific skill."""
+    from skill_engine import run_improvement_pass, get_skill
+    skill = get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    stats = run_improvement_pass()
+    return {"ok": True, "stats": stats}
+
+
+@app.get("/api/skills/{skill_id}/runs")
+def api_skill_runs(
+    skill_id: int,
+    limit: int = 50,
+    user: UserContext = Depends(get_current_user),
+):
+    """Get execution history for a skill."""
+    from skill_engine import get_skill_runs
+    return get_skill_runs(skill_id, limit=limit)
+
+
+@app.get("/api/skills/{skill_id}/versions")
+def api_skill_versions(skill_id: int, user: UserContext = Depends(get_current_user)):
+    """Get version history of a skill's system prompt."""
+    from skill_engine import get_skill_versions
+    return get_skill_versions(skill_id)
+
+
+@app.get("/api/skills/{skill_id}/performance")
+def api_skill_performance(
+    skill_id: int,
+    lookback_days: int = 14,
+    user: UserContext = Depends(get_current_user),
+):
+    """Get performance stats for a skill."""
+    from skill_engine import get_skill_performance as _perf
+    return _perf(skill_id, lookback_days=lookback_days)
+
+
+@app.post("/api/skills/auto-create")
+def api_auto_create_skill(
+    req: SkillAutoCreateRequest,
+    user: UserContext = Depends(get_current_user),
+):
+    """Auto-synthesize a skill from a session using the local LLM."""
+    from skill_engine import auto_create_skill_from_session
+    skill = auto_create_skill_from_session(
+        session_id=req.session_id,
+        skill_name=req.skill_name,
+        description=req.description,
+        username=user.username,
+        model_type=req.model_type,
+    )
+    if not skill:
+        raise HTTPException(status_code=400, detail="Skill synthesis failed")
+    return skill
+
+
+# ── Memory Nudges (Curator) ───────────────────────────────────────────────────
+
+class NudgeCurateTriggerRequest(BaseModel):
+    session_id: Optional[str] = None
+    model_type: str = "ollama"
+    dry_run: bool = False
+
+
+@app.get("/api/nudges")
+def api_list_nudges(
+    limit: int = 20,
+    user: UserContext = Depends(get_current_user),
+):
+    """List pending memory nudges for the current user."""
+    from memory_curator import list_pending_nudges
+    return list_pending_nudges(user.username, limit=limit)
+
+
+@app.post("/api/nudges/{nudge_id}/accept")
+def api_accept_nudge(nudge_id: int, user: UserContext = Depends(get_current_user)):
+    """Accept a nudge — saves the fact to core memory."""
+    from memory_curator import accept_nudge
+    fact = accept_nudge(nudge_id, user.username)
+    if fact is None:
+        raise HTTPException(status_code=404, detail="Nudge not found or already reviewed")
+    return {"ok": True, "saved_fact": fact}
+
+
+@app.post("/api/nudges/{nudge_id}/dismiss")
+def api_dismiss_nudge(nudge_id: int, user: UserContext = Depends(get_current_user)):
+    """Dismiss a nudge — it won't be saved to memory."""
+    from memory_curator import dismiss_nudge
+    ok = dismiss_nudge(nudge_id, user.username)
+    return {"ok": ok}
+
+
+@app.post("/api/nudges/curate")
+def api_trigger_curation(
+    req: NudgeCurateTriggerRequest,
+    user: UserContext = Depends(get_current_user),
+):
+    """Manually trigger memory curation for a session or all recent sessions."""
+    from memory_curator import curate_session, run_scheduled_curation
+    if req.session_id:
+        facts = curate_session(
+            session_id=req.session_id,
+            username=user.username,
+            model_type=req.model_type,
+            dry_run=req.dry_run,
+        )
+        return {"ok": True, "facts": facts, "nudges_created": len(facts)}
+    else:
+        stats = run_scheduled_curation(model_type=req.model_type)
+        return {"ok": True, "stats": stats}
+
+
+# ── Cross-Session Recall ──────────────────────────────────────────────────────
+
+class RecallQueryRequest(BaseModel):
+    query: str
+    limit: int = 20
+    use_llm: bool = True
+    model_type: str = "ollama"
+
+
+@app.post("/api/recall/search")
+def api_recall_search(
+    req: RecallQueryRequest,
+    user: UserContext = Depends(get_current_user),
+):
+    """FTS5 full-text search across past sessions with optional LLM summarization."""
+    hits = search_recall(query=req.query, username=user.username, limit=req.limit)
+    summary = ""
+    if req.use_llm and hits:
+        try:
+            from session_recall import llm_summarize_hits
+            summary = llm_summarize_hits(hits, req.query, model_type=req.model_type)
+        except Exception:
+            from session_recall import summarize_hits
+            summary = summarize_hits(hits)
+    return {"hits": hits, "summary": summary, "count": len(hits)}
+
+
+@app.get("/api/recall/stats")
+def api_recall_stats(user: UserContext = Depends(get_current_user)):
+    """Return FTS5 index statistics."""
+    return get_fts_stats()
+
+
+@app.post("/api/recall/reindex")
+def api_recall_reindex(
+    batch_size: int = 100,
+    user: UserContext = Depends(get_current_user),
+):
+    """Manually trigger FTS5 bulk indexing of unindexed sessions. Admin only."""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    stats = bulk_index_unindexed_sessions(batch_size=batch_size)
+    return {"ok": True, "stats": stats}
 
 
 if os.path.exists(UPLOAD_DIR):

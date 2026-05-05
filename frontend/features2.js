@@ -1814,3 +1814,260 @@ async function _tgcOpenChat(sessionId, chatId, userId) {
     </div>`;
   }).join('');
 }
+
+// ═══════════════════════════════════════════════════
+// AMPAI AGENT — SKILLS
+// ═══════════════════════════════════════════════════
+let _skillsBound = false;
+
+async function skillsLoad() {
+  await _fetchSkills();
+  if (_skillsBound) return;
+  _skillsBound = true;
+  document.getElementById('skill-new-btn')?.addEventListener('click', () => _openSkillModal());
+  document.getElementById('skill-save-btn')?.addEventListener('click', _saveSkill);
+  document.getElementById('skill-search')?.addEventListener('input', _fetchSkills);
+}
+
+async function _fetchSkills() {
+  const q = (document.getElementById('skill-search')?.value || '').toLowerCase();
+  const { ok, data } = await apiJSON('/api/skills');
+  const grid = document.getElementById('skills-grid');
+  if (!grid) return;
+  if (!ok) { grid.innerHTML = '<div class="card" style="color:var(--red)">Failed to load skills</div>'; return; }
+  let skills = Array.isArray(data) ? data : [];
+  if (q) skills = skills.filter(s => (s.name||'').toLowerCase().includes(q) || (s.description||'').toLowerCase().includes(q));
+  const badge = document.getElementById('skills-count-badge');
+  if (badge) { badge.textContent = skills.length + ' skill' + (skills.length !== 1 ? 's' : ''); badge.style.display = ''; }
+  if (!skills.length) {
+    grid.innerHTML = '<div class="card" style="color:var(--muted);text-align:center;padding:40px"><div style="font-size:2.5rem;margin-bottom:12px">🔧</div><div>No skills yet. Start a complex task and AmpAI will suggest creating one!</div></div>';
+    return;
+  }
+  grid.innerHTML = skills.map(s => {
+    const sr = Math.round((s.success_rate || 0) * 100);
+    const srColor = sr >= 80 ? 'var(--green)' : sr >= 50 ? 'var(--yellow)' : 'var(--red)';
+    return '<div style="background:var(--bg-2);border:1px solid var(--border);border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:10px">'
+      + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">'
+      + '<div><div style="font-weight:700">' + _esc(s.name||'Unnamed') + '</div>'
+      + (s.is_auto_created ? '<span style="font-size:.68rem;background:rgba(99,102,241,.15);color:#818cf8;padding:2px 7px;border-radius:999px">⚡ Auto</span>' : '')
+      + '</div>'
+      + '<div style="display:flex;gap:5px">'
+      + '<button class="btn btn-secondary btn-sm" onclick="_runSkillModal(' + s.id + ',\'' + _esc(s.name) + '\')">▶ Run</button>'
+      + '<button class="btn btn-danger btn-sm" onclick="_deleteSkill(' + s.id + ')">🗑</button></div></div>'
+      + '<div style="font-size:.82rem;color:var(--muted)">' + _esc((s.description||'').slice(0,140)) + '</div>'
+      + '<div style="font-size:.76rem;display:flex;gap:10px">'
+      + '<span>🔁 <b>' + (s.run_count||0) + '</b> runs</span>'
+      + '<span>✅ <b style="color:' + srColor + '">' + sr + '%</b></span>'
+      + '<span>v<b>' + (s.version||1) + '</b></span>'
+      + (s.last_improved_at ? '<span style="color:var(--green)">🧬 Improved</span>' : '')
+      + '</div>'
+      + '<button class="btn btn-ghost btn-sm" style="align-self:flex-start" onclick="_improveSkill(' + s.id + ')">🧬 Improve Prompt</button>'
+      + '</div>';
+  }).join('');
+}
+
+function _openSkillModal(skill) {
+  skill = skill || null;
+  document.getElementById('skill-modal-title').textContent = skill ? 'Edit Skill' : 'New Skill';
+  document.getElementById('skill-edit-id').value = (skill && skill.id) ? skill.id : '';
+  document.getElementById('skill-name-inp').value = (skill && skill.name) ? skill.name : '';
+  document.getElementById('skill-desc-inp').value = (skill && skill.description) ? skill.description : '';
+  document.getElementById('skill-prompt-inp').value = (skill && skill.system_prompt) ? skill.system_prompt : '';
+  document.getElementById('skill-trigger-inp').value = (skill && skill.trigger_pattern) ? skill.trigger_pattern : '';
+  document.getElementById('skill-tags-inp').value = (skill && skill.tags) ? skill.tags : '';
+  openModal('modal-skill');
+}
+
+async function _saveSkill() {
+  const id = document.getElementById('skill-edit-id').value;
+  const name = (document.getElementById('skill-name-inp').value || '').trim();
+  const system_prompt = (document.getElementById('skill-prompt-inp').value || '').trim();
+  if (!name || !system_prompt) return toast('Name and Skill Prompt required', 'error');
+  const payload = { name, description: (document.getElementById('skill-desc-inp').value||'').trim(), system_prompt, trigger_pattern: (document.getElementById('skill-trigger-inp').value||'').trim(), tags: (document.getElementById('skill-tags-inp').value||'').trim() };
+  const { ok } = await apiJSON(id ? '/api/skills/' + id : '/api/skills', { method: id ? 'PUT' : 'POST', body: JSON.stringify(payload) });
+  if (ok) { closeModal('modal-skill'); toast(id ? 'Skill updated' : 'Skill created', 'success'); _fetchSkills(); }
+  else toast('Failed to save skill', 'error');
+}
+
+async function _deleteSkill(id) {
+  if (!confirm('Delete this skill?')) return;
+  const { ok } = await apiJSON('/api/skills/' + id, { method: 'DELETE' });
+  if (ok) { toast('Deleted', 'success'); _fetchSkills(); } else toast('Failed', 'error');
+}
+
+function _runSkillModal(skillId, skillName) {
+  document.getElementById('skill-run-id').value = skillId;
+  document.getElementById('skill-run-modal-title').textContent = 'Run: ' + skillName;
+  document.getElementById('skill-run-message').value = '';
+  document.getElementById('skill-run-result').textContent = '';
+  document.getElementById('skill-run-result-wrap').style.display = 'none';
+  openModal('modal-skill-run');
+}
+
+async function _executeSkillRun() {
+  const skillId = document.getElementById('skill-run-id').value;
+  const message = (document.getElementById('skill-run-message').value || '').trim();
+  if (!message) return toast('Enter a message', 'error');
+  const btn = document.getElementById('skill-run-exec-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+  const model_type = (document.getElementById('model-select') || {}).value || 'ollama';
+  const { ok, data } = await apiJSON('/api/skills/' + skillId + '/run', { method: 'POST', body: JSON.stringify({ user_message: message, session_id: State.sessionId, model_type }) });
+  if (btn) { btn.disabled = false; btn.textContent = '▶ Execute'; }
+  document.getElementById('skill-run-result-wrap').style.display = 'block';
+  document.getElementById('skill-run-result').textContent = ok ? (data.response || 'No response') : ('Error: ' + ((data && data.detail) || 'Unknown'));
+}
+
+async function _improveSkill(skillId) {
+  toast('Triggering improvement…', 'info');
+  const { ok } = await apiJSON('/api/skills/' + skillId + '/improve', { method: 'POST' });
+  toast(ok ? 'Improvement triggered' : 'Failed', ok ? 'success' : 'error');
+}
+
+function _handleSkillOpportunity(opportunity) {
+  if (!opportunity || !opportunity.name) return;
+  const existing = document.getElementById('skill-opportunity-banner');
+  if (existing) existing.remove();
+  const banner = document.createElement('div');
+  banner.id = 'skill-opportunity-banner';
+  banner.style.cssText = 'position:fixed;bottom:90px;right:20px;z-index:9000;background:linear-gradient(135deg,rgba(99,102,241,.95),rgba(139,92,246,.9));border-radius:14px;padding:14px 18px;max-width:340px;box-shadow:0 8px 32px rgba(99,102,241,.4);color:#fff;';
+  banner.innerHTML = '<div style="font-weight:700;font-size:.88rem;margin-bottom:6px">💡 Skill Opportunity</div>'
+    + '<div style="font-size:.8rem;opacity:.9;margin-bottom:10px"><b>' + _esc(opportunity.name) + '</b><br>' + _esc(opportunity.description||'') + '</div>'
+    + '<div style="display:flex;gap:8px">'
+    + '<button onclick="_acceptSkillOpportunity(\'' + encodeURIComponent(opportunity.name) + '\',\'' + encodeURIComponent(opportunity.description||'') + '\',\'' + (opportunity.session_id||'') + '\')" style="flex:1;padding:6px;border-radius:8px;border:none;background:rgba(255,255,255,.2);color:#fff;cursor:pointer;font-size:.8rem;font-weight:600">✅ Save Skill</button>'
+    + '<button onclick="document.getElementById(\'skill-opportunity-banner\').remove()" style="padding:6px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.2);background:none;color:rgba(255,255,255,.7);cursor:pointer;font-size:.8rem">✕</button>'
+    + '</div>';
+  document.body.appendChild(banner);
+  setTimeout(() => { try { banner.remove(); } catch(e){} }, 18000);
+}
+
+async function _acceptSkillOpportunity(encodedName, encodedDesc, sessionId) {
+  document.getElementById('skill-opportunity-banner')?.remove();
+  const name = decodeURIComponent(encodedName);
+  const description = decodeURIComponent(encodedDesc);
+  const { ok } = await apiJSON('/api/skills/auto-create', { method: 'POST', body: JSON.stringify({ session_id: sessionId || State.sessionId, skill_name: name, description }) });
+  toast(ok ? 'Skill saved!' : 'Skill creation failed', ok ? 'success' : 'error');
+}
+
+// ═══════════════════════════════════════════════════
+// AMPAI AGENT — MEMORY NUDGES
+// ═══════════════════════════════════════════════════
+let _nudgesBound = false;
+
+async function nudgesLoad() {
+  await _fetchNudges();
+  if (_nudgesBound) return;
+  _nudgesBound = true;
+  document.getElementById('nudge-refresh-btn')?.addEventListener('click', _fetchNudges);
+  document.getElementById('nudge-curate-btn')?.addEventListener('click', _triggerCuration);
+}
+
+async function _fetchNudges() {
+  const { ok, data } = await apiJSON('/api/nudges?limit=30');
+  const list = document.getElementById('nudge-list');
+  if (!list) return;
+  if (!ok) { list.innerHTML = '<div class="card" style="color:var(--red)">Failed to load nudges</div>'; return; }
+  const nudges = Array.isArray(data) ? data : [];
+  const badge = document.getElementById('nudge-count-badge');
+  if (badge) { badge.textContent = nudges.length; badge.style.display = nudges.length ? '' : 'none'; }
+  if (!nudges.length) {
+    list.innerHTML = '<div class="card" style="text-align:center;color:var(--muted);padding:40px"><div style="font-size:2.5rem;margin-bottom:12px">🧠</div><div>No memory nudges yet.</div><div style="font-size:.8rem;margin-top:8px">AmpAI reviews sessions every 6h and suggests facts worth saving.</div></div>';
+    return;
+  }
+  list.innerHTML = nudges.map(n => '<div style="background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:8px">'
+    + '<div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">'
+    + '<div style="font-size:.85rem;flex:1">🧠 ' + _esc(n.fact || (n.payload && n.payload.fact) || 'Memory suggestion') + '</div>'
+    + '<div style="display:flex;gap:5px">'
+    + '<button class="btn btn-primary btn-sm" onclick="_acceptNudge(' + n.id + ')">✅ Save</button>'
+    + '<button class="btn btn-ghost btn-sm" onclick="_dismissNudge(' + n.id + ')">✕</button></div></div>'
+    + '<div style="font-size:.72rem;color:var(--muted);margin-top:6px">' + (n.session_id ? 'Session: ' + n.session_id.slice(0,12) + '…' : '') + '</div>'
+    + '</div>'
+  ).join('');
+}
+
+async function _acceptNudge(nudgeId) {
+  const { ok } = await apiJSON('/api/nudges/' + nudgeId + '/accept', { method: 'POST' });
+  if (ok) { toast('Saved to memory!', 'success'); _fetchNudges(); } else toast('Failed', 'error');
+}
+
+async function _dismissNudge(nudgeId) {
+  const { ok } = await apiJSON('/api/nudges/' + nudgeId + '/dismiss', { method: 'POST' });
+  if (ok) { toast('Dismissed', 'info'); _fetchNudges(); } else toast('Failed', 'error');
+}
+
+async function _triggerCuration() {
+  const btn = document.getElementById('nudge-curate-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Curating…'; }
+  const model_type = (document.getElementById('model-select') || {}).value || 'ollama';
+  const { ok, data } = await apiJSON('/api/nudges/curate', { method: 'POST', body: JSON.stringify({ session_id: State.sessionId, model_type, dry_run: false }) });
+  if (btn) { btn.disabled = false; btn.textContent = '✨ Curate Now'; }
+  toast(ok ? 'Done: ' + (data.nudges_created||0) + ' nudge(s)' : 'Curation failed', ok ? 'success' : 'error');
+  if (ok) _fetchNudges();
+}
+
+// ═══════════════════════════════════════════════════
+// AMPAI AGENT — SESSION RECALL SEARCH
+// ═══════════════════════════════════════════════════
+let _recallBound = false;
+
+async function recallLoad() {
+  if (_recallBound) return;
+  _recallBound = true;
+  document.getElementById('recall-search-btn')?.addEventListener('click', _runRecallSearch);
+  document.getElementById('recall-query')?.addEventListener('keydown', e => { if (e.key === 'Enter') _runRecallSearch(); });
+  document.getElementById('recall-reindex-btn')?.addEventListener('click', _triggerReindex);
+  _loadRecallStats();
+}
+
+async function _loadRecallStats() {
+  const { ok, data } = await apiJSON('/api/recall/stats');
+  const el = document.getElementById('recall-stats');
+  if (ok && el) el.innerHTML = '📚 <b>' + (data.total_turns_indexed||0) + '</b> turns &nbsp;·&nbsp; 🗂 <b>' + (data.distinct_sessions||0) + '</b> sessions';
+}
+
+async function _runRecallSearch() {
+  const query = (document.getElementById('recall-query')?.value || '').trim();
+  if (!query) return toast('Enter a query', 'info');
+  const btn = document.getElementById('recall-search-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Searching…'; }
+  const model_type = (document.getElementById('model-select')||{}).value || 'ollama';
+  const { ok, data } = await apiJSON('/api/recall/search', { method: 'POST', body: JSON.stringify({ query, limit: 20, use_llm: true, model_type }) });
+  if (btn) { btn.disabled = false; btn.textContent = '🔍 Search'; }
+  const resultEl = document.getElementById('recall-results');
+  if (!resultEl) return;
+  if (!ok) { resultEl.innerHTML = '<div style="color:var(--red)">Search failed</div>'; return; }
+  const hits = data.hits || [], summary = data.summary || '';
+  let html = '';
+  if (summary) html += '<div style="background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.3);border-radius:10px;padding:14px;margin-bottom:16px"><b style="color:#818cf8">🤖 AmpAI Summary</b><br>' + _esc(summary) + '</div>';
+  html += hits.length ? hits.map(h => '<div style="background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px"><span class="badge ' + (h.role==='human'?'badge-yellow':'badge-green') + '">' + (h.role==='human'?'User':'AmpAI') + '</span> <code style="font-size:.72rem;color:var(--muted)">' + _esc((h.session_id||'').slice(0,16)) + '</code><div style="margin-top:6px;font-size:.83rem">' + _esc((h.content||'').slice(0,300)) + '</div></div>').join('') : '<div style="color:var(--muted);text-align:center;padding:24px">No results</div>';
+  resultEl.innerHTML = html;
+}
+
+async function _triggerReindex() {
+  const btn = document.getElementById('recall-reindex-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Indexing…'; }
+  const { ok, data } = await apiJSON('/api/recall/reindex?batch_size=100', { method: 'POST' });
+  if (btn) { btn.disabled = false; btn.textContent = '⚡ Re-index'; }
+  toast(ok ? 'Indexed ' + (data.stats && data.stats.turns_indexed || 0) + ' turns' : 'Failed', ok ? 'success' : 'error');
+  _loadRecallStats();
+}
+
+// ═══════════════════════════════════════════════════
+// AMPAI STATUS INDICATOR
+// ═══════════════════════════════════════════════════
+async function _initAmpaiStatusBar() {
+  const bar = document.getElementById('ampai-status-bar');
+  if (!bar) return;
+  const { ok, data } = await apiJSON('/api/ampai/identity').catch(() => ({ ok: false, data: {} }));
+  if (!ok) return;
+  const alive = data.local && data.local.available;
+  const model = (data.local && data.local.recommended_model) || '—';
+  bar.innerHTML = alive
+    ? '<span style="color:var(--green);font-size:.7rem">🟢 AmpAI · ' + _esc(model) + '</span>'
+    : '<span style="color:var(--yellow);font-size:.7rem">🟡 AmpAI Default</span>';
+  bar.title = alive ? 'Local model: ' + model : 'Using built-in AmpAI engine. Start Ollama for full AI.';
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _initAmpaiStatusBar);
+} else {
+  setTimeout(_initAmpaiStatusBar, 1500);
+}

@@ -790,3 +790,192 @@ function buildTelegramChatsPage() {
   </div>
 </div>`;
 }
+
+// ── AmpAI Skills Page ────────────────────────────────────────────────────────
+function buildSkillsPage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:24px">
+  <div>
+    <h2 style="font-size:1.15rem;font-weight:700;display:flex;align-items:center;gap:10px">
+      🔧 Agent Skills
+      <span id="skills-count-badge" style="padding:3px 10px;border-radius:999px;font-size:.72rem;font-weight:600;background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3);display:none"></span>
+    </h2>
+    <p style="font-size:.82rem;color:var(--muted);margin-top:4px">Reusable AI skills. Auto-created from complex tasks and self-improving over time.</p>
+  </div>
+  <div style="display:flex;gap:8px">
+    <input id="skill-search" class="input" placeholder="Search skills…" style="width:200px"/>
+    <button id="skill-new-btn" class="btn btn-primary btn-sm">＋ New Skill</button>
+  </div>
+</div>
+
+<div id="skills-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px">
+  <div class="card" style="text-align:center;color:var(--muted);padding:32px">Loading skills…</div>
+</div>
+
+<!-- Skill Create/Edit Modal -->
+<div id="modal-skill" class="modal-overlay">
+  <div class="modal-box" style="max-width:640px">
+    <div class="modal-header">
+      <div class="modal-title" id="skill-modal-title">New Skill</div>
+      <button class="modal-close" data-close-modal="modal-skill">✕</button>
+    </div>
+    <input type="hidden" id="skill-edit-id"/>
+    <div class="fg"><label class="lbl">Skill Name *</label><input id="skill-name-inp" class="input" placeholder="e.g. summarize_email"/></div>
+    <div class="fg"><label class="lbl">Description</label><input id="skill-desc-inp" class="input" placeholder="What does this skill do?"/></div>
+    <div class="fg"><label class="lbl">Skill Prompt * <span style="font-size:.72rem;color:var(--muted)">(system instructions for this skill)</span></label>
+      <textarea id="skill-prompt-inp" class="input" rows="7" style="resize:vertical;font-family:monospace;font-size:.82rem" placeholder="You are an expert at… Your task is to…"></textarea></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="fg"><label class="lbl">Trigger Pattern</label><input id="skill-trigger-inp" class="input" placeholder="regex or keyword"/></div>
+      <div class="fg"><label class="lbl">Tags</label><input id="skill-tags-inp" class="input" placeholder="coding, analysis…"/></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px">
+      <button class="btn btn-ghost btn-sm" data-close-modal="modal-skill">Cancel</button>
+      <button id="skill-save-btn" class="btn btn-primary btn-sm">💾 Save Skill</button>
+    </div>
+  </div>
+</div>
+
+<!-- Skill Run Modal -->
+<div id="modal-skill-run" class="modal-overlay">
+  <div class="modal-box" style="max-width:580px">
+    <div class="modal-header">
+      <div class="modal-title" id="skill-run-modal-title">Run Skill</div>
+      <button class="modal-close" data-close-modal="modal-skill-run">✕</button>
+    </div>
+    <input type="hidden" id="skill-run-id"/>
+    <div class="fg"><label class="lbl">Your Message / Input</label>
+      <textarea id="skill-run-message" class="input" rows="4" style="resize:vertical" placeholder="What do you want the skill to process?"></textarea></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px">
+      <button class="btn btn-ghost btn-sm" data-close-modal="modal-skill-run">Cancel</button>
+      <button id="skill-run-exec-btn" class="btn btn-primary btn-sm" onclick="_executeSkillRun()">▶ Execute</button>
+    </div>
+    <div id="skill-run-result-wrap" style="display:none;margin-top:14px">
+      <div style="font-size:.78rem;font-weight:700;color:var(--muted);margin-bottom:6px">Result</div>
+      <pre id="skill-run-result" style="background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:14px;font-size:.82rem;white-space:pre-wrap;max-height:300px;overflow-y:auto;font-family:inherit;line-height:1.6"></pre>
+    </div>
+  </div>
+</div>`;
+}
+
+// ── AmpAI Memory Nudges Page ─────────────────────────────────────────────────
+function buildNudgesPage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:24px">
+  <div>
+    <h2 style="font-size:1.15rem;font-weight:700;display:flex;align-items:center;gap:10px">
+      🧠 Memory Nudges
+      <span id="nudge-count-badge" style="padding:3px 10px;border-radius:999px;font-size:.72rem;font-weight:600;background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.3);display:none">0</span>
+    </h2>
+    <p style="font-size:.82rem;color:var(--muted);margin-top:4px">AmpAI reviews your conversations and suggests facts worth remembering. Accept to save, dismiss to skip.</p>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button id="nudge-refresh-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
+    <button id="nudge-curate-btn" class="btn btn-primary btn-sm">✨ Curate Now</button>
+  </div>
+</div>
+
+<div style="background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.2);border-radius:12px;padding:14px 18px;margin-bottom:20px;font-size:.84rem">
+  <strong>How it works:</strong> Every 6 hours, AmpAI uses the local LLM to review recent sessions and extract facts worth remembering.
+  Click <strong>Curate Now</strong> to run immediately for your current session.
+</div>
+
+<div id="nudge-list" style="display:flex;flex-direction:column;gap:8px">
+  <div class="card" style="text-align:center;color:var(--muted);padding:32px">Loading nudges…</div>
+</div>`;
+}
+
+// ── AmpAI Session Recall Page ─────────────────────────────────────────────────
+function buildRecallPage() {
+  return `
+<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:24px">
+  <div>
+    <h2 style="font-size:1.15rem;font-weight:700">🔍 Session Recall</h2>
+    <p style="font-size:.82rem;color:var(--muted);margin-top:4px">Search across all your past conversations using FTS5 full-text search with LLM summarization.</p>
+  </div>
+  <button id="recall-reindex-btn" class="btn btn-secondary btn-sm">⚡ Re-index</button>
+</div>
+
+<div class="card" style="margin-bottom:20px">
+  <div id="recall-stats" style="font-size:.82rem;color:var(--muted);margin-bottom:12px">Loading stats…</div>
+  <div style="display:flex;gap:8px">
+    <input id="recall-query" class="input" placeholder="Search past conversations… (e.g. Python project, user preferences, meeting notes)" style="flex:1"/>
+    <button id="recall-search-btn" class="btn btn-primary">🔍 Search</button>
+  </div>
+</div>
+
+<div id="recall-results" style="display:flex;flex-direction:column;gap:8px">
+  <div style="text-align:center;color:var(--muted);font-size:.85rem;padding:32px">Enter a query to search past conversations.</div>
+</div>`;
+}
+
+// ── AmpAI Identity / Status Page ─────────────────────────────────────────────
+function buildAmpaiStatusPage() {
+  return `
+<div style="margin-bottom:24px">
+  <h2 style="font-size:1.15rem;font-weight:700">🤖 AmpAI Agent Status</h2>
+  <p style="font-size:.82rem;color:var(--muted);margin-top:4px">Local model status, capabilities, and autonomous agent overview.</p>
+</div>
+
+<div id="ampai-identity-card" class="card" style="margin-bottom:20px">
+  <div style="text-align:center;color:var(--muted);padding:24px">Loading AmpAI identity…</div>
+</div>
+
+<div class="grid-2" style="gap:16px">
+  <div class="card">
+    <div class="card-title">🧠 Memory System</div>
+    <div style="font-size:.84rem;line-height:1.8;color:var(--muted)">
+      • Core memories persist facts across all sessions<br>
+      • Memory nudges suggest important facts every 6h<br>
+      • FTS5 cross-session search indexes every chat turn<br>
+      • LLM summarizes past context into each prompt
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px">
+      <button class="btn btn-secondary btn-sm" onclick="navigate('nudges')">View Nudges</button>
+      <button class="btn btn-secondary btn-sm" onclick="navigate('recall')">Search Sessions</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">🔧 Skill System</div>
+    <div style="font-size:.84rem;line-height:1.8;color:var(--muted)">
+      • Skills are reusable AI prompt templates<br>
+      • Auto-created after complex multi-step tasks<br>
+      • Self-improving: prompts rewritten when success rate drops<br>
+      • Run any skill on-demand with custom inputs
+    </div>
+    <div style="margin-top:12px">
+      <button class="btn btn-secondary btn-sm" onclick="navigate('skills')">Manage Skills</button>
+    </div>
+  </div>
+</div>`;
+}
+
+async function ampaiStatusLoad() {
+  const card = document.getElementById('ampai-identity-card');
+  if (!card) return;
+  const { ok, data } = await apiJSON('/api/ampai/identity');
+  if (!ok) { card.innerHTML = '<div style="color:var(--red)">Failed to load AmpAI identity</div>'; return; }
+  const alive = data.local && data.local.available;
+  const models = (data.local && data.local.models) || [];
+  const features = data.features || {};
+  card.innerHTML = `
+<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+  <div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;font-size:2rem">🤖</div>
+  <div>
+    <div style="font-size:1.25rem;font-weight:800">${_esc(data.name || 'AmpAI')} <span style="font-size:.75rem;color:var(--muted);font-weight:400">v${_esc(data.version || '1.0.0')}</span></div>
+    <div style="font-size:.84rem;color:var(--muted);margin-top:2px">${_esc(data.tagline || '')}</div>
+    <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+      <span class="badge ${alive ? 'badge-green' : 'badge-yellow'}">${alive ? '🟢 Ollama Online' : '🟡 Default Mode'}</span>
+      ${alive ? '<span class="badge" style="background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3)">' + _esc(data.local.recommended_model||'—') + '</span>' : ''}
+    </div>
+  </div>
+</div>
+${alive ? '' : `
+<div style="margin-top:16px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);border-radius:10px;padding:12px 16px;font-size:.84rem;color:#fbbf24">
+  ⚠️ <strong>Ollama not detected.</strong> AmpAI is running in <strong>default mode</strong> — using the built-in response engine.
+  <a href="https://ollama.ai" target="_blank" style="color:#818cf8;margin-left:8px">Install Ollama →</a>
+</div>`}
+<div style="margin-top:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;font-size:.8rem">
+  ${Object.entries(features).map(([k,v]) => `<div style="display:flex;align-items:center;gap:6px"><span style="color:${v?'var(--green)':'var(--red)'}">${v?'✅':'❌'}</span><span style="color:var(--muted)">${_esc(k.replace(/_/g,' '))}</span></div>`).join('')}
+</div>
+${models.length ? `<div style="margin-top:14px;font-size:.8rem;color:var(--muted)"><strong>Available models:</strong> ${models.map(m=>'<code style="background:var(--bg-3);padding:2px 6px;border-radius:4px">'+_esc(m)+'</code>').join(' ')}</div>` : ''}`;
+}

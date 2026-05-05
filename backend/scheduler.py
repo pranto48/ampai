@@ -298,6 +298,53 @@ def run_skill_rollout_guard():
             set_config(f"skill_rollout_{skill_id}", json.dumps(rollout))
 
 
+def run_session_fts_indexer():
+    """Nightly job: index unindexed chat sessions into FTS5 for cross-session recall."""
+    try:
+        from session_recall import bulk_index_unindexed_sessions
+        stats = bulk_index_unindexed_sessions(batch_size=100)
+        logger.info(
+            "FTS5 indexer complete: sessions=%d turns=%d errors=%d",
+            stats.get("sessions_indexed", 0),
+            stats.get("turns_indexed", 0),
+            stats.get("errors", 0),
+        )
+    except Exception as exc:
+        logger.warning("run_session_fts_indexer failed: %s", exc)
+
+
+def run_memory_curation():
+    """Every 6h: use local LLM to curate recent sessions into memory nudges."""
+    try:
+        from memory_curator import run_scheduled_curation
+        model_type = (get_config("default_model_type") or "ollama").strip()
+        stats = run_scheduled_curation(model_type=model_type)
+        logger.info(
+            "Memory curation complete: users=%d sessions=%d nudges=%d",
+            stats.get("users_processed", 0),
+            stats.get("sessions_reviewed", 0),
+            stats.get("nudges_created", 0),
+        )
+    except Exception as exc:
+        logger.warning("run_memory_curation failed: %s", exc)
+
+
+def run_skill_improvement_pass():
+    """Every 1h: review underperforming skills and self-improve their prompts."""
+    try:
+        from skill_engine import run_improvement_pass
+        model_type = (get_config("default_model_type") or "ollama").strip()
+        stats = run_improvement_pass(model_type=model_type)
+        if stats.get("skills_improved", 0) > 0:
+            logger.info(
+                "Skill improvement pass: reviewed=%d improved=%d",
+                stats.get("skills_reviewed", 0),
+                stats.get("skills_improved", 0),
+            )
+    except Exception as exc:
+        logger.warning("run_skill_improvement_pass failed: %s", exc)
+
+
 def start_scheduler():
     if not scheduler.running:
         scheduler.add_job(run_network_sweep, 'cron', hour=9, minute=0)
@@ -307,6 +354,10 @@ def start_scheduler():
         scheduler.add_job(run_memory_summarizer, 'cron', hour=3, minute=30)
         scheduler.add_job(run_curator_nudges, 'interval', minutes=20)
         scheduler.add_job(run_skill_rollout_guard, 'interval', minutes=30)
+        # AmpAI autonomous agent jobs
+        scheduler.add_job(run_memory_curation, 'interval', hours=6, id='ampai_memory_curation')
+        scheduler.add_job(run_skill_improvement_pass, 'interval', hours=1, id='ampai_skill_improvement')
+        scheduler.add_job(run_session_fts_indexer, 'cron', hour=2, minute=0, id='ampai_fts_indexer')
         scheduler.start()
         logger.info("Background scheduler started")
 

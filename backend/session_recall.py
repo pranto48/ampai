@@ -66,6 +66,7 @@ def search_recall(query: str, username: Optional[str] = None, session_id: Option
 
 
 def summarize_hits(hits: List[Dict[str, Any]], max_items: int = 5) -> str:
+    """Rule-based summarizer (kept for compatibility). Use llm_summarize_hits for LLM version."""
     if not hits:
         return "No matching cross-session memories found."
     lines: List[str] = []
@@ -76,3 +77,122 @@ def summarize_hits(hits: List[Dict[str, Any]], max_items: int = 5) -> str:
         short = " ".join([s for s in snippets[:2] if s])[:220]
         lines.append(f"- Session {sid[:12]}: {short}")
     return "Cross-session recall summary:\n" + "\n".join(lines)
+
+
+def llm_summarize_hits(
+    hits: List[Dict[str, Any]],
+    query: str,
+    model_type: str = "ollama",
+    max_snippets: int = 10,
+) -> str:
+    """
+    Use the local LLM (AmpAI / Ollama) to produce a coherent, query-relevant summary
+    of FTS5 cross-session search hits. This is the hermes-agent-style context injection.
+    Falls back to rule-based summarizer if the LLM call fails.
+    """
+    if not hits:
+        return ""
+
+    raw_snippets = "\n".join([
+        f"[Session {h.get('session_id', '')[:8]} | {h.get('role', 'unknown')}]: {(h.get('content') or '')[:300]}"
+        for h in hits[:max_snippets]
+    ])
+
+    prompt = (
+        "You are reviewing past conversation snippets to find context relevant to a current query.\n\n"
+        f'Current query: "{query}"\n\n'
+        f"Past conversation snippets:\n{raw_snippets}\n\n"
+        "Provide a concise 2-3 sentence summary of what is relevant to the current query. "
+        "Focus only on actionable context. If nothing is relevant, respond with exactly: (no relevant past context)"
+    )
+
+    try:
+        from agent import get_llm
+        llm = get_llm(model_type)
+        resp = llm.invoke(prompt)
+        result = (resp.content if hasattr(resp, "content") else str(resp)).strip()
+        if "(no relevant past context)" in result.lower() or not result:
+            return ""
+        return result
+    except Exception:
+        return summarize_hits(hits, max_items=3)
+
+
+def search_and_summarize(
+    query: str,
+    username: Optional[str] = None,
+    model_type: str = "ollama",
+    limit: int = 15,
+    use_llm: bool = True,
+) -> str:
+    """
+    One-stop function: FTS5 search + LLM summarization.
+    Called by agent.py to inject cross-session context into every chat turn.
+    Returns empty string if nothing relevant found.
+    """
+    if not query or not query.strip():
+        return ""
+    hits = search_recall(query, username=username, limit=limit)
+    if not hits:
+        return ""
+    if use_llm:
+        return llm_summarize_hits(hits, query, model_type=model_type)
+    return summarize_hits(hits, max_items=5)
+
+
+def bulk_index_unindexed_sessions(batch_size: int = 50) -> Dict[str, int]:
+    """
+    Nightly scheduled job: index chat sessions not yet in the FTS5 store.
+    Reads from PostgreSQL message_store and writes to SQLite FTS5.
+    """
+    stats: Dict[str, int] = {"sessions_indexed": 0, "turns_indexed": 0, "errors": 0}
+
+    ensure_session_recall_tables()
+    conn = _conn()
+    try:
+        indexed_sessions = set(
+            row["session_id"]
+            for row in conn.execute("SELECT DISTINCT session_id FROM session_recall_fts").fetchall()
+            if row["session_id"]
+        )
+    finally:
+        conn.close()
+
+    try:
+        from database import engine, list_chat_messages, get_all_sessions
+        if not engine:
+            return stats
+        all_sessions = get_all_sessions()
+        unindexed = [s["session_id"] for s in all_sessions if s["session_id"] not in indexed_sessions]
+        for session_id in unindexed[:batch_size]:
+            try:
+                messages = list_chat_messages(session_id, dedupe=True)
+                for msg in messages:
+                    role = "human" if msg.get("type") == "human" else "ai"
+                    content = (msg.get("content") or "").strip()
+                    if content:
+                        index_chat_turn(session_id=session_id, username="", role=role, content=content)
+                        stats["turns_indexed"] += 1
+                stats["sessions_indexed"] += 1
+            except Exception:
+                stats["errors"] += 1
+    except Exception:
+        stats["errors"] += 1
+
+    return stats
+
+
+def get_fts_stats() -> Dict[str, Any]:
+    """Return stats about the FTS5 index for admin/health dashboards."""
+    ensure_session_recall_tables()
+    conn = _conn()
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM session_recall_fts").fetchone()[0]
+        sessions = conn.execute("SELECT COUNT(DISTINCT session_id) FROM session_recall_fts").fetchone()[0]
+        return {
+            "total_turns_indexed": int(total or 0),
+            "distinct_sessions": int(sessions or 0),
+            "db_path": DB_PATH,
+        }
+    finally:
+        conn.close()

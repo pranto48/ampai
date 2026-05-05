@@ -9,7 +9,7 @@ from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from memory_indexer import MemoryIndexer
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 
 from logging_utils import get_logger
 
@@ -19,6 +19,8 @@ from langchain_community.chat_models import ChatOllama
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from database import DATABASE_URL, get_config, get_core_memories, add_core_memory, redact_pii_text
 from memory_persistence import memory_persistence_manager
+from ampai_identity import get_ampai_system_prompt
+from session_recall import search_and_summarize, index_chat_turn
 
 from langchain_core.chat_history import BaseChatMessageHistory
 
@@ -70,6 +72,19 @@ TASK_CUE_PATTERNS = [
     r"\bshould I\b",
     r"\bneed to\b",
 ]
+
+# AmpAI skill opportunity detection
+_SKILL_OPPORTUNITY_RE = re.compile(
+    r"\[SKILL_OPPORTUNITY:\s*([^|\]]+)\|([^\]]+)\]", re.IGNORECASE
+)
+
+
+def _parse_skill_opportunity(content: str) -> Optional[Tuple[str, str]]:
+    """Extract skill name and description from [SKILL_OPPORTUNITY: name|description] tag."""
+    match = _SKILL_OPPORTUNITY_RE.search(content or "")
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    return None
 
 
 def _looks_like_task_intent(text: str) -> bool:
@@ -357,8 +372,33 @@ def chat_with_agent(
     generation_options = _resolve_generation_options(model_type=model_type, chat_output_mode=chat_output_mode or "normal")
     llm = get_llm(model_type, api_key, model_name=model_name, generation_options=generation_options)
 
+    username = kwargs.get("username", "system")
+    is_admin = kwargs.get("is_admin", False)
+    allowed_memory_categories = kwargs.get("allowed_memory_categories", [])
+    persist_memory = kwargs.get("persist_memory", True)
+    require_memory_approval = kwargs.get("require_memory_approval", False)
+    pii_strict_mode = kwargs.get("pii_strict_mode", False)
+    persona_prompt_override = kwargs.get("persona_prompt_override")
+
     core_mems = get_core_memories()
     core_facts_str = "\n".join([f"- {m['fact']}" for m in core_mems]) if core_mems else "None yet."
+
+    # ── Cross-session recall injection (AmpAI / hermes-agent style) ─────────
+    recall_context = ""
+    cross_session_enabled = str(
+        get_config("cross_session_recall_enabled", "true")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if cross_session_enabled and message:
+        try:
+            recall_context = search_and_summarize(
+                query=message,
+                username=username or None,
+                model_type=model_type,
+                limit=12,
+                use_llm=True,
+            )
+        except Exception as _recall_err:
+            logger.debug("Cross-session recall failed: %s", _recall_err)
 
     web_context = ""
     web_search = {"enabled": use_web_search, "provider": None, "status": "disabled", "error": None}
@@ -407,41 +447,28 @@ def chat_with_agent(
             except Exception as e:
                 logger.exception("Image read error", exc_info=e)
 
-    agent_directives = (
-        "You are an intelligent AI assistant with a global memory system.\n"
-        "Here are the CORE FACTS you must always remember about the user:\n"
-        f"{core_facts_str}\n\n"
-        "IMPORTANT DIRECTIVE: You must autonomously extract reliable information, important facts, or preferences about the user. "
-        "If the user shares an important fact or explicitly asks you to remember something, "
-        "you MUST append the following exact tag anywhere in your response: [SAVE_MEMORY: <the fact to save>]. "
-        "Only save high-quality, reliable information.\n"
-        "If the user clearly asks to create a task, append a tag in this exact format: "
-        "[CREATE_TASK: title=<task title>|description=<details>|priority=<low/medium/high>|due=<ISO datetime optional>].\n\n"
-        f"{web_context}"
-        f"{file_context}"
+    # ── AmpAI identity system prompt ─────────────────────────────────────────
+    persona_prompt = (persona_prompt_override or "").strip()
+    agent_directives = get_ampai_system_prompt(
+        core_facts=core_facts_str,
+        recall_context=recall_context,
+        username=username,
+        persona_override=persona_prompt,
     )
+    # Append web and file context
+    agent_directives += f"{web_context}{file_context}"
+
     requested_mode = (chat_output_mode or get_config("chat_output_mode", "normal") or "normal").strip().lower()
     if requested_mode not in {"compact", "normal"}:
         requested_mode = "normal"
     if requested_mode == "compact":
-        compact_token_cap = generation_options.get("max_tokens") or generation_options.get("max_output_tokens") or generation_options.get("num_predict") or 120
-        agent_directives += (
-            f"\nAnswer in <= {compact_token_cap} tokens, concise bullets, no extra explanation unless asked.\n"
+        compact_token_cap = (
+            generation_options.get("max_tokens")
+            or generation_options.get("max_output_tokens")
+            or generation_options.get("num_predict")
+            or 120
         )
-    persona_prompt_override = kwargs.get("persona_prompt_override")
-    username = kwargs.get("username", "system")
-    is_admin = kwargs.get("is_admin", False)
-    allowed_memory_categories = kwargs.get("allowed_memory_categories", [])
-    persist_memory = kwargs.get("persist_memory", True)
-    require_memory_approval = kwargs.get("require_memory_approval", False)
-    pii_strict_mode = kwargs.get("pii_strict_mode", False)
-
-    persona_prompt = (persona_prompt_override or "").strip()
-    if persona_prompt:
-        agent_directives = (
-            f"PERSONA SYSTEM PROMPT (highest priority):\n{persona_prompt}\n\n"
-            + agent_directives
-        )
+        agent_directives += f"\nAnswer in <= {compact_token_cap} tokens, concise bullets, no extra explanation unless asked.\n"
 
     retrieval_meta = {
         "enabled": memory_mode == "indexed",
@@ -619,6 +646,15 @@ def chat_with_agent(
     if not task_suggestions:
         task_suggestions = _build_fallback_suggestion(message, content)
 
+    # ── AmpAI: detect skill opportunity tag ──────────────────────────────────
+    skill_opportunity = None
+    skill_match = _parse_skill_opportunity(content)
+    if skill_match:
+        skill_name, skill_desc = skill_match
+        skill_opportunity = {"name": skill_name, "description": skill_desc, "session_id": session_id}
+        # Remove tag from displayed response
+        content = _SKILL_OPPORTUNITY_RE.sub("", content).strip()
+
     sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
     message_log = message
     if attachments:
@@ -630,9 +666,16 @@ def chat_with_agent(
         message_log = redact_pii_text(message_log)
         content = redact_pii_text(content)
 
-    # Always persist every turn to SQL history (sessions load from here)
+    # Always persist every turn to SQL history
     sql_history.add_user_message(message_log)
     sql_history.add_ai_message(content)
+
+    # ── AmpAI: index this turn into FTS5 for future cross-session recall ──────
+    try:
+        index_chat_turn(session_id=session_id, username=username, role="human", content=message_log)
+        index_chat_turn(session_id=session_id, username=username, role="ai", content=content)
+    except Exception as _fts_err:
+        logger.debug("FTS5 indexing failed: %s", _fts_err)
 
     return {
         "response": content,
@@ -643,4 +686,6 @@ def chat_with_agent(
         "memory_action": memory_action or None,
         "memory_fact": normalized_fact or None,
         "memory_category": memory_category or None,
+        "skill_opportunity": skill_opportunity,
+        "recall_used": bool(recall_context),
     }
