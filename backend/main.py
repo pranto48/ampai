@@ -3224,6 +3224,20 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
     try:
         _enforce_session_access_or_403(session_id, user)
         messages = list_chat_messages(session_id, dedupe=True)
+        if not messages:
+            try:
+                redis_msgs = get_redis_history(session_id).messages
+                mapped = []
+                for m in redis_msgs or []:
+                    mtype = getattr(m, "type", "") or getattr(m, "__class__", type("x", (), {})).__name__.lower()
+                    role = "human" if "human" in str(mtype).lower() else "ai"
+                    content = getattr(m, "content", "") or ""
+                    if content:
+                        mapped.append({"type": role, "content": content})
+                if mapped:
+                    messages = mapped
+            except Exception:
+                pass
         log_audit_event(username=user.username, action="memory.read.history", session_id=session_id, details=f"count={len(messages)}")
         return {"messages": messages}
     except Exception as e:
