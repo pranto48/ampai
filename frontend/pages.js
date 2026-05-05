@@ -301,28 +301,29 @@ function buildModelsPage() {
 <div id="model-save-status" style="font-size:.85rem;color:var(--green);margin-bottom:12px"></div>
 
 <div class="grid-2" style="gap:16px">
-  ${_modelCard('🦙','Ollama','Local LLM','rgba(99,102,241,.15)',[
+  ${_modelCard('🦙','Ollama','Local LLM','rgba(99,102,241,.15)','ollama',[
     ['cfg-ollama-url','text','Base URL','http://localhost:11434'],
     ['cfg-ollama-models','text','Model list (comma-separated)','llama3,mistral,phi3'],
   ])}
-  ${_modelCard('✨','OpenAI','GPT-4, GPT-3.5','rgba(16,185,129,.15)',[
+  ${_modelCard('✨','OpenAI','GPT-4, GPT-3.5','rgba(16,185,129,.15)','openai',[
     ['cfg-openai-key','password','API Key','sk-…'],
   ])}
-  ${_modelCard('🌟','Gemini','Google AI','rgba(245,158,11,.15)',[
+  ${_modelCard('🌟','Gemini','Google AI','rgba(245,158,11,.15)','gemini',[
     ['cfg-gemini-key','password','API Key','AIza…'],
   ])}
-  ${_modelCard('🔴','Anthropic','Claude','rgba(239,68,68,.15)',[
+  ${_modelCard('🔴','Anthropic','Claude','rgba(239,68,68,.15)','anthropic',[
     ['cfg-anthropic-key','password','API Key','sk-ant-…'],
   ])}
-  ${_modelCard('🔀','OpenRouter','Multi-provider','rgba(139,92,246,.15)',[
+  ${_modelCard('🔀','OpenRouter','Multi-provider','rgba(139,92,246,.15)','openrouter',[
     ['cfg-openrouter-key','password','API Key','sk-or-…'],
     ['cfg-openrouter-model','text','Default Model','openai/gpt-4o'],
   ])}
-  ${_modelCard('🏠','AnythingLLM','Self-hosted RAG','rgba(16,185,129,.1)',[
+  ${_modelCard('🏠','AnythingLLM','Self-hosted RAG','rgba(16,185,129,.1)','anythingllm',[
     ['cfg-anythingllm-url','text','Base URL','http://localhost:3001'],
     ['cfg-anythingllm-key','password','API Key',''],
     ['cfg-anythingllm-ws','text','Workspace','my-workspace'],
   ])}
+  ${_modelCard('🧩','Generic','OpenAI-compatible','rgba(59,130,246,.15)','generic',[])}
 </div>
 
 <div class="card" style="margin-top:16px">
@@ -395,7 +396,7 @@ function _memoryRetrievalCard() {
 </div>`;
 }
 
-function _modelCard(icon, name, sub, bg, fields) {
+function _modelCard(icon, name, sub, bg, provider, fields) {
   return `
 <div style="background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:18px;
   transition:border-color .2s" onmouseenter="this.style.borderColor='rgba(99,102,241,.4)'"
@@ -413,6 +414,10 @@ function _modelCard(icon, name, sub, bg, fields) {
     <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:6px;font-weight:500">${label}</label>
     <input id="${id}" type="${type}" class="input" placeholder="${ph}"/>
   </div>`).join('')}
+  <div style="display:flex;align-items:center;gap:8px">
+    <button id="test-provider-${provider}" class="btn btn-secondary btn-sm" type="button">Test</button>
+    <span id="test-provider-status-${provider}" style="font-size:.78rem;color:var(--muted)"></span>
+  </div>
 </div>`;
 }
 

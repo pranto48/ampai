@@ -541,6 +541,10 @@ class BackupConnectionTestRequest(BaseModel):
     domain: Optional[str] = ""
 
 
+class ProviderTestRequest(BaseModel):
+    provider: str
+
+
 class RetentionRunRequest(BaseModel):
     max_age_days: int = 365
     archive_only: bool = True
@@ -3826,6 +3830,57 @@ def test_backup_connection(request: BackupConnectionTestRequest, _: UserContext 
     if not ok:
         raise HTTPException(status_code=400, detail=detail)
     return {"status": "success", "detail": detail}
+
+
+def _timed_probe(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 8) -> Dict[str, Any]:
+    started = time.perf_counter()
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return {
+            "ok": 200 <= resp.status < 300,
+            "status_code": resp.status,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+            "url": url,
+        }
+
+
+@app.post("/api/admin/providers/test")
+def test_provider_connection(request: ProviderTestRequest, _: UserContext = Depends(require_admin_user)):
+    provider = (request.provider or "").strip().lower()
+    configs = get_all_configs()
+    try:
+        if provider == "ollama":
+            base = (configs.get("ollama_base_url") or "http://host.docker.internal:11434").rstrip("/")
+            return _timed_probe(f"{base}/api/tags")
+        if provider == "generic":
+            base = (configs.get("generic_base_url") or "").rstrip("/")
+            if not base:
+                raise HTTPException(status_code=400, detail="generic_base_url is not configured")
+            headers = {"Authorization": f"Bearer {configs.get('generic_api_key') or ''}"} if configs.get("generic_api_key") else {}
+            result = _timed_probe(f"{base}/v1/models", headers=headers)
+            result["model"] = (configs.get("generic_model") or "").strip() or None
+            return result
+        if provider == "openrouter":
+            key = (configs.get("openrouter_api_key") or "").strip()
+            if not key:
+                raise HTTPException(status_code=400, detail="openrouter_api_key is not configured")
+            return _timed_probe("https://openrouter.ai/api/v1/models", headers={"Authorization": f"Bearer {key}"})
+        if provider in {"openai", "gemini", "anthropic"}:
+            key_name = {"openai": "openai_api_key", "gemini": "gemini_api_key", "anthropic": "anthropic_api_key"}[provider]
+            has_key = bool((configs.get(key_name) or "").strip())
+            return {"ok": has_key, "provider": provider, "message": "API key configured" if has_key else f"{key_name} is not configured"}
+        if provider == "anythingllm":
+            base = (configs.get("anythingllm_base_url") or "").rstrip("/")
+            workspace = (configs.get("anythingllm_workspace") or "").strip()
+            if not base or not workspace:
+                raise HTTPException(status_code=400, detail="anythingllm base URL/workspace is not configured")
+            headers = {"Authorization": f"Bearer {configs.get('anythingllm_api_key') or ''}"} if configs.get("anythingllm_api_key") else {}
+            return _timed_probe(f"{base}/api/v1/workspace/{workspace}", headers=headers)
+        raise HTTPException(status_code=400, detail="Unsupported provider")
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "status_code": exc.code, "error": f"HTTP {exc.code}: {exc.reason}"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @app.post("/api/admin/backup/restore")

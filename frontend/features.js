@@ -911,6 +911,24 @@ async function modelsLoad() {
   if (window._modelsBound) return;
   window._modelsBound = true;
   document.getElementById('save-model-cfg-btn')?.addEventListener('click', saveModelCfg);
+  ['ollama','generic','openrouter','openai','gemini','anthropic','anythingllm'].forEach((provider) => {
+    document.getElementById(`test-provider-${provider}`)?.addEventListener('click', () => testProvider(provider));
+  });
+}
+
+async function testProvider(provider) {
+  const el = document.getElementById(`test-provider-status-${provider}`);
+  if (el) { el.style.color = 'var(--muted)'; el.textContent = 'Testing…'; }
+  const { ok, data } = await apiJSON('/api/admin/providers/test', {
+    method: 'POST',
+    body: JSON.stringify({ provider }),
+  });
+  if (!el) return;
+  const passed = ok && data?.ok;
+  const latency = data?.latency_ms ? ` (${data.latency_ms} ms)` : '';
+  const detail = data?.error || data?.detail || data?.message || '';
+  el.style.color = passed ? 'var(--green)' : 'var(--red)';
+  el.textContent = `${passed ? 'PASS' : 'FAIL'}${latency}${detail ? ` — ${detail}` : ''}`;
 }
 
 async function saveModelCfg() {
