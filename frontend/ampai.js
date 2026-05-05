@@ -125,10 +125,10 @@ function _onPageEnter(page) {
 }
 
 // ── Auth ───────────────────────────────────────────
-async function doLogin(username, password) {
+async function doLogin(username, password, rememberMe = false) {
   const { ok, data } = await apiJSON('/api/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password, remember_me: !!rememberMe }),
   });
   if (!ok) throw new Error(data.detail || 'Login failed');
   State.token = data.token || '';
@@ -232,6 +232,10 @@ function _loginHTML() {
           style="width:100%;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.25);
           border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.9rem;outline:none"/>
       </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;color:var(--muted);font-size:.82rem;cursor:pointer">
+        <input id="login-remember" type="checkbox" style="accent-color:var(--accent)"/>
+        Trust this device (keep me signed in)
+      </label>
       <div id="login-err" style="display:none;color:#fca5a5;font-size:.85rem;margin-bottom:10px"></div>
       <button id="login-btn" style="width:100%;padding:11px;border-radius:8px;border:none;cursor:pointer;
         background:var(--accent);color:#fff;font-family:inherit;font-size:.9rem;font-weight:600;
@@ -285,57 +289,37 @@ function _shellHTML() {
           -webkit-background-clip:text;-webkit-text-fill-color:transparent">AmpAI</span>
       </div>
       <nav class="sidebar-nav">
-        <button class="nav-item" data-page="chat">
-          <span class="icon">💬</span><span class="sidebar-label">Chat</span>
-        </button>
-        <button class="nav-item" data-page="memory">
-          <span class="icon">🧠</span><span class="sidebar-label">Memory</span>
-        </button>
-        <button class="nav-item" data-page="inbox">
-          <span class="icon">📥</span><span class="sidebar-label">Memory Inbox</span>
-        </button>
-        <button class="nav-item" data-page="agentmemory">
-          <span class="icon">🔐</span><span class="sidebar-label">Agent Memory Vault</span>
-        </button>
-        <button class="nav-item" data-page="brief">
-          <span class="icon">📰</span><span class="sidebar-label">Daily Brief</span>
-        </button>
-        <button class="nav-item" data-page="tasks">
-          <span class="icon">✅</span><span class="sidebar-label">Tasks</span>
-        </button>
-        <button class="nav-item" data-page="personas">
-          <span class="icon">🎭</span><span class="sidebar-label">Personas</span>
-        </button>
-        <button class="nav-item" data-page="workspace">
-          <span class="icon">👥</span><span class="sidebar-label">Workspaces</span>
-        </button>
-        <button class="nav-item" data-page="analytics">
-          <span class="icon">📊</span><span class="sidebar-label">Analytics</span>
-        </button>
-        <button class="nav-item" data-page="network">
-          <span class="icon">🌐</span><span class="sidebar-label">Network</span>
-        </button>
-        <button class="nav-item" data-page="models">
-          <span class="icon">🤖</span><span class="sidebar-label">AI Models</span>
-        </button>
-        <button class="nav-item" data-page="personas">
-          <span class="icon">🧩</span><span class="sidebar-label">Personas</span>
-        </button>
-        <button class="nav-item" data-page="settings">
-          <span class="icon">⚙️</span><span class="sidebar-label">Settings</span>
-        </button>
-        <button class="nav-item admin-only hidden" data-page="admin">
-          <span class="icon">🛡️</span><span class="sidebar-label">Admin Panel</span>
-        </button>
-        <button class="nav-item admin-only hidden" data-page="dockerupdate">
-          <span class="icon">🐳</span><span class="sidebar-label">Docker Update</span>
-        </button>
-        <button class="nav-item admin-only hidden" data-page="fullbackup">
-          <span class="icon">💾</span><span class="sidebar-label">Full Backup</span>
-        </button>
-        <button class="nav-item admin-only hidden" data-page="tgchats">
-          <span class="icon">✈️</span><span class="sidebar-label">Telegram Chats</span>
-        </button>
+        <details open>
+          <summary class="sidebar-label" style="font-size:.72rem;color:var(--muted);padding:8px 12px;cursor:pointer">Conversation</summary>
+          <button class="nav-item" data-page="chat"><span class="icon">💬</span><span class="sidebar-label">Chat</span></button>
+          <button class="nav-item" data-page="tasks"><span class="icon">✅</span><span class="sidebar-label">Tasks</span></button>
+          <button class="nav-item" data-page="brief"><span class="icon">📰</span><span class="sidebar-label">Daily Brief</span></button>
+        </details>
+        <details open>
+          <summary class="sidebar-label" style="font-size:.72rem;color:var(--muted);padding:8px 12px;cursor:pointer">Memory</summary>
+          <button class="nav-item" data-page="memory"><span class="icon">🧠</span><span class="sidebar-label">Memory Explorer</span></button>
+          <button class="nav-item" data-page="inbox"><span class="icon">📥</span><span class="sidebar-label">Memory Inbox</span></button>
+          <button class="nav-item" data-page="agentmemory"><span class="icon">🔐</span><span class="sidebar-label">Memory Vault</span></button>
+        </details>
+        <details open>
+          <summary class="sidebar-label" style="font-size:.72rem;color:var(--muted);padding:8px 12px;cursor:pointer">Workspace</summary>
+          <button class="nav-item" data-page="workspace"><span class="icon">👥</span><span class="sidebar-label">Workspaces</span></button>
+          <button class="nav-item" data-page="personas"><span class="icon">🎭</span><span class="sidebar-label">Personas</span></button>
+          <button class="nav-item" data-page="analytics"><span class="icon">📊</span><span class="sidebar-label">Analytics</span></button>
+          <button class="nav-item" data-page="network"><span class="icon">🌐</span><span class="sidebar-label">Network</span></button>
+        </details>
+        <details open>
+          <summary class="sidebar-label" style="font-size:.72rem;color:var(--muted);padding:8px 12px;cursor:pointer">AI & Settings</summary>
+          <button class="nav-item" data-page="models"><span class="icon">🤖</span><span class="sidebar-label">AI Models</span></button>
+          <button class="nav-item" data-page="settings"><span class="icon">⚙️</span><span class="sidebar-label">Settings</span></button>
+        </details>
+        <details class="admin-only hidden" open>
+          <summary class="sidebar-label" style="font-size:.72rem;color:var(--muted);padding:8px 12px;cursor:pointer">Admin Tools</summary>
+          <button class="nav-item admin-only hidden" data-page="admin"><span class="icon">🛡️</span><span class="sidebar-label">Admin Panel</span></button>
+          <button class="nav-item admin-only hidden" data-page="dockerupdate"><span class="icon">🐳</span><span class="sidebar-label">Docker Update</span></button>
+          <button class="nav-item admin-only hidden" data-page="fullbackup"><span class="icon">💾</span><span class="sidebar-label">Full Backup</span></button>
+          <button class="nav-item admin-only hidden" data-page="tgchats"><span class="icon">✈️</span><span class="sidebar-label">Telegram Chats</span></button>
+        </details>
       </nav>
       <div class="sidebar-footer">
         <button class="nav-item w-full" id="logout-btn">
@@ -389,7 +373,6 @@ function _shellHTML() {
       <div id="sp-workspace" class="subpage hidden page-content">${buildWorkspacePage()}</div>
       <div id="sp-analytics" class="subpage hidden page-content">${buildAnalyticsPage()}</div>
       <div id="sp-network"  class="subpage hidden page-content">${buildNetworkPage()}</div>
-      <div id="sp-personas" class="subpage hidden page-content">${buildPersonasPage()}</div>
       <div id="sp-models"        class="subpage hidden page-content">${buildModelsPage()}</div>
       <div id="sp-settings"      class="subpage hidden page-content">${buildSettingsPage()}</div>
       <div id="sp-admin"         class="subpage hidden page-content">${buildAdminPage()}</div>
@@ -410,11 +393,12 @@ function _attachLoginHandlers() {
   loginBtn?.addEventListener('click', async () => {
     const u = document.getElementById('login-user').value.trim();
     const p = document.getElementById('login-pass').value;
+    const remember = !!document.getElementById('login-remember')?.checked;
     const errEl = document.getElementById('login-err');
     errEl.style.display = 'none'; errEl.textContent = '';
     loginBtn.disabled = true; loginBtn.textContent = 'Signing in…';
     try {
-      await doLogin(u, p);
+      await doLogin(u, p, remember);
       _syncUserUI();
       navigate('chat');
     } catch (e) {
