@@ -2015,6 +2015,10 @@ async function recallLoad() {
   document.getElementById('recall-search-btn')?.addEventListener('click', _runRecallSearch);
   document.getElementById('recall-query')?.addEventListener('keydown', e => { if (e.key === 'Enter') _runRecallSearch(); });
   document.getElementById('recall-reindex-btn')?.addEventListener('click', _triggerReindex);
+  document.getElementById('recall-use-hybrid')?.addEventListener('change', (e) => {
+    const controls = document.getElementById('recall-hybrid-controls');
+    if (controls) controls.style.display = e.target.checked ? 'block' : 'none';
+  });
   _loadRecallStats();
 }
 
@@ -2029,16 +2033,26 @@ async function _runRecallSearch() {
   if (!query) return toast('Enter a query', 'info');
   const btn = document.getElementById('recall-search-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Searching…'; }
-  const model_type = (document.getElementById('model-select')||{}).value || 'ollama';
-  const { ok, data } = await apiJSON('/api/recall/search', { method: 'POST', body: JSON.stringify({ query, limit: 20, use_llm: true, model_type }) });
+  const useHybrid = !!document.getElementById('recall-use-hybrid')?.checked;
+  const endpoint = useHybrid ? '/api/recall/hybrid-search' : '/api/recall/search';
+  const payload = useHybrid
+    ? {
+      q: query,
+      limit: 20,
+      lexical_weight: Number(document.getElementById('recall-weight-lexical')?.value || 0.35),
+      semantic_weight: Number(document.getElementById('recall-weight-semantic')?.value || 0.55),
+      recency_weight: Number(document.getElementById('recall-weight-recency')?.value || 0.10),
+    }
+    : { q: query, limit: 20 };
+  const { ok, data } = await apiJSON(endpoint, { method: 'POST', body: JSON.stringify(payload) });
   if (btn) { btn.disabled = false; btn.textContent = '🔍 Search'; }
   const resultEl = document.getElementById('recall-results');
   if (!resultEl) return;
-  if (!ok) { resultEl.innerHTML = '<div style="color:var(--red)">Search failed</div>'; return; }
+  if (!ok) { resultEl.innerHTML = '<div style="color:var(--red)">Search failed: ' + _esc(data?.detail || 'Unknown error') + '</div>'; return; }
   const hits = data.hits || [], summary = data.summary || '';
   let html = '';
   if (summary) html += '<div style="background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.3);border-radius:10px;padding:14px;margin-bottom:16px"><b style="color:#818cf8">🤖 AmpAI Summary</b><br>' + _esc(summary) + '</div>';
-  html += hits.length ? hits.map(h => '<div style="background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px"><span class="badge ' + (h.role==='human'?'badge-yellow':'badge-green') + '">' + (h.role==='human'?'User':'AmpAI') + '</span> <code style="font-size:.72rem;color:var(--muted)">' + _esc((h.session_id||'').slice(0,16)) + '</code><div style="margin-top:6px;font-size:.83rem">' + _esc((h.content||'').slice(0,300)) + '</div></div>').join('') : '<div style="color:var(--muted);text-align:center;padding:24px">No results</div>';
+  html += hits.length ? hits.map(h => '<div style="background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px"><span class="badge ' + (h.role==='human'?'badge-yellow':'badge-green') + '">' + (h.role==='human'?'User':'AmpAI') + '</span> <code style="font-size:.72rem;color:var(--muted)">' + _esc((h.session_id||'').slice(0,16)) + '</code>' + (h.scores ? '<span style="margin-left:8px;font-size:.7rem;color:var(--muted)">hybrid:' + _esc(String(h.scores.hybrid)) + '</span>' : '') + '<div style="margin-top:6px;font-size:.83rem">' + _esc((h.content||'').slice(0,300)) + '</div></div>').join('') : '<div style="color:var(--muted);text-align:center;padding:24px">No results</div>';
   resultEl.innerHTML = html;
 }
 
