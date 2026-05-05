@@ -139,7 +139,7 @@ from database import (
     engine,
 )
 from memory_persistence import memory_persistence_manager
-from session_recall import index_chat_turn, search_recall, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions
+from session_recall import index_chat_turn, search_recall, search_recall_hybrid, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions
 from integrations.telegram_api import get_me, set_webhook, delete_webhook, send_message
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
@@ -272,6 +272,15 @@ class RecallSearchRequest(BaseModel):
     q: str
     session_id: Optional[str] = None
     limit: int = 20
+
+
+class RecallHybridSearchRequest(BaseModel):
+    q: str
+    session_id: Optional[str] = None
+    limit: int = 20
+    lexical_weight: float = 0.35
+    semantic_weight: float = 0.55
+    recency_weight: float = 0.10
 
 
 class TelegramIntegrationSaveRequest(BaseModel):
@@ -1990,8 +1999,14 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
 
         local_only_mode = str(get_config("local_only_mode", "true")).strip().lower() in {"1", "true", "yes", "on"}
         if local_only_mode and (request.model_type or "").strip().lower() not in {"", "ollama", "generic", "anythingllm", "ampai_default"}:
-            logger.info("Local-only mode enabled. Forcing model_type '%s' -> 'ollama'", request.model_type)
-            request.model_type = "ollama"
+            requested = (request.model_type or "").strip().lower() or "unknown"
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Provider '{requested}' is blocked by local_only_mode=true. "
+                    "Disable local_only_mode in Admin Configs to use cloud providers like OpenRouter."
+                ),
+            )
 
         # Auto-resolve model_type: if frontend sends "ollama" but no Ollama is
         # running, prefer the admin-configured default_model or any provider
@@ -3860,6 +3875,10 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "notification_default_digest_interval_minutes": configs.get("notification_default_digest_interval_minutes", "30"),
         "local_only_mode": configs.get("local_only_mode", "true"),
         "curator_nudges_enabled": configs.get("curator_nudges_enabled", "true"),
+        "memory_embedding_enabled": configs.get("memory_embedding_enabled", "false"),
+        "memory_embedding_provider": configs.get("memory_embedding_provider", "ollama"),
+        "memory_embedding_model": configs.get("memory_embedding_model", "nomic-embed-text"),
+        "memory_hybrid_retrieval_enabled": configs.get("memory_hybrid_retrieval_enabled", "false"),
     }
 
 
@@ -4010,6 +4029,25 @@ def recall_search(request: RecallSearchRequest, user=Depends(require_authenticat
     )
     summary = summarize_hits(hits, max_items=5)
     return {"hits": hits, "summary": summary}
+
+
+@app.post("/api/recall/hybrid-search")
+def recall_hybrid_search(request: RecallHybridSearchRequest, user=Depends(require_authenticated_user)):
+    configs = get_all_configs()
+    enabled = str(configs.get("memory_hybrid_retrieval_enabled", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        raise HTTPException(status_code=400, detail="Hybrid recall is disabled. Set memory_hybrid_retrieval_enabled=true.")
+    hits = search_recall_hybrid(
+        query=request.q,
+        username=user.username,
+        session_id=request.session_id,
+        limit=request.limit,
+        lexical_weight=request.lexical_weight,
+        semantic_weight=request.semantic_weight,
+        recency_weight=request.recency_weight,
+    )
+    summary = summarize_hits(hits, max_items=5)
+    return {"hits": hits, "summary": summary, "hybrid_enabled": True}
 
 
 def _parse_config_list(raw_value: Optional[str], defaults: List[str]) -> List[str]:
