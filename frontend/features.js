@@ -763,6 +763,10 @@ const MODEL_CFG_MAP = {
   'cfg-search-provider':  'web_fallback_provider',
   'cfg-serpapi-key':      'serpapi_api_key',
   'cfg-default-model':    'default_model',
+  'cfg-memory-embed-enabled': 'memory_embedding_enabled',
+  'cfg-memory-embed-provider': 'memory_embedding_provider',
+  'cfg-memory-embed-model': 'memory_embedding_model',
+  'cfg-memory-hybrid-enabled': 'memory_hybrid_retrieval_enabled',
 };
 
 async function personasLoad() {

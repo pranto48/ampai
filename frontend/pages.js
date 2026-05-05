@@ -355,6 +355,43 @@ function buildModelsPage() {
       <option value="openrouter">OpenRouter</option>
     </select>
   </div>
+</div>
+
+${_memoryRetrievalCard()}`;
+}
+
+function _memoryRetrievalCard() {
+  return `
+<div class="card" style="margin-top:16px">
+  <div class="card-title">🧠 Memory Retrieval (Hybrid)</div>
+  <div class="grid-2">
+    <div style="margin-bottom:12px">
+      <label class="lbl">Enable Embeddings</label>
+      <select id="cfg-memory-embed-enabled" class="input">
+        <option value="false">false</option>
+        <option value="true">true</option>
+      </select>
+    </div>
+    <div style="margin-bottom:12px">
+      <label class="lbl">Enable Hybrid Retrieval</label>
+      <select id="cfg-memory-hybrid-enabled" class="input">
+        <option value="false">false</option>
+        <option value="true">true</option>
+      </select>
+    </div>
+    <div style="margin-bottom:12px">
+      <label class="lbl">Embedding Provider</label>
+      <select id="cfg-memory-embed-provider" class="input">
+        <option value="ollama">ollama</option>
+        <option value="openai">openai</option>
+        <option value="gemini">gemini</option>
+      </select>
+    </div>
+    <div style="margin-bottom:12px">
+      <label class="lbl">Embedding Model</label>
+      <input id="cfg-memory-embed-model" type="text" class="input" placeholder="nomic-embed-text"/>
+    </div>
+  </div>
 </div>`;
 }
 
