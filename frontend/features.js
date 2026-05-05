@@ -276,10 +276,43 @@ async function loadAdminStats() {
   if (ok4) document.getElementById('stat-tasks').textContent = (d4.tasks?.length ?? '—');
 }
 
+
+function _settingsHealthSectionForKey(key) {
+  if (key.includes('model')) return '#tab-models';
+  if (key.includes('memory')) return '#settings-memory';
+  if (key.includes('backup')) return '#tab-backup';
+  if (key.includes('notification')) return '#settings-email';
+  if (key.includes('auth')) return '#settings-security';
+  return '#tab-health';
+}
+
+function renderSettingsHealthChecks(checks = []) {
+  const container = document.getElementById('settings-health-groups');
+  if (!container) return;
+  if (!checks.length) {
+    container.innerHTML = '<div class="text-muted">No readiness checks returned.</div>';
+    return;
+  }
+  const grouped = { error: [], warn: [], ok: [] };
+  checks.forEach(c => (grouped[c.status] || grouped.warn).push(c));
+  const blocks = ['error', 'warn', 'ok'].filter(k => grouped[k].length).map(level => {
+    const color = level === 'error' ? 'var(--red)' : (level === 'warn' ? 'var(--yellow)' : 'var(--green)');
+    const title = level === 'error' ? 'Errors' : (level === 'warn' ? 'Warnings' : 'Healthy');
+    const rows = grouped[level].map(c => {
+      const href = _settingsHealthSectionForKey(c.key || '');
+      return `<li style="margin:4px 0"><strong>${c.message}</strong>${c.fix_hint ? `<div style="font-size:.8rem">${c.fix_hint} · <a href="${href}">Go fix</a></div>` : ''}</li>`;
+    }).join('');
+    return `<div><div style="color:${color};font-weight:600;margin-bottom:4px">${title} (${grouped[level].length})</div><ul style="margin:0;padding-left:18px">${rows}</ul></div>`;
+  });
+  container.innerHTML = blocks.join('');
+}
+
 async function loadHealthPanel() {
   const grid = document.getElementById('health-grid');
   if (grid) grid.innerHTML = '<div class="text-muted text-sm">Loading…</div>';
   const { ok, data } = await apiJSON('/api/health');
+  const settingsHealthRes = await apiJSON('/api/admin/settings/health');
+  if (settingsHealthRes.ok) renderSettingsHealthChecks(settingsHealthRes.data.checks || []);
   if (!ok || !data.checks) return;
   const checks = data.checks;
   const tiles = [

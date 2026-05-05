@@ -569,6 +569,10 @@ function buildAdminPage() {
   <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
     <button id="refresh-health-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
   </div>
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-title">⚙️ Settings Readiness</div>
+    <div id="settings-health-groups" class="text-sm" style="display:flex;flex-direction:column;gap:8px;color:var(--muted)">Loading…</div>
+  </div>
   <div class="grid-4" id="health-grid" style="gap:14px;margin-bottom:16px"></div>
   <div class="card">
     <div class="card-title">Scheduler Diagnostics</div>
