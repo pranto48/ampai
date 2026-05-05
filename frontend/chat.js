@@ -7,6 +7,7 @@ let _chatHandlersBound = false;
 const PERSONA_PREF_KEY = 'ampai_persona_id';
 const WEB_SEARCH_PREF_KEY = 'ampai_web_search_enabled';
 const SESSIONS_CACHE_KEY = 'ampai_cached_sessions';
+const LOCAL_SESSION_INDEX_KEY = 'ampai_local_session_index';
 let chatOutputMode = 'normal';
 
 function chatInit() {
@@ -22,6 +23,23 @@ function chatInit() {
     _chatHandlersBound = true;
     _bindChatHandlers();
   }
+}
+
+function _readLocalSessionIndex() {
+  try {
+    const raw = localStorage.getItem(LOCAL_SESSION_INDEX_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function _upsertLocalSessionIndex(sessionId, category = 'Uncategorized') {
+  if (!sessionId) return;
+  const rows = _readLocalSessionIndex().filter((s) => s && s.session_id && s.session_id !== sessionId);
+  rows.unshift({ session_id: sessionId, category, updated_at: new Date().toISOString(), pinned: false, source: 'local' });
+  try { localStorage.setItem(LOCAL_SESSION_INDEX_KEY, JSON.stringify(rows.slice(0, 200))); } catch {}
 }
 
 async function _loadChatPreferences() {
@@ -42,6 +60,7 @@ function _bindChatHandlers() {
   // New chat
   document.getElementById('new-chat-btn')?.addEventListener('click', () => {
     State.sessionId = _newSessionId();
+    _upsertLocalSessionIndex(State.sessionId);
     _updateChatSessionDisplay();
     const msgs = document.getElementById('chat-messages');
     if (msgs) msgs.innerHTML = _welcomeMsg();
@@ -244,7 +263,7 @@ async function loadSessions(query = '') {
       const tb = new Date(b.updated_at || 0).getTime();
       return tb - ta;
     });
-    if (!sessions.length) {
+    if (!ordered.length) {
       list.innerHTML = '<div style="padding:14px;text-align:center;font-size:.8rem;color:var(--muted)">No sessions yet.<br>Start a new chat!</div>';
       return;
     }
@@ -320,7 +339,22 @@ async function loadSessions(query = '') {
     }
     return;
   }
-  const sessions = response.data.sessions || [];
+  const serverSessions = response.data.sessions || [];
+  const localSessions = _readLocalSessionIndex();
+  const mergedById = {};
+  [...localSessions, ...serverSessions].forEach((s) => {
+    if (!s?.session_id) return;
+    const existing = mergedById[s.session_id];
+    if (!existing) mergedById[s.session_id] = s;
+    else {
+      const tExisting = new Date(existing.updated_at || 0).getTime();
+      const tCurrent = new Date(s.updated_at || 0).getTime();
+      if (tCurrent >= tExisting) mergedById[s.session_id] = { ...existing, ...s };
+    }
+  });
+  const sessions = Object.values(mergedById).filter((s) =>
+    !query || String(s.session_id || '').toLowerCase().includes(String(query).toLowerCase())
+  );
   if (response.data?.needs_migration) {
     const cta = State.role === 'admin' ? ' <a href="#admin" style="color:var(--accent)">Open Admin</a>' : '';
     toast('Session migration required.' + cta, 'warning');
@@ -420,6 +454,7 @@ async function _sendChat() {
         toast('📥 Memory captured — awaiting approval', 'info');
       }
       _renderTaskSuggestions(data.task_suggestions || []);
+      _upsertLocalSessionIndex(State.sessionId);
       loadSessions(); // refresh sidebar
       _loadSessionTaskSuggestions(State.sessionId);
     } else {
