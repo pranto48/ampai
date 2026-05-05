@@ -763,6 +763,10 @@ const MODEL_CFG_MAP = {
   'cfg-search-provider':  'web_fallback_provider',
   'cfg-serpapi-key':      'serpapi_api_key',
   'cfg-default-model':    'default_model',
+  'cfg-memory-embed-enabled': 'memory_embedding_enabled',
+  'cfg-memory-embed-provider': 'memory_embedding_provider',
+  'cfg-memory-embed-model': 'memory_embedding_model',
+  'cfg-memory-hybrid-enabled': 'memory_hybrid_retrieval_enabled',
 };
 
 async function personasLoad() {
@@ -920,6 +924,10 @@ async function _loadSettingsValues() {
       const el = document.getElementById(id);
       if (el && data[key]) el.value = data[key];
     }
+    const localOnly = document.getElementById('cfg-local-only-mode');
+    if (localOnly) {
+      localOnly.checked = String(data.local_only_mode ?? 'true').toLowerCase() === 'true';
+    }
   }
   const prefRes = await apiJSON('/api/users/me/notification-preferences');
   if (prefRes.ok) {
@@ -961,6 +969,7 @@ async function settingsLoad() {
     const configs = {
       chat_agent_name: document.getElementById('cfg-agent-name')?.value.trim() || '',
       chat_agent_avatar_url: document.getElementById('cfg-agent-avatar')?.value.trim() || '',
+      local_only_mode: String(!!document.getElementById('cfg-local-only-mode')?.checked),
     };
     const { ok } = await apiJSON('/api/admin/configs', { method:'POST', body: JSON.stringify({configs}) });
     toast(ok ? 'Agent settings saved' : 'Failed to save', ok ? 'success' : 'error');
