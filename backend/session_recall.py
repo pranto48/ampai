@@ -1,3 +1,4 @@
+import math
 import os
 import sqlite3
 from typing import Any, Dict, List, Optional
@@ -63,6 +64,67 @@ def search_recall(query: str, username: Optional[str] = None, session_id: Option
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def search_recall_hybrid(
+    query: str,
+    username: Optional[str] = None,
+    session_id: Optional[str] = None,
+    limit: int = 20,
+    lexical_weight: float = 0.35,
+    semantic_weight: float = 0.55,
+    recency_weight: float = 0.10,
+) -> List[Dict[str, Any]]:
+    hits = search_recall(query=query, username=username, session_id=session_id, limit=max(10, limit * 4))
+    if not hits:
+        return []
+    try:
+        from memory_indexer import get_embedding_model
+        embedder = get_embedding_model("ollama")
+        query_embedding = embedder.embed_query(query)
+    except Exception:
+        return hits[: max(1, min(int(limit), 100))]
+
+    lexical_values = [float(abs(h.get("rowid") or 0)) for h in hits]
+    lexical_max = max(lexical_values) if lexical_values else 1.0
+    lexical_max = lexical_max if lexical_max > 0 else 1.0
+    now = datetime.now(timezone.utc)
+    scored: List[Dict[str, Any]] = []
+
+    for h in hits:
+        content = (h.get("content") or "").strip()
+        if not content:
+            continue
+        try:
+            emb = embedder.embed_query(content[:2000])
+            dot = sum((a * b) for a, b in zip(query_embedding, emb))
+            qn = math.sqrt(sum((a * a) for a in query_embedding)) or 1.0
+            en = math.sqrt(sum((b * b) for b in emb)) or 1.0
+            semantic_score = max(0.0, min(1.0, (dot / (qn * en) + 1.0) / 2.0))
+        except Exception:
+            semantic_score = 0.0
+
+        created_at = h.get("created_at") or ""
+        try:
+            dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            age_days = max(0.0, (now - dt).total_seconds() / 86400.0)
+            recency_score = 1.0 / (1.0 + (age_days / 7.0))
+        except Exception:
+            recency_score = 0.0
+
+        lexical_score = 1.0 - (float(abs(h.get("rowid") or 0)) / lexical_max)
+        hybrid = (lexical_weight * lexical_score) + (semantic_weight * semantic_score) + (recency_weight * recency_score)
+        item = dict(h)
+        item["scores"] = {
+            "hybrid": round(hybrid, 6),
+            "lexical": round(lexical_score, 6),
+            "semantic": round(semantic_score, 6),
+            "recency": round(recency_score, 6),
+        }
+        scored.append(item)
+
+    scored.sort(key=lambda x: x.get("scores", {}).get("hybrid", 0.0), reverse=True)
+    return scored[: max(1, min(int(limit), 100))]
 
 
 def summarize_hits(hits: List[Dict[str, Any]], max_items: int = 5) -> str:

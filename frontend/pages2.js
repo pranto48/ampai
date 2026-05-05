@@ -897,9 +897,21 @@ function buildRecallPage() {
 
 <div class="card" style="margin-bottom:20px">
   <div id="recall-stats" style="font-size:.82rem;color:var(--muted);margin-bottom:12px">Loading stats…</div>
-  <div style="display:flex;gap:8px">
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
     <input id="recall-query" class="input" placeholder="Search past conversations… (e.g. Python project, user preferences, meeting notes)" style="flex:1"/>
     <button id="recall-search-btn" class="btn btn-primary">🔍 Search</button>
+    <label style="display:flex;align-items:center;gap:6px;font-size:.78rem;color:var(--muted)">
+      <input id="recall-use-hybrid" type="checkbox"/>
+      Use hybrid retrieval
+    </label>
+  </div>
+  <div id="recall-hybrid-controls" style="display:none;margin-top:10px">
+    <div style="display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:8px">
+      <input id="recall-weight-lexical" class="input" type="number" min="0" max="1" step="0.05" value="0.35" title="Lexical weight"/>
+      <input id="recall-weight-semantic" class="input" type="number" min="0" max="1" step="0.05" value="0.55" title="Semantic weight"/>
+      <input id="recall-weight-recency" class="input" type="number" min="0" max="1" step="0.05" value="0.10" title="Recency weight"/>
+    </div>
+    <div style="font-size:.72rem;color:var(--muted);margin-top:6px">Weights: lexical, semantic, recency (should sum near 1.0)</div>
   </div>
 </div>
 
