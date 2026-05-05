@@ -4497,9 +4497,106 @@ def root_page():
 def favicon():
     return Response(status_code=204)
 
+def _to_bool(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _add_setting_check(checks: List[Dict[str, str]], key: str, status: str, message: str, fix_hint: str = "") -> None:
+    checks.append({"key": key, "status": status, "message": message, "fix_hint": fix_hint})
+
+
+def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
+    configs = get_all_configs()
+    checks: List[Dict[str, str]] = []
+
+    local_only_mode = _to_bool(configs.get("local_only_mode", "true"))
+    default_provider = (configs.get("default_model_provider") or configs.get("model_provider") or "ollama").strip().lower()
+    provider_key_map = {
+        "openai": "openai_api_key",
+        "gemini": "gemini_api_key",
+        "anthropic": "anthropic_api_key",
+        "openrouter": "openrouter_api_key",
+        "anythingllm": "anythingllm_base_url",
+        "generic": "generic_base_url",
+        "ollama": "ollama_base_url",
+    }
+    required_key = provider_key_map.get(default_provider)
+    provider_ready = local_only_mode or (required_key and bool((configs.get(required_key) or "").strip()))
+    _add_setting_check(
+        checks,
+        key="model_provider_readiness",
+        status="ok" if provider_ready else "error",
+        message=(
+            f"Model provider ready ({default_provider})"
+            if provider_ready
+            else f"Model provider '{default_provider}' is missing required setting: {required_key or 'provider configuration'}"
+        ),
+        fix_hint="Go fix: Models settings" if not provider_ready else "",
+    )
+
+    hybrid_enabled = _to_bool(configs.get("memory_hybrid_retrieval_enabled", "false"))
+    embedding_provider = (configs.get("memory_embedding_provider") or "").strip().lower()
+    embedding_model = (configs.get("memory_embedding_model") or "").strip()
+    embedding_provider_ok = embedding_provider in {"ollama", "openai", "gemini", "openrouter", "anythingllm", "generic"}
+    memory_ready = (not hybrid_enabled) or (embedding_provider_ok and bool(embedding_model))
+    memory_status = "ok" if memory_ready else ("warn" if hybrid_enabled else "ok")
+    _add_setting_check(
+        checks,
+        key="memory_retrieval_readiness",
+        status=memory_status,
+        message=(
+            "Hybrid memory retrieval ready"
+            if memory_ready
+            else "Hybrid memory retrieval is enabled but embedding provider/model is incomplete"
+        ),
+        fix_hint="Go fix: Settings → Memory policy" if not memory_ready else "",
+    )
+
+    mode = (configs.get("backup_mode", "local") or "local").strip().lower()
+    backup_ok = True
+    if mode == "local":
+        backup_ok = bool((configs.get("backup_local_path") or "").strip())
+    elif mode in {"ftp", "smb"}:
+        backup_ok = all(bool((configs.get(k) or "").strip()) for k in ([f"backup_{mode}_host", f"backup_{mode}_user", f"backup_{mode}_path", f"backup_{mode}_password"]))
+    _add_setting_check(
+        checks,
+        key="backup_readiness",
+        status="ok" if backup_ok else "warn",
+        message="Backup destination/profile looks complete" if backup_ok else f"Backup mode '{mode}' has missing destination credentials/paths",
+        fix_hint="Go fix: Admin → Backup" if not backup_ok else "",
+    )
+
+    resend_key = bool((configs.get("resend_api_key") or "").strip())
+    resend_from = bool((configs.get("resend_from_email") or "").strip())
+    notif_ok = resend_key and resend_from
+    _add_setting_check(
+        checks,
+        key="notification_readiness",
+        status="ok" if notif_ok else "warn",
+        message="Email notifications ready" if notif_ok else "Resend notification config is incomplete",
+        fix_hint="Go fix: Settings → Email (Resend)" if not notif_ok else "",
+    )
+
+    jwt_ok = 5 <= JWT_EXPIRY_MINUTES <= 1440 and 1 <= JWT_REMEMBER_ME_DAYS <= 365
+    _add_setting_check(
+        checks,
+        key="auth_session_sanity",
+        status="ok" if jwt_ok else "error",
+        message="JWT/session ranges are sane" if jwt_ok else f"JWT ranges out of bounds (expiry={JWT_EXPIRY_MINUTES}, remember_days={JWT_REMEMBER_ME_DAYS})",
+        fix_hint="Set JWT_EXPIRY_MINUTES (5-1440) and JWT_REMEMBER_ME_DAYS (1-365) environment variables",
+    )
+
+    return checks
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/api/admin/settings/health")
+def admin_settings_health(_: UserContext = Depends(require_admin_user)):
+    return {"checks": _build_admin_settings_health_checks()}
 
 
 @app.get("/api/health")
