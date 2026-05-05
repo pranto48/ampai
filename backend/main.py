@@ -5398,6 +5398,37 @@ def update_delete_backup(backup_name: str, user: UserContext = Depends(require_a
     return {"deleted": backup_name}
 
 
+@app.post("/api/admin/update/backups/{backup_name}/restore")
+def update_restore_backup(backup_name: str, user: UserContext = Depends(require_admin_user)):
+    """Restore backend/frontend code from a stored code backup."""
+    if "/" in backup_name or ".." in backup_name:
+        raise HTTPException(status_code=400, detail="Invalid backup name")
+    full_path = os.path.join(CODE_BACKUP_DIR, backup_name)
+    if not os.path.isdir(full_path):
+        raise HTTPException(status_code=404, detail="Backup not found")
+
+    backend_backup = os.path.join(full_path, "backend")
+    frontend_backup = os.path.join(full_path, "frontend")
+    backend_dst = os.path.join(os.path.dirname(__file__))
+    frontend_dst = os.path.join(os.path.dirname(__file__), "..", "frontend")
+    if not os.path.isdir(backend_backup) and not os.path.isdir(frontend_backup):
+        raise HTTPException(status_code=400, detail="Backup does not contain backend/frontend folders")
+
+    if os.path.isdir(backend_backup):
+        shutil.copytree(backend_backup, backend_dst, dirs_exist_ok=True)
+    if os.path.isdir(frontend_backup):
+        shutil.copytree(frontend_backup, frontend_dst, dirs_exist_ok=True)
+
+    log_audit_event(username=user.username, action="admin.docker.backup.restore", details=f"backup={backup_name}")
+
+    def _restart_server_after_restore():
+        time.sleep(2)
+        os.execv("/usr/local/bin/uvicorn", ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"])
+
+    threading.Thread(target=_restart_server_after_restore, daemon=True).start()
+    return {"restored": backup_name, "status": "restoring", "message": "Backup restored. Server restarting..."}
+
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  AmpAI AUTONOMOUS AGENT ENDPOINTS

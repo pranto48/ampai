@@ -951,6 +951,7 @@ async function _fetchUpdateBackups() {
       <td style="font-size:.82rem">${sizeMB} MB</td>
       <td style="font-size:.78rem;color:var(--muted)">${_fmtRelative(b.name)}</td>
       <td>
+        <button class="btn btn-secondary btn-sm" style="margin-right:6px" onclick="_restoreUpdateBackup('${_esc(b.name)}')">♻ Restore</button>
         <button class="btn btn-danger btn-sm" onclick="_deleteUpdateBackup('${_esc(b.name)}')">🗑 Remove</button>
       </td>
     </tr>`;
@@ -966,6 +967,17 @@ async function _deleteUpdateBackup(name) {
   } else {
     toast('Failed to delete backup', 'error');
   }
+}
+
+async function _restoreUpdateBackup(name) {
+  if (!confirm(`Restore backup "${name}"?\n\nThis will overwrite current code and restart the server.`)) return;
+  const { ok, data } = await apiJSON(`/api/admin/update/backups/${encodeURIComponent(name)}/restore`, { method: 'POST' });
+  if (!ok) {
+    toast(data?.detail || 'Failed to restore backup', 'error');
+    return;
+  }
+  toast('Backup restored. Server restarting…', 'success');
+  setTimeout(() => location.reload(), 6000);
 }
 
 // ═══════════════════════════════════════════════════
