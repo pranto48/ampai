@@ -187,6 +187,7 @@ RESTORE_JOB_QUEUE: "Queue[Dict[str, Any]]" = Queue(maxsize=50)
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
+JWT_REMEMBER_ME_DAYS = int(os.getenv("JWT_REMEMBER_ME_DAYS", "30"))
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 SECRET_CONFIG_KEYS = {
@@ -599,6 +600,7 @@ class UserRegisterRequest(BaseModel):
 class UserLoginRequest(BaseModel):
     username: str
     password: str
+    remember_me: bool = False
 
 
 class UserContext(BaseModel):
@@ -1265,9 +1267,10 @@ def _fetch_todays_email_messages(provider: str, timezone_name: str, max_results:
     raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
 
-def _create_access_token(data: Dict[str, str]) -> str:
+def _create_access_token(data: Dict[str, str], expiry_minutes: Optional[int] = None) -> str:
     payload = data.copy()
-    expiry = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRY_MINUTES)
+    exp_minutes = int(expiry_minutes or JWT_EXPIRY_MINUTES)
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=max(1, exp_minutes))
     payload.update({"exp": expiry})
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -1403,7 +1406,12 @@ def login(payload: UserLoginRequest):
 
     effective_username = admin_username if admin_override else user["username"]
     effective_role = "admin" if admin_override else user["role"]
-    token = _create_access_token({"sub": effective_username, "role": effective_role})
+    remember_me = bool(payload.remember_me)
+    max_age_seconds = (JWT_REMEMBER_ME_DAYS * 24 * 60 * 60) if remember_me else (JWT_EXPIRY_MINUTES * 60)
+    token = _create_access_token(
+        {"sub": effective_username, "role": effective_role, "trusted_device": "1" if remember_me else "0"},
+        expiry_minutes=max(1, int(max_age_seconds // 60)),
+    )
     body = UserLoginResponse(username=effective_username, role=effective_role, token=token)
     response = Response(content=body.model_dump_json(), media_type="application/json")
     response.set_cookie(
@@ -1412,7 +1420,7 @@ def login(payload: UserLoginRequest):
         httponly=True,
         samesite="lax",
         secure=False,
-        max_age=JWT_EXPIRY_MINUTES * 60,
+        max_age=max_age_seconds,
     )
     return response
 
@@ -4973,7 +4981,11 @@ async def api_fullbackup_restore_upload(
         with open(tmp_zip, "wb") as f:
             f.write(content)
 
-        with zipfile.ZipFile(tmp_zip) as zf:
+        try:
+            zf_ctx = zipfile.ZipFile(tmp_zip)
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="Invalid backup zip file")
+        with zf_ctx as zf:
             names = zf.namelist()
             non_mem = {}
             if "full_data.json.gz" in names:

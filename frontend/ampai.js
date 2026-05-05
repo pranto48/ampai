@@ -125,10 +125,10 @@ function _onPageEnter(page) {
 }
 
 // ── Auth ───────────────────────────────────────────
-async function doLogin(username, password) {
+async function doLogin(username, password, rememberMe = false) {
   const { ok, data } = await apiJSON('/api/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password, remember_me: !!rememberMe }),
   });
   if (!ok) throw new Error(data.detail || 'Login failed');
   State.token = data.token || '';
@@ -232,6 +232,10 @@ function _loginHTML() {
           style="width:100%;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.25);
           border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:.9rem;outline:none"/>
       </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;color:var(--muted);font-size:.82rem;cursor:pointer">
+        <input id="login-remember" type="checkbox" style="accent-color:var(--accent)"/>
+        Trust this device (keep me signed in)
+      </label>
       <div id="login-err" style="display:none;color:#fca5a5;font-size:.85rem;margin-bottom:10px"></div>
       <button id="login-btn" style="width:100%;padding:11px;border-radius:8px;border:none;cursor:pointer;
         background:var(--accent);color:#fff;font-family:inherit;font-size:.9rem;font-weight:600;
@@ -410,11 +414,12 @@ function _attachLoginHandlers() {
   loginBtn?.addEventListener('click', async () => {
     const u = document.getElementById('login-user').value.trim();
     const p = document.getElementById('login-pass').value;
+    const remember = !!document.getElementById('login-remember')?.checked;
     const errEl = document.getElementById('login-err');
     errEl.style.display = 'none'; errEl.textContent = '';
     loginBtn.disabled = true; loginBtn.textContent = 'Signing in…';
     try {
-      await doLogin(u, p);
+      await doLogin(u, p, remember);
       _syncUserUI();
       navigate('chat');
     } catch (e) {
