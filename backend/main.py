@@ -2936,7 +2936,10 @@ def get_sessions(
     sessions = get_all_sessions(query=query, category=category, archived=archived)
     needs_migration = False
     if current_user.role != "admin":
+        fallback_open = str(get_config("auth_open_session_fallback", "true")).strip().lower() in {"1", "true", "yes", "on"}
         accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
+        if fallback_open:
+            accessible_ids = {s.get("session_id") for s in sessions if s.get("session_id")}
         if not accessible_ids:
             # Auto-adopt legacy/unowned sessions for first-time auth migration.
             # This keeps existing local chats visible after enabling login.
@@ -2955,7 +2958,6 @@ def get_sessions(
                 # Fallback for legacy single-user deployments:
                 # show existing sessions even if ownership metadata is missing.
                 # This avoids "No sessions yet" for users with historical chats.
-                fallback_open = str(get_config("auth_open_session_fallback", "true")).strip().lower() in {"1", "true", "yes", "on"}
                 if not fallback_open:
                     needs_migration = True
                     sessions = []
