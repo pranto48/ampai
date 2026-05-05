@@ -436,6 +436,10 @@ function buildSettingsPage() {
         <label class="lbl">Agent Avatar URL (optional)</label>
         <input id="cfg-agent-avatar" class="input" placeholder="https://…"/>
       </div>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:14px">
+        <input type="checkbox" id="cfg-local-only-mode" style="accent-color:var(--accent)"/>
+        <span style="font-size:.875rem">Local-only mode (block cloud providers like OpenRouter)</span>
+      </label>
       <button id="save-agent-settings-btn" class="btn btn-primary btn-sm">Save Identity</button>
     </div>
 
