@@ -1999,8 +1999,14 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
 
         local_only_mode = str(get_config("local_only_mode", "true")).strip().lower() in {"1", "true", "yes", "on"}
         if local_only_mode and (request.model_type or "").strip().lower() not in {"", "ollama", "generic", "anythingllm", "ampai_default"}:
-            logger.info("Local-only mode enabled. Forcing model_type '%s' -> 'ollama'", request.model_type)
-            request.model_type = "ollama"
+            requested = (request.model_type or "").strip().lower() or "unknown"
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Provider '{requested}' is blocked by local_only_mode=true. "
+                    "Disable local_only_mode in Admin Configs to use cloud providers like OpenRouter."
+                ),
+            )
 
         # Auto-resolve model_type: if frontend sends "ollama" but no Ollama is
         # running, prefer the admin-configured default_model or any provider
