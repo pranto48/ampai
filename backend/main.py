@@ -2937,9 +2937,23 @@ def get_sessions(
     if current_user.role != "admin":
         accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
         if not accessible_ids:
-            needs_migration = True
-            sessions = []
-        else:
+            # Auto-adopt legacy/unowned sessions for first-time auth migration.
+            # This keeps existing local chats visible after enabling login.
+            adopted = 0
+            for sess in sessions:
+                sid = (sess or {}).get("session_id")
+                if not sid:
+                    continue
+                if get_session_owner(sid):
+                    continue
+                if ensure_session_owner(sid, current_user.username):
+                    adopted += 1
+            if adopted > 0:
+                accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
+            if not accessible_ids:
+                needs_migration = True
+                sessions = []
+        if accessible_ids:
             shared_ids = set(list_shared_sessions_for_user(current_user.username))
             sessions = [s for s in sessions if s.get("session_id") in accessible_ids]
             for session in sessions:
