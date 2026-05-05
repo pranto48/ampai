@@ -239,11 +239,16 @@ async function loadSessions(query = '') {
   const params = new URLSearchParams({ limit: 60, offset: 0 });
   if (query) params.set('query', query);
   const showSessions = (sessions) => {
+    const ordered = [...(sessions || [])].sort((a, b) => {
+      const ta = new Date(a.updated_at || 0).getTime();
+      const tb = new Date(b.updated_at || 0).getTime();
+      return tb - ta;
+    });
     if (!sessions.length) {
       list.innerHTML = '<div style="padding:14px;text-align:center;font-size:.8rem;color:var(--muted)">No sessions yet.<br>Start a new chat!</div>';
       return;
     }
-    list.innerHTML = sessions.map(s => `
+    list.innerHTML = ordered.map(s => `
       <div class="session-item ${s.session_id === State.sessionId ? 'active' : ''}"
         data-sid="${s.session_id}" style="padding:10px 12px;border-radius:8px;cursor:pointer;
         margin-bottom:2px;transition:all .15s;border-left:2px solid transparent">
