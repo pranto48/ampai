@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from redis import Redis
 from sqlalchemy import text
 from zoneinfo import ZoneInfo
+from core.logging import configure_logging
 
 from auth import bootstrap_default_admin
 from agent import chat_with_agent, get_llm, get_redis_history, _extract_explicit_memory_request
@@ -174,7 +175,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 logger = logging.getLogger("ampai")
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+configure_logging()
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
