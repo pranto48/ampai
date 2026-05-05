@@ -5394,7 +5394,7 @@ class SkillAutoCreateRequest(BaseModel):
 @app.get("/api/skills")
 def api_list_skills(
     status: str = "active",
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """List all agent skills."""
     from skill_engine import list_skills
@@ -5404,7 +5404,7 @@ def api_list_skills(
 @app.post("/api/skills")
 def api_create_skill(
     req: SkillCreateRequest,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """Create a new agent skill manually."""
     from skill_engine import create_skill
@@ -5423,7 +5423,7 @@ def api_create_skill(
 
 
 @app.get("/api/skills/{skill_id}")
-def api_get_skill(skill_id: int, user: UserContext = Depends(get_current_user)):
+def api_get_skill(skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)):
     """Get a single skill by ID."""
     from skill_engine import get_skill
     skill = get_skill(skill_id)
@@ -5436,7 +5436,7 @@ def api_get_skill(skill_id: int, user: UserContext = Depends(get_current_user)):
 def api_update_skill(
     skill_id: int,
     req: SkillUpdateRequest,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """Update a skill's fields."""
     from skill_engine import update_skill
@@ -5448,7 +5448,7 @@ def api_update_skill(
 
 
 @app.delete("/api/skills/{skill_id}")
-def api_delete_skill(skill_id: int, user: UserContext = Depends(get_current_user)):
+def api_delete_skill(skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)):
     """Soft-delete a skill."""
     from skill_engine import delete_skill
     ok = delete_skill(skill_id)
@@ -5459,7 +5459,7 @@ def api_delete_skill(skill_id: int, user: UserContext = Depends(get_current_user
 def api_run_skill(
     skill_id: int,
     req: SkillExecuteRequest,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """Execute a skill against a user message."""
     from skill_engine import run_skill
@@ -5481,7 +5481,7 @@ def api_run_skill(
 @app.post("/api/skills/{skill_id}/improve")
 def api_improve_skill(
     skill_id: int,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """Manually trigger self-improvement for a specific skill."""
     from skill_engine import run_improvement_pass, get_skill
@@ -5496,7 +5496,7 @@ def api_improve_skill(
 def api_skill_runs(
     skill_id: int,
     limit: int = 50,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """Get execution history for a skill."""
     from skill_engine import get_skill_runs
@@ -5504,7 +5504,7 @@ def api_skill_runs(
 
 
 @app.get("/api/skills/{skill_id}/versions")
-def api_skill_versions(skill_id: int, user: UserContext = Depends(get_current_user)):
+def api_skill_versions(skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)):
     """Get version history of a skill's system prompt."""
     from skill_engine import get_skill_versions
     return get_skill_versions(skill_id)
@@ -5514,7 +5514,7 @@ def api_skill_versions(skill_id: int, user: UserContext = Depends(get_current_us
 def api_skill_performance(
     skill_id: int,
     lookback_days: int = 14,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """Get performance stats for a skill."""
     from skill_engine import get_skill_performance as _perf
@@ -5524,7 +5524,7 @@ def api_skill_performance(
 @app.post("/api/skills/auto-create")
 def api_auto_create_skill(
     req: SkillAutoCreateRequest,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """Auto-synthesize a skill from a session using the local LLM."""
     from skill_engine import auto_create_skill_from_session
@@ -5551,7 +5551,7 @@ class NudgeCurateTriggerRequest(BaseModel):
 @app.get("/api/nudges")
 def api_list_nudges(
     limit: int = 20,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """List pending memory nudges for the current user."""
     from memory_curator import list_pending_nudges
@@ -5559,7 +5559,7 @@ def api_list_nudges(
 
 
 @app.post("/api/nudges/{nudge_id}/accept")
-def api_accept_nudge(nudge_id: int, user: UserContext = Depends(get_current_user)):
+def api_accept_nudge(nudge_id: int, user: UserContext = Depends(get_current_user_from_cookie)):
     """Accept a nudge — saves the fact to core memory."""
     from memory_curator import accept_nudge
     fact = accept_nudge(nudge_id, user.username)
@@ -5569,7 +5569,7 @@ def api_accept_nudge(nudge_id: int, user: UserContext = Depends(get_current_user
 
 
 @app.post("/api/nudges/{nudge_id}/dismiss")
-def api_dismiss_nudge(nudge_id: int, user: UserContext = Depends(get_current_user)):
+def api_dismiss_nudge(nudge_id: int, user: UserContext = Depends(get_current_user_from_cookie)):
     """Dismiss a nudge — it won't be saved to memory."""
     from memory_curator import dismiss_nudge
     ok = dismiss_nudge(nudge_id, user.username)
@@ -5579,7 +5579,7 @@ def api_dismiss_nudge(nudge_id: int, user: UserContext = Depends(get_current_use
 @app.post("/api/nudges/curate")
 def api_trigger_curation(
     req: NudgeCurateTriggerRequest,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """Manually trigger memory curation for a session or all recent sessions."""
     from memory_curator import curate_session, run_scheduled_curation
@@ -5608,7 +5608,7 @@ class RecallQueryRequest(BaseModel):
 @app.post("/api/recall/search")
 def api_recall_search(
     req: RecallQueryRequest,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """FTS5 full-text search across past sessions with optional LLM summarization."""
     hits = search_recall(query=req.query, username=user.username, limit=req.limit)
@@ -5624,7 +5624,7 @@ def api_recall_search(
 
 
 @app.get("/api/recall/stats")
-def api_recall_stats(user: UserContext = Depends(get_current_user)):
+def api_recall_stats(user: UserContext = Depends(get_current_user_from_cookie)):
     """Return FTS5 index statistics."""
     return get_fts_stats()
 
@@ -5632,7 +5632,7 @@ def api_recall_stats(user: UserContext = Depends(get_current_user)):
 @app.post("/api/recall/reindex")
 def api_recall_reindex(
     batch_size: int = 100,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """Manually trigger FTS5 bulk indexing of unindexed sessions. Admin only."""
     if user.role != "admin":
