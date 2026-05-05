@@ -19,21 +19,25 @@ SUMMARY_PREFILTER_LIMIT = 25
 
 
 def get_embedding_model(model_type: str = "ollama"):
-    if model_type == "openai":
+    configured_provider = (get_config("memory_embedding_provider", "") or "").strip().lower()
+    provider = configured_provider or model_type
+    configured_model = (get_config("memory_embedding_model", "") or "").strip()
+
+    if provider == "openai":
         from langchain_openai import OpenAIEmbeddings
 
         key = get_config("openai_api_key") or os.getenv("OPENAI_API_KEY")
         if not key:
             raise ValueError("OpenAI API key missing for embeddings")
-        return OpenAIEmbeddings(api_key=key)
-    elif model_type == "gemini":
+        return OpenAIEmbeddings(model=configured_model or "text-embedding-3-small", api_key=key)
+    elif provider == "gemini":
         from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
         key = get_config("gemini_api_key") or os.getenv("GOOGLE_API_KEY")
         if not key:
             raise ValueError("Google API key missing for embeddings")
-        return GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=key)
-    elif model_type in ("openrouter", "anthropic", "generic"):
+        return GoogleGenerativeAIEmbeddings(model=configured_model or "models/embedding-001", google_api_key=key)
+    elif provider in ("openrouter", "anthropic", "generic"):
         # These providers don't offer embeddings; try OpenAI embeddings if key
         # is available, otherwise fall through to Ollama.
         openai_key = get_config("openai_api_key") or os.getenv("OPENAI_API_KEY")
@@ -61,7 +65,7 @@ def get_embedding_model(model_type: str = "ollama"):
         from langchain_community.embeddings import OllamaEmbeddings
 
         base_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
-        return OllamaEmbeddings(model="nomic-embed-text", base_url=base_url)
+        return OllamaEmbeddings(model=configured_model or "nomic-embed-text", base_url=base_url)
 
 
 class MemoryIndexer:

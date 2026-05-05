@@ -139,7 +139,7 @@ from database import (
     engine,
 )
 from memory_persistence import memory_persistence_manager
-from session_recall import index_chat_turn, search_recall, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions
+from session_recall import index_chat_turn, search_recall, search_recall_hybrid, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions
 from integrations.telegram_api import get_me, set_webhook, delete_webhook, send_message
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
@@ -187,6 +187,7 @@ RESTORE_JOB_QUEUE: "Queue[Dict[str, Any]]" = Queue(maxsize=50)
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
+JWT_REMEMBER_ME_DAYS = int(os.getenv("JWT_REMEMBER_ME_DAYS", "30"))
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 SECRET_CONFIG_KEYS = {
@@ -272,6 +273,15 @@ class RecallSearchRequest(BaseModel):
     q: str
     session_id: Optional[str] = None
     limit: int = 20
+
+
+class RecallHybridSearchRequest(BaseModel):
+    q: str
+    session_id: Optional[str] = None
+    limit: int = 20
+    lexical_weight: float = 0.35
+    semantic_weight: float = 0.55
+    recency_weight: float = 0.10
 
 
 class TelegramIntegrationSaveRequest(BaseModel):
@@ -590,6 +600,7 @@ class UserRegisterRequest(BaseModel):
 class UserLoginRequest(BaseModel):
     username: str
     password: str
+    remember_me: bool = False
 
 
 class UserContext(BaseModel):
@@ -1256,9 +1267,10 @@ def _fetch_todays_email_messages(provider: str, timezone_name: str, max_results:
     raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
 
-def _create_access_token(data: Dict[str, str]) -> str:
+def _create_access_token(data: Dict[str, str], expiry_minutes: Optional[int] = None) -> str:
     payload = data.copy()
-    expiry = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRY_MINUTES)
+    exp_minutes = int(expiry_minutes or JWT_EXPIRY_MINUTES)
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=max(1, exp_minutes))
     payload.update({"exp": expiry})
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -1394,7 +1406,12 @@ def login(payload: UserLoginRequest):
 
     effective_username = admin_username if admin_override else user["username"]
     effective_role = "admin" if admin_override else user["role"]
-    token = _create_access_token({"sub": effective_username, "role": effective_role})
+    remember_me = bool(payload.remember_me)
+    max_age_seconds = (JWT_REMEMBER_ME_DAYS * 24 * 60 * 60) if remember_me else (JWT_EXPIRY_MINUTES * 60)
+    token = _create_access_token(
+        {"sub": effective_username, "role": effective_role, "trusted_device": "1" if remember_me else "0"},
+        expiry_minutes=max(1, int(max_age_seconds // 60)),
+    )
     body = UserLoginResponse(username=effective_username, role=effective_role, token=token)
     response = Response(content=body.model_dump_json(), media_type="application/json")
     response.set_cookie(
@@ -1403,7 +1420,7 @@ def login(payload: UserLoginRequest):
         httponly=True,
         samesite="lax",
         secure=False,
-        max_age=JWT_EXPIRY_MINUTES * 60,
+        max_age=max_age_seconds,
     )
     return response
 
@@ -1990,8 +2007,14 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
 
         local_only_mode = str(get_config("local_only_mode", "true")).strip().lower() in {"1", "true", "yes", "on"}
         if local_only_mode and (request.model_type or "").strip().lower() not in {"", "ollama", "generic", "anythingllm", "ampai_default"}:
-            logger.info("Local-only mode enabled. Forcing model_type '%s' -> 'ollama'", request.model_type)
-            request.model_type = "ollama"
+            requested = (request.model_type or "").strip().lower() or "unknown"
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Provider '{requested}' is blocked by local_only_mode=true. "
+                    "Disable local_only_mode in Admin Configs to use cloud providers like OpenRouter."
+                ),
+            )
 
         # Auto-resolve model_type: if frontend sends "ollama" but no Ollama is
         # running, prefer the admin-configured default_model or any provider
@@ -2914,9 +2937,28 @@ def get_sessions(
     if current_user.role != "admin":
         accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
         if not accessible_ids:
-            needs_migration = True
-            sessions = []
-        else:
+            # Auto-adopt legacy/unowned sessions for first-time auth migration.
+            # This keeps existing local chats visible after enabling login.
+            adopted = 0
+            for sess in sessions:
+                sid = (sess or {}).get("session_id")
+                if not sid:
+                    continue
+                if get_session_owner(sid):
+                    continue
+                if ensure_session_owner(sid, current_user.username):
+                    adopted += 1
+            if adopted > 0:
+                accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
+            if not accessible_ids:
+                # Fallback for legacy single-user deployments:
+                # show existing sessions even if ownership metadata is missing.
+                # This avoids "No sessions yet" for users with historical chats.
+                fallback_open = str(get_config("auth_open_session_fallback", "true")).strip().lower() in {"1", "true", "yes", "on"}
+                if not fallback_open:
+                    needs_migration = True
+                    sessions = []
+        if accessible_ids:
             shared_ids = set(list_shared_sessions_for_user(current_user.username))
             sessions = [s for s in sessions if s.get("session_id") in accessible_ids]
             for session in sessions:
@@ -3860,6 +3902,10 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "notification_default_digest_interval_minutes": configs.get("notification_default_digest_interval_minutes", "30"),
         "local_only_mode": configs.get("local_only_mode", "true"),
         "curator_nudges_enabled": configs.get("curator_nudges_enabled", "true"),
+        "memory_embedding_enabled": configs.get("memory_embedding_enabled", "false"),
+        "memory_embedding_provider": configs.get("memory_embedding_provider", "ollama"),
+        "memory_embedding_model": configs.get("memory_embedding_model", "nomic-embed-text"),
+        "memory_hybrid_retrieval_enabled": configs.get("memory_hybrid_retrieval_enabled", "false"),
     }
 
 
@@ -4010,6 +4056,25 @@ def recall_search(request: RecallSearchRequest, user=Depends(require_authenticat
     )
     summary = summarize_hits(hits, max_items=5)
     return {"hits": hits, "summary": summary}
+
+
+@app.post("/api/recall/hybrid-search")
+def recall_hybrid_search(request: RecallHybridSearchRequest, user=Depends(require_authenticated_user)):
+    configs = get_all_configs()
+    enabled = str(configs.get("memory_hybrid_retrieval_enabled", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        raise HTTPException(status_code=400, detail="Hybrid recall is disabled. Set memory_hybrid_retrieval_enabled=true.")
+    hits = search_recall_hybrid(
+        query=request.q,
+        username=user.username,
+        session_id=request.session_id,
+        limit=request.limit,
+        lexical_weight=request.lexical_weight,
+        semantic_weight=request.semantic_weight,
+        recency_weight=request.recency_weight,
+    )
+    summary = summarize_hits(hits, max_items=5)
+    return {"hits": hits, "summary": summary, "hybrid_enabled": True}
 
 
 def _parse_config_list(raw_value: Optional[str], defaults: List[str]) -> List[str]:
@@ -4935,7 +5000,11 @@ async def api_fullbackup_restore_upload(
         with open(tmp_zip, "wb") as f:
             f.write(content)
 
-        with zipfile.ZipFile(tmp_zip) as zf:
+        try:
+            zf_ctx = zipfile.ZipFile(tmp_zip)
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="Invalid backup zip file")
+        with zf_ctx as zf:
             names = zf.namelist()
             non_mem = {}
             if "full_data.json.gz" in names:
@@ -5327,6 +5396,37 @@ def update_delete_backup(backup_name: str, user: UserContext = Depends(require_a
     shutil.rmtree(full_path)
     log_audit_event(username=user.username, action="admin.docker.backup.delete", details=f"backup={backup_name}")
     return {"deleted": backup_name}
+
+
+@app.post("/api/admin/update/backups/{backup_name}/restore")
+def update_restore_backup(backup_name: str, user: UserContext = Depends(require_admin_user)):
+    """Restore backend/frontend code from a stored code backup."""
+    if "/" in backup_name or ".." in backup_name:
+        raise HTTPException(status_code=400, detail="Invalid backup name")
+    full_path = os.path.join(CODE_BACKUP_DIR, backup_name)
+    if not os.path.isdir(full_path):
+        raise HTTPException(status_code=404, detail="Backup not found")
+
+    backend_backup = os.path.join(full_path, "backend")
+    frontend_backup = os.path.join(full_path, "frontend")
+    backend_dst = os.path.join(os.path.dirname(__file__))
+    frontend_dst = os.path.join(os.path.dirname(__file__), "..", "frontend")
+    if not os.path.isdir(backend_backup) and not os.path.isdir(frontend_backup):
+        raise HTTPException(status_code=400, detail="Backup does not contain backend/frontend folders")
+
+    if os.path.isdir(backend_backup):
+        shutil.copytree(backend_backup, backend_dst, dirs_exist_ok=True)
+    if os.path.isdir(frontend_backup):
+        shutil.copytree(frontend_backup, frontend_dst, dirs_exist_ok=True)
+
+    log_audit_event(username=user.username, action="admin.docker.backup.restore", details=f"backup={backup_name}")
+
+    def _restart_server_after_restore():
+        time.sleep(2)
+        os.execv("/usr/local/bin/uvicorn", ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"])
+
+    threading.Thread(target=_restart_server_after_restore, daemon=True).start()
+    return {"restored": backup_name, "status": "restoring", "message": "Backup restored. Server restarting..."}
 
 
 
