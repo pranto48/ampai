@@ -235,6 +235,8 @@ async function adminInit() {
   document.getElementById('backup-monitor-refresh-btn')?.addEventListener('click', () => loadBackupJobs(true));
   document.getElementById('backup-download-all-btn')?.addEventListener('click', downloadAllBackups);
   document.getElementById('instant-backup-btn')?.addEventListener('click', () => _downloadWithAuth('/api/admin/backup/download-instant'));
+  document.getElementById('admin-rebuild-index-btn')?.addEventListener('click', () => runSessionRebuild('index'));
+  document.getElementById('admin-rebuild-ownership-btn')?.addEventListener('click', () => runSessionRebuild('ownership'));
 }
 
 let restorePreflightId = null;
@@ -404,6 +406,30 @@ async function loadAdminSessions() {
         <button class="btn btn-secondary btn-sm" onclick="exportSession('${s.session_id}')">Export</button>
       </td>
     </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--muted)">No sessions</td></tr>';
+}
+
+
+async function runSessionRebuild(mode) {
+  const assignInput = document.getElementById('admin-rebuild-assignee');
+  const assignee = assignInput?.value?.trim() || '';
+  const resultEl = document.getElementById('admin-rebuild-result');
+  const endpoint = mode === 'ownership' ? '/api/admin/sessions/rebuild-ownership' : '/api/admin/sessions/rebuild-index';
+  const label = mode === 'ownership' ? 'rebuild ownership' : 'rebuild session index';
+  const msg = `Run ${label} now? This scans SQL, Redis, and recall index sources.`;
+  if (!confirm(msg)) return;
+  if (resultEl) resultEl.textContent = 'Running…';
+  const { ok, data } = await apiJSON(endpoint, { method: 'POST', body: JSON.stringify({ assign_unowned_to: assignee || null }) });
+  if (!ok) {
+    const detail = data?.detail || 'Failed to run repair.';
+    if (resultEl) { resultEl.textContent = `✕ ${detail}`; resultEl.style.color = 'var(--red)'; }
+    toast(detail, 'error');
+    return;
+  }
+  const summary = `Found ${data.total_found}. Fixed metadata ${data.metadata_fixed}. Fixed ownership ${data.ownership_fixed}. Skipped ${data.skipped}. Errors ${data.errors}.`;
+  if (resultEl) { resultEl.textContent = `✓ ${summary}`; resultEl.style.color = data.errors ? 'var(--yellow)' : 'var(--green)'; }
+  toast(`${label} completed`, data.errors ? 'info' : 'success');
+  loadAdminSessions();
+  loadAdminStats();
 }
 
 async function loadCoreMemories() {

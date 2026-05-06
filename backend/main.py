@@ -116,6 +116,8 @@ from database import (
     list_backup_jobs,
     get_backup_job,
     get_backup_verification_kpis,
+    engine as db_engine,
+    CHAT_HISTORY_TABLE,
     create_restore_job,
     update_restore_job,
     list_restore_jobs,
@@ -140,7 +142,7 @@ from database import (
     engine,
 )
 from memory_persistence import memory_persistence_manager
-from session_recall import index_chat_turn, search_recall, search_recall_hybrid, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions
+from session_recall import index_chat_turn, search_recall, search_recall_hybrid, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions, DB_PATH as SESSION_RECALL_DB_PATH
 from integrations.telegram_api import get_me, set_webhook, delete_webhook, send_message
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
@@ -415,6 +417,11 @@ class ConfigUpdateRequest(BaseModel):
 class OrphanAdoptionRunRequest(BaseModel):
     force: bool = False
     batch_size: int = 100
+
+
+
+class SessionRepairRequest(BaseModel):
+    assign_unowned_to: Optional[str] = None
 
 
 class MemoryExplorerQuery(BaseModel):
@@ -3081,6 +3088,88 @@ def admin_adopt_orphan_sessions(request: OrphanAdoptionRunRequest, user: UserCon
         "batch_size": max(1, min(request.batch_size, 1000)),
         "summary": summary,
     }
+
+
+
+
+def _collect_known_session_ids() -> List[str]:
+    known: set[str] = set()
+
+    if db_engine:
+        try:
+            with db_engine.connect() as conn:
+                sql_rows = conn.execute(text(f"SELECT DISTINCT session_id FROM {CHAT_HISTORY_TABLE} WHERE session_id IS NOT NULL")).fetchall()
+                known.update((r[0] or "").strip() for r in sql_rows if r and r[0])
+        except Exception:
+            logger.exception("Failed collecting session ids from SQL history")
+
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+        redis_client = Redis.from_url(redis_url, socket_timeout=2)
+        for key in redis_client.scan_iter(match="message_store:*", count=500):
+            raw = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            sid = raw.split(":", 1)[1] if ":" in raw else ""
+            if sid:
+                known.add(sid)
+    except Exception:
+        logger.exception("Failed collecting session ids from Redis history")
+
+    try:
+        if os.path.exists(SESSION_RECALL_DB_PATH):
+            conn = sqlite3.connect(SESSION_RECALL_DB_PATH)
+            try:
+                rows = conn.execute("SELECT DISTINCT session_id FROM session_recall_fts WHERE session_id IS NOT NULL").fetchall()
+                known.update((r[0] or "").strip() for r in rows if r and r[0])
+            finally:
+                conn.close()
+    except Exception:
+        logger.exception("Failed collecting session ids from recall index")
+
+    return sorted(s for s in known if s)
+
+
+def _run_session_repair(assign_unowned_to: Optional[str], fix_ownership: bool) -> Dict[str, Any]:
+    report = {"total_found": 0, "metadata_fixed": 0, "ownership_fixed": 0, "skipped": 0, "errors": 0}
+    all_ids = _collect_known_session_ids()
+    report["total_found"] = len(all_ids)
+
+    users = db_list_users() or []
+    single_user_mode = len(users) == 1
+    assignee = (assign_unowned_to or "").strip() or None
+    valid_usernames = {u.get("username") for u in users if u.get("username")}
+    if assignee and assignee not in valid_usernames:
+        raise HTTPException(status_code=400, detail=f"Unknown user: {assignee}")
+
+    for sid in all_ids:
+        try:
+            before = next((s for s in get_all_sessions() if s.get("session_id") == sid), None)
+            if before is None:
+                touch_session_updated_at(sid)
+                report["metadata_fixed"] += 1
+
+            if fix_ownership:
+                owner = get_session_owner(sid)
+                if not owner:
+                    target = assignee if (single_user_mode and assignee) else None
+                    if target and ensure_session_owner(sid, target):
+                        report["ownership_fixed"] += 1
+                    else:
+                        report["skipped"] += 1
+        except Exception:
+            report["errors"] += 1
+            logger.exception("session repair failed for %s", sid)
+
+    return report
+
+
+@app.post("/api/admin/sessions/rebuild-index")
+def admin_rebuild_sessions_index(req: SessionRepairRequest, _: UserContext = Depends(require_admin_user)):
+    return _run_session_repair(assign_unowned_to=req.assign_unowned_to, fix_ownership=False)
+
+
+@app.post("/api/admin/sessions/rebuild-ownership")
+def admin_rebuild_sessions_ownership(req: SessionRepairRequest, _: UserContext = Depends(require_admin_user)):
+    return _run_session_repair(assign_unowned_to=req.assign_unowned_to, fix_ownership=True)
 
 
 def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
