@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AmpAI Downloads</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 16px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 20px; }
+    .recommended { color: #0a7a28; font-weight: bold; margin-bottom: 8px; }
+    .btn { display: inline-block; padding: 10px 14px; border-radius: 8px; text-decoration: none; border: 1px solid #222; margin-right: 8px; }
+    .primary { background: #222; color: #fff; }
+    .muted { background: #f9f9f9; color: #222; }
+    .full { margin-top: 24px; border: 1px dashed #aaa; border-radius: 10px; padding: 20px; }
+  </style>
+</head>
+<body>
+  <h1>Download AmpAI</h1>
+  <p>Choose the installation option that fits your workflow.</p>
+
+  <div class="grid">
+    <section class="card">
+      <div class="recommended">Recommended for most users</div>
+      <h2>AmpAI Desktop (Windows)</h2>
+      <p>One-click install with local UI and managed services.</p>
+      <a class="btn primary" href="#">Download .exe</a>
+    </section>
+
+    <section class="card">
+      <h2>Run with Docker</h2>
+      <p>For devops/power users using Docker Compose.</p>
+      <a class="btn muted" href="../README.md">Read docs</a>
+      <code>docker compose up -d</code>
+    </section>
+  </div>
+
+  <section class="full">
+    <h3>Need migration?</h3>
+    <p>Move data between Desktop and Docker with export/import tools.</p>
+    <a class="btn muted" href="../RELEASE_PIPELINE.md">Open migration guide</a>
+  </section>
+</body>
+</html>
