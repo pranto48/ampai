@@ -3332,10 +3332,18 @@ def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = De
 
 @app.get("/api/history/{session_id}")
 def get_history(session_id: str, user=Depends(require_authenticated_user)):
+    # If the session has no owner yet (orphan), auto-adopt it for the current user.
+    # This mirrors the same fallback used by /api/sessions so that any session
+    # visible in the sidebar is also readable here.
     if not _can_access_session(session_id, user):
-        raise HTTPException(status_code=403, detail="Forbidden session")
+        if user.role != "admin" and session_exists(session_id) and not get_session_owner(session_id):
+            ensure_session_owner(session_id, user.username)
+        # Re-check after potential adoption
+        if not _can_access_session(session_id, user):
+            fallback_open = str(get_config("auth_open_session_fallback", "true")).strip().lower() in {"1", "true", "yes", "on"}
+            if not (fallback_open and session_exists(session_id)):
+                raise HTTPException(status_code=403, detail="Forbidden session")
     try:
-        _enforce_session_access_or_403(session_id, user)
         messages = list_chat_messages(session_id, dedupe=True)
         if not messages:
             try:
@@ -3358,7 +3366,10 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
                 pass
         log_audit_event(username=user.username, action="memory.read.history", session_id=session_id, details=f"count={len(messages)}")
         return {"messages": messages}
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.exception("Error loading history for session %s", session_id)
         return {"messages": [], "error": str(e)}
 
 
