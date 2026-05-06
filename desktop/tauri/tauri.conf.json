@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AmpAI Desktop",
+  "version": "0.1.0",
+  "identifier": "com.ampai.desktop",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devUrl": "http://127.0.0.1:18000",
+    "frontendDist": "../frontend"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AmpAI Desktop",
+        "width": 1280,
+        "height": 800,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi"],
+    "icon": []
+  }
+}
