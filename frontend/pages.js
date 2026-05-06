@@ -90,7 +90,7 @@ function buildChatPage() {
             <label style="display:block;font-size:.75rem;color:var(--muted);margin-bottom:4px">Quick presets</label>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
               <button id="retrieval-preset-balanced" type="button" class="btn btn-secondary btn-sm">Balanced</button>
-              <button id="retrieval-preset-recent" type="button" class="btn btn-secondary btn-sm">Recent-first</button>
+              <button id="retrieval-preset-fast" type="button" class="btn btn-secondary btn-sm">Fast</button>
               <button id="retrieval-preset-deep" type="button" class="btn btn-secondary btn-sm">Deep context</button>
             </div>
           </div>
@@ -301,28 +301,29 @@ function buildModelsPage() {
 <div id="model-save-status" style="font-size:.85rem;color:var(--green);margin-bottom:12px"></div>
 
 <div class="grid-2" style="gap:16px">
-  ${_modelCard('🦙','Ollama','Local LLM','rgba(99,102,241,.15)',[
+  ${_modelCard('🦙','Ollama','Local LLM','rgba(99,102,241,.15)','ollama',[
     ['cfg-ollama-url','text','Base URL','http://localhost:11434'],
     ['cfg-ollama-models','text','Model list (comma-separated)','llama3,mistral,phi3'],
   ])}
-  ${_modelCard('✨','OpenAI','GPT-4, GPT-3.5','rgba(16,185,129,.15)',[
+  ${_modelCard('✨','OpenAI','GPT-4, GPT-3.5','rgba(16,185,129,.15)','openai',[
     ['cfg-openai-key','password','API Key','sk-…'],
   ])}
-  ${_modelCard('🌟','Gemini','Google AI','rgba(245,158,11,.15)',[
+  ${_modelCard('🌟','Gemini','Google AI','rgba(245,158,11,.15)','gemini',[
     ['cfg-gemini-key','password','API Key','AIza…'],
   ])}
-  ${_modelCard('🔴','Anthropic','Claude','rgba(239,68,68,.15)',[
+  ${_modelCard('🔴','Anthropic','Claude','rgba(239,68,68,.15)','anthropic',[
     ['cfg-anthropic-key','password','API Key','sk-ant-…'],
   ])}
-  ${_modelCard('🔀','OpenRouter','Multi-provider','rgba(139,92,246,.15)',[
+  ${_modelCard('🔀','OpenRouter','Multi-provider','rgba(139,92,246,.15)','openrouter',[
     ['cfg-openrouter-key','password','API Key','sk-or-…'],
     ['cfg-openrouter-model','text','Default Model','openai/gpt-4o'],
   ])}
-  ${_modelCard('🏠','AnythingLLM','Self-hosted RAG','rgba(16,185,129,.1)',[
+  ${_modelCard('🏠','AnythingLLM','Self-hosted RAG','rgba(16,185,129,.1)','anythingllm',[
     ['cfg-anythingllm-url','text','Base URL','http://localhost:3001'],
     ['cfg-anythingllm-key','password','API Key',''],
     ['cfg-anythingllm-ws','text','Workspace','my-workspace'],
   ])}
+  ${_modelCard('🧩','Generic','OpenAI-compatible','rgba(59,130,246,.15)','generic',[])}
 </div>
 
 <div class="card" style="margin-top:16px">
@@ -395,7 +396,7 @@ function _memoryRetrievalCard() {
 </div>`;
 }
 
-function _modelCard(icon, name, sub, bg, fields) {
+function _modelCard(icon, name, sub, bg, provider, fields) {
   return `
 <div style="background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:18px;
   transition:border-color .2s" onmouseenter="this.style.borderColor='rgba(99,102,241,.4)'"
@@ -413,6 +414,10 @@ function _modelCard(icon, name, sub, bg, fields) {
     <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:6px;font-weight:500">${label}</label>
     <input id="${id}" type="${type}" class="input" placeholder="${ph}"/>
   </div>`).join('')}
+  <div style="display:flex;align-items:center;gap:8px">
+    <button id="test-provider-${provider}" class="btn btn-secondary btn-sm" type="button">Test</button>
+    <span id="test-provider-status-${provider}" style="font-size:.78rem;color:var(--muted)"></span>
+  </div>
 </div>`;
 }
 
@@ -489,6 +494,23 @@ function buildSettingsPage() {
         <input type="checkbox" id="chat-low-token-mode" style="accent-color:var(--accent)"/>
         <span style="font-size:.875rem">Low token mode (compact replies)</span>
       </label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+        <div>
+          <label class="lbl">Default retrieval preset</label>
+          <select id="chat-retrieval-default-preset" class="input">
+            <option value="balanced">Balanced</option>
+            <option value="fast">Fast</option>
+            <option value="deep">Deep</option>
+          </select>
+        </div>
+        <div>
+          <label class="lbl">Preset scope</label>
+          <select id="chat-retrieval-scope" class="input">
+            <option value="user">Per user</option>
+            <option value="chat">Per chat</option>
+          </select>
+        </div>
+      </div>
       <button id="save-chat-prefs-btn" class="btn btn-primary btn-sm">Save Chat Preferences</button>
     </div>
 
@@ -569,10 +591,36 @@ function buildAdminPage() {
   <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
     <button id="refresh-health-btn" class="btn btn-secondary btn-sm">↻ Refresh</button>
   </div>
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-title">⚙️ Settings Readiness</div>
+    <div id="settings-health-groups" class="text-sm" style="display:flex;flex-direction:column;gap:8px;color:var(--muted)">Loading…</div>
+  </div>
   <div class="grid-4" id="health-grid" style="gap:14px;margin-bottom:16px"></div>
   <div class="card">
     <div class="card-title">Scheduler Diagnostics</div>
     <pre id="scheduler-diag" style="font-size:.8rem;color:var(--muted);white-space:pre-wrap;margin:0">Loading…</pre>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <div class="card-title">Retention Cleanup</div>
+    <div style="display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:8px">
+      <input id="retention-chat-days" class="input" type="number" min="1" value="365" placeholder="Chat days"/>
+      <input id="retention-recall-days" class="input" type="number" min="1" value="365" placeholder="Recall index days"/>
+      <input id="retention-logs-days" class="input" type="number" min="1" value="30" placeholder="Logs days"/>
+      <input id="retention-backups-days" class="input" type="number" min="1" value="30" placeholder="Backups days"/>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+      <button id="retention-dry-run-btn" class="btn btn-secondary">Dry-run cleanup</button>
+      <button id="run-retention-btn" class="btn btn-danger">Apply cleanup now</button>
+    </div>
+    <div id="retention-status" style="font-size:.85rem;margin-top:8px"></div>
+    <div style="overflow-x:auto;margin-top:10px">
+      <table class="tbl">
+        <thead><tr><th>Category</th><th>Retention (days)</th><th>Would delete</th></tr></thead>
+        <tbody id="retention-dry-run-tbody">
+          <tr><td colspan="3" style="text-align:center;padding:16px;color:var(--muted)">Run dry-run to preview impact.</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -603,6 +651,15 @@ function buildAdminPage() {
 
 <!-- Sessions panel -->
 <div id="tab-sessions" class="hidden">
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-title">Session Maintenance</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input id="admin-rebuild-assignee" class="input" placeholder="Assign unowned to user (single-user mode)" style="min-width:280px;flex:1"/>
+      <button id="admin-rebuild-index-btn" class="btn btn-secondary">Rebuild Session Index</button>
+      <button id="admin-rebuild-ownership-btn" class="btn btn-primary">Rebuild Ownership</button>
+    </div>
+    <div id="admin-rebuild-result" style="margin-top:8px;font-size:.85rem;color:var(--muted)"></div>
+  </div>
   <div class="card" style="overflow-x:auto">
     <table class="tbl">
       <thead><tr><th>Session ID</th><th>Category</th><th>Owner</th><th>Pinned</th><th>Actions</th></tr></thead>

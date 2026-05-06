@@ -235,6 +235,8 @@ async function adminInit() {
   document.getElementById('backup-monitor-refresh-btn')?.addEventListener('click', () => loadBackupJobs(true));
   document.getElementById('backup-download-all-btn')?.addEventListener('click', downloadAllBackups);
   document.getElementById('instant-backup-btn')?.addEventListener('click', () => _downloadWithAuth('/api/admin/backup/download-instant'));
+  document.getElementById('admin-rebuild-index-btn')?.addEventListener('click', () => runSessionRebuild('index'));
+  document.getElementById('admin-rebuild-ownership-btn')?.addEventListener('click', () => runSessionRebuild('ownership'));
 }
 
 let restorePreflightId = null;
@@ -276,10 +278,43 @@ async function loadAdminStats() {
   if (ok4) document.getElementById('stat-tasks').textContent = (d4.tasks?.length ?? '—');
 }
 
+
+function _settingsHealthSectionForKey(key) {
+  if (key.includes('model')) return '#tab-models';
+  if (key.includes('memory')) return '#settings-memory';
+  if (key.includes('backup')) return '#tab-backup';
+  if (key.includes('notification')) return '#settings-email';
+  if (key.includes('auth')) return '#settings-security';
+  return '#tab-health';
+}
+
+function renderSettingsHealthChecks(checks = []) {
+  const container = document.getElementById('settings-health-groups');
+  if (!container) return;
+  if (!checks.length) {
+    container.innerHTML = '<div class="text-muted">No readiness checks returned.</div>';
+    return;
+  }
+  const grouped = { error: [], warn: [], ok: [] };
+  checks.forEach(c => (grouped[c.status] || grouped.warn).push(c));
+  const blocks = ['error', 'warn', 'ok'].filter(k => grouped[k].length).map(level => {
+    const color = level === 'error' ? 'var(--red)' : (level === 'warn' ? 'var(--yellow)' : 'var(--green)');
+    const title = level === 'error' ? 'Errors' : (level === 'warn' ? 'Warnings' : 'Healthy');
+    const rows = grouped[level].map(c => {
+      const href = _settingsHealthSectionForKey(c.key || '');
+      return `<li style="margin:4px 0"><strong>${c.message}</strong>${c.fix_hint ? `<div style="font-size:.8rem">${c.fix_hint} · <a href="${href}">Go fix</a></div>` : ''}</li>`;
+    }).join('');
+    return `<div><div style="color:${color};font-weight:600;margin-bottom:4px">${title} (${grouped[level].length})</div><ul style="margin:0;padding-left:18px">${rows}</ul></div>`;
+  });
+  container.innerHTML = blocks.join('');
+}
+
 async function loadHealthPanel() {
   const grid = document.getElementById('health-grid');
   if (grid) grid.innerHTML = '<div class="text-muted text-sm">Loading…</div>';
   const { ok, data } = await apiJSON('/api/health');
+  const settingsHealthRes = await apiJSON('/api/admin/settings/health');
+  if (settingsHealthRes.ok) renderSettingsHealthChecks(settingsHealthRes.data.checks || []);
   if (!ok || !data.checks) return;
   const checks = data.checks;
   const tiles = [
@@ -371,6 +406,30 @@ async function loadAdminSessions() {
         <button class="btn btn-secondary btn-sm" onclick="exportSession('${s.session_id}')">Export</button>
       </td>
     </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--muted)">No sessions</td></tr>';
+}
+
+
+async function runSessionRebuild(mode) {
+  const assignInput = document.getElementById('admin-rebuild-assignee');
+  const assignee = assignInput?.value?.trim() || '';
+  const resultEl = document.getElementById('admin-rebuild-result');
+  const endpoint = mode === 'ownership' ? '/api/admin/sessions/rebuild-ownership' : '/api/admin/sessions/rebuild-index';
+  const label = mode === 'ownership' ? 'rebuild ownership' : 'rebuild session index';
+  const msg = `Run ${label} now? This scans SQL, Redis, and recall index sources.`;
+  if (!confirm(msg)) return;
+  if (resultEl) resultEl.textContent = 'Running…';
+  const { ok, data } = await apiJSON(endpoint, { method: 'POST', body: JSON.stringify({ assign_unowned_to: assignee || null }) });
+  if (!ok) {
+    const detail = data?.detail || 'Failed to run repair.';
+    if (resultEl) { resultEl.textContent = `✕ ${detail}`; resultEl.style.color = 'var(--red)'; }
+    toast(detail, 'error');
+    return;
+  }
+  const summary = `Found ${data.total_found}. Fixed metadata ${data.metadata_fixed}. Fixed ownership ${data.ownership_fixed}. Skipped ${data.skipped}. Errors ${data.errors}.`;
+  if (resultEl) { resultEl.textContent = `✓ ${summary}`; resultEl.style.color = data.errors ? 'var(--yellow)' : 'var(--green)'; }
+  toast(`${label} completed`, data.errors ? 'info' : 'success');
+  loadAdminSessions();
+  loadAdminStats();
 }
 
 async function loadCoreMemories() {
@@ -878,6 +937,24 @@ async function modelsLoad() {
   if (window._modelsBound) return;
   window._modelsBound = true;
   document.getElementById('save-model-cfg-btn')?.addEventListener('click', saveModelCfg);
+  ['ollama','generic','openrouter','openai','gemini','anthropic','anythingllm'].forEach((provider) => {
+    document.getElementById(`test-provider-${provider}`)?.addEventListener('click', () => testProvider(provider));
+  });
+}
+
+async function testProvider(provider) {
+  const el = document.getElementById(`test-provider-status-${provider}`);
+  if (el) { el.style.color = 'var(--muted)'; el.textContent = 'Testing…'; }
+  const { ok, data } = await apiJSON('/api/admin/providers/test', {
+    method: 'POST',
+    body: JSON.stringify({ provider }),
+  });
+  if (!el) return;
+  const passed = ok && data?.ok;
+  const latency = data?.latency_ms ? ` (${data.latency_ms} ms)` : '';
+  const detail = data?.error || data?.detail || data?.message || '';
+  el.style.color = passed ? 'var(--green)' : 'var(--red)';
+  el.textContent = `${passed ? 'PASS' : 'FAIL'}${latency}${detail ? ` — ${detail}` : ''}`;
 }
 
 async function saveModelCfg() {
@@ -951,6 +1028,10 @@ async function _loadSettingsValues() {
     const pref = chatPrefRes.data || {};
     const compact = document.getElementById('chat-low-token-mode');
     if (compact) compact.checked = !!pref.low_token_mode;
+    const retrievalPreset = document.getElementById('chat-retrieval-default-preset');
+    if (retrievalPreset) retrievalPreset.value = pref.retrieval_default_preset || 'balanced';
+    const retrievalScope = document.getElementById('chat-retrieval-scope');
+    if (retrievalScope) retrievalScope.value = pref.retrieval_scope || 'user';
   }
 }
 
@@ -1000,6 +1081,8 @@ async function settingsLoad() {
   document.getElementById('save-chat-prefs-btn')?.addEventListener('click', async () => {
     const payload = {
       low_token_mode: !!document.getElementById('chat-low-token-mode')?.checked,
+      retrieval_default_preset: document.getElementById('chat-retrieval-default-preset')?.value || 'balanced',
+      retrieval_scope: document.getElementById('chat-retrieval-scope')?.value || 'user',
     };
     const { ok } = await apiJSON('/api/users/me/chat-preferences', { method: 'PUT', body: JSON.stringify(payload) });
     toast(ok ? 'Chat preferences saved' : 'Failed to save chat preferences', ok ? 'success' : 'error');
