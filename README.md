@@ -80,6 +80,7 @@ Starter assets in this repo:
 - Windows build/packaging scripts: `packaging/windows/scripts/`
 - Inno Setup installer spec: `packaging/windows/installer/AmpAI.iss`
 - Windows release workflow: `.github/workflows/release-windows.yml`
+- Windows target architecture spec: `packaging/windows/ARCHITECTURE_WINDOWS.md`
 
 ### Option B — AmpAI Docker
 - For devops/power users and homelab deployments
