@@ -2567,7 +2567,13 @@ def get_effective_chat_preferences(username: str) -> Dict[str, object]:
     defaults = {
         "chat_output_mode": default_mode,
         "low_token_mode": default_mode == "compact",
+        "retrieval_default_preset": (get_config("retrieval_default_preset", "balanced") or "balanced").strip().lower(),
+        "retrieval_scope": (get_config("retrieval_default_scope", "user") or "user").strip().lower(),
     }
+    if defaults["retrieval_default_preset"] not in {"balanced", "fast", "deep"}:
+        defaults["retrieval_default_preset"] = "balanced"
+    if defaults["retrieval_scope"] not in {"user", "chat"}:
+        defaults["retrieval_scope"] = "user"
     raw = get_config(f"user:{username}:chat_preferences", "")
     if not raw:
         return defaults
@@ -2586,10 +2592,23 @@ def get_effective_chat_preferences(username: str) -> Dict[str, object]:
         return defaults
 
 
-def upsert_user_chat_preferences(username: str, low_token_mode: bool) -> bool:
+def upsert_user_chat_preferences(
+    username: str,
+    low_token_mode: bool,
+    retrieval_default_preset: str = "balanced",
+    retrieval_scope: str = "user",
+) -> bool:
+    preset = (retrieval_default_preset or "balanced").strip().lower()
+    scope = (retrieval_scope or "user").strip().lower()
+    if preset not in {"balanced", "fast", "deep"}:
+        preset = "balanced"
+    if scope not in {"user", "chat"}:
+        scope = "user"
     payload = {
         "low_token_mode": bool(low_token_mode),
         "chat_output_mode": "compact" if bool(low_token_mode) else "normal",
+        "retrieval_default_preset": preset,
+        "retrieval_scope": scope,
     }
     return set_config(f"user:{username}:chat_preferences", json.dumps(payload))
 

@@ -116,6 +116,8 @@ from database import (
     list_backup_jobs,
     get_backup_job,
     get_backup_verification_kpis,
+    engine as db_engine,
+    CHAT_HISTORY_TABLE,
     create_restore_job,
     update_restore_job,
     list_restore_jobs,
@@ -333,6 +335,8 @@ class MemoryPolicyRequest(BaseModel):
 
 class ChatPreferencesUpdateRequest(BaseModel):
     low_token_mode: bool = False
+    retrieval_default_preset: str = "balanced"
+    retrieval_scope: str = "user"
 
 
 class PersonaCreateRequest(BaseModel):
@@ -412,9 +416,23 @@ class ImportRequest(BaseModel):
 class ConfigUpdateRequest(BaseModel):
     configs: Dict[str, str]
 
+class AdminSettingsExportRequest(BaseModel):
+    include_secrets: bool = False
+    confirm_include_secrets: bool = False
+
+class AdminSettingsImportRequest(BaseModel):
+    configs: Dict[str, Any]
+    dry_run: bool = True
+    conflict_strategy: str = "skip"  # skip|overwrite
+
 class OrphanAdoptionRunRequest(BaseModel):
     force: bool = False
     batch_size: int = 100
+
+
+
+class SessionRepairRequest(BaseModel):
+    assign_unowned_to: Optional[str] = None
 
 
 class MemoryExplorerQuery(BaseModel):
@@ -541,9 +559,20 @@ class BackupConnectionTestRequest(BaseModel):
     domain: Optional[str] = ""
 
 
+class ProviderTestRequest(BaseModel):
+    provider: str
+
+
 class RetentionRunRequest(BaseModel):
     max_age_days: int = 365
     archive_only: bool = True
+
+
+class RetentionDryRunRequest(BaseModel):
+    chat_history_days: int = 365
+    recall_index_days: int = 365
+    logs_days: int = 30
+    backups_days: int = 30
 
 
 class BackupProfileDestination(BaseModel):
@@ -2430,6 +2459,8 @@ def update_my_chat_preferences(
     ok = upsert_user_chat_preferences(
         username=current_user.username,
         low_token_mode=bool(request.low_token_mode),
+        retrieval_default_preset=request.retrieval_default_preset,
+        retrieval_scope=request.retrieval_scope,
     )
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to save chat preferences")
@@ -3079,6 +3110,88 @@ def admin_adopt_orphan_sessions(request: OrphanAdoptionRunRequest, user: UserCon
     }
 
 
+
+
+def _collect_known_session_ids() -> List[str]:
+    known: set[str] = set()
+
+    if db_engine:
+        try:
+            with db_engine.connect() as conn:
+                sql_rows = conn.execute(text(f"SELECT DISTINCT session_id FROM {CHAT_HISTORY_TABLE} WHERE session_id IS NOT NULL")).fetchall()
+                known.update((r[0] or "").strip() for r in sql_rows if r and r[0])
+        except Exception:
+            logger.exception("Failed collecting session ids from SQL history")
+
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+        redis_client = Redis.from_url(redis_url, socket_timeout=2)
+        for key in redis_client.scan_iter(match="message_store:*", count=500):
+            raw = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            sid = raw.split(":", 1)[1] if ":" in raw else ""
+            if sid:
+                known.add(sid)
+    except Exception:
+        logger.exception("Failed collecting session ids from Redis history")
+
+    try:
+        if os.path.exists(SESSION_RECALL_DB_PATH):
+            conn = sqlite3.connect(SESSION_RECALL_DB_PATH)
+            try:
+                rows = conn.execute("SELECT DISTINCT session_id FROM session_recall_fts WHERE session_id IS NOT NULL").fetchall()
+                known.update((r[0] or "").strip() for r in rows if r and r[0])
+            finally:
+                conn.close()
+    except Exception:
+        logger.exception("Failed collecting session ids from recall index")
+
+    return sorted(s for s in known if s)
+
+
+def _run_session_repair(assign_unowned_to: Optional[str], fix_ownership: bool) -> Dict[str, Any]:
+    report = {"total_found": 0, "metadata_fixed": 0, "ownership_fixed": 0, "skipped": 0, "errors": 0}
+    all_ids = _collect_known_session_ids()
+    report["total_found"] = len(all_ids)
+
+    users = db_list_users() or []
+    single_user_mode = len(users) == 1
+    assignee = (assign_unowned_to or "").strip() or None
+    valid_usernames = {u.get("username") for u in users if u.get("username")}
+    if assignee and assignee not in valid_usernames:
+        raise HTTPException(status_code=400, detail=f"Unknown user: {assignee}")
+
+    for sid in all_ids:
+        try:
+            before = next((s for s in get_all_sessions() if s.get("session_id") == sid), None)
+            if before is None:
+                touch_session_updated_at(sid)
+                report["metadata_fixed"] += 1
+
+            if fix_ownership:
+                owner = get_session_owner(sid)
+                if not owner:
+                    target = assignee if (single_user_mode and assignee) else None
+                    if target and ensure_session_owner(sid, target):
+                        report["ownership_fixed"] += 1
+                    else:
+                        report["skipped"] += 1
+        except Exception:
+            report["errors"] += 1
+            logger.exception("session repair failed for %s", sid)
+
+    return report
+
+
+@app.post("/api/admin/sessions/rebuild-index")
+def admin_rebuild_sessions_index(req: SessionRepairRequest, _: UserContext = Depends(require_admin_user)):
+    return _run_session_repair(assign_unowned_to=req.assign_unowned_to, fix_ownership=False)
+
+
+@app.post("/api/admin/sessions/rebuild-ownership")
+def admin_rebuild_sessions_ownership(req: SessionRepairRequest, _: UserContext = Depends(require_admin_user)):
+    return _run_session_repair(assign_unowned_to=req.assign_unowned_to, fix_ownership=True)
+
+
 def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
@@ -3415,6 +3528,85 @@ def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admi
         saved.append(k)
     log_audit_event(username=user.username, action="admin.configs.update", details=f"saved={len(saved)};skipped={len(skipped)}")
     return {"status": "success", "saved": saved, "skipped": skipped}
+
+
+@app.get("/api/admin/settings/export")
+def export_admin_settings(
+    include_secrets: bool = Query(default=False),
+    confirm_include_secrets: bool = Query(default=False),
+    user: UserContext = Depends(require_admin_user),
+):
+    if include_secrets and not confirm_include_secrets:
+        raise HTTPException(status_code=400, detail="include_secrets=true requires confirm_include_secrets=true")
+    raw_configs = get_all_configs()
+    exported: Dict[str, str] = {}
+    redacted: List[str] = []
+    for key, value in raw_configs.items():
+        safe_value = value or ""
+        is_secret = key in SECRET_CONFIG_KEYS or "api_key" in key or "password" in key
+        if is_secret and not include_secrets:
+            redacted.append(key)
+            continue
+        exported[key] = safe_value
+    log_audit_event(
+        username=user.username,
+        action="admin.settings.export",
+        details=f"include_secrets={include_secrets};exported={len(exported)};redacted={len(redacted)}",
+    )
+    return {
+        "configs": exported,
+        "meta": {
+            "include_secrets": include_secrets,
+            "redacted_keys": sorted(redacted),
+            "exported_key_count": len(exported),
+        },
+    }
+
+
+@app.post("/api/admin/settings/import")
+def import_admin_settings(request: AdminSettingsImportRequest, user: UserContext = Depends(require_admin_user)):
+    strategy = (request.conflict_strategy or "skip").strip().lower()
+    if strategy not in {"skip", "overwrite"}:
+        raise HTTPException(status_code=400, detail="conflict_strategy must be skip or overwrite")
+    incoming = request.configs or {}
+    if not isinstance(incoming, dict):
+        raise HTTPException(status_code=400, detail="configs must be an object of key/value pairs")
+    existing = get_all_configs()
+    results: List[Dict[str, Any]] = []
+    summary = {"created": 0, "updated": 0, "skipped_conflict": 0, "skipped_invalid": 0, "unchanged": 0}
+    to_apply: List[tuple[str, str]] = []
+    for key, raw_value in sorted(incoming.items(), key=lambda kv: kv[0]):
+        normalized_key = (key or "").strip()
+        if not normalized_key:
+            summary["skipped_invalid"] += 1
+            results.append({"key": key, "status": "skipped_invalid", "reason": "empty key"})
+            continue
+        value = "" if raw_value is None else str(raw_value)
+        current = existing.get(normalized_key)
+        if current is None:
+            status = "created"
+            summary["created"] += 1
+            to_apply.append((normalized_key, value))
+        elif current == value:
+            status = "unchanged"
+            summary["unchanged"] += 1
+        elif strategy == "skip":
+            status = "skipped_conflict"
+            summary["skipped_conflict"] += 1
+        else:
+            status = "updated"
+            summary["updated"] += 1
+            to_apply.append((normalized_key, value))
+        results.append({"key": normalized_key, "status": status, "previous": current, "incoming": value})
+    if not request.dry_run:
+        for key, value in to_apply:
+            set_config(key, value)
+    log_audit_event(
+        username=user.username,
+        action="admin.settings.import",
+        details=f"dry_run={request.dry_run};strategy={strategy};keys={len(incoming)};changes={len(to_apply)}",
+    )
+    return {"dry_run": request.dry_run, "conflict_strategy": strategy, "summary": summary, "results": results}
 
 
 @app.post("/api/admin/change-password")
@@ -3833,6 +4025,57 @@ def test_backup_connection(request: BackupConnectionTestRequest, _: UserContext 
     return {"status": "success", "detail": detail}
 
 
+def _timed_probe(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 8) -> Dict[str, Any]:
+    started = time.perf_counter()
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return {
+            "ok": 200 <= resp.status < 300,
+            "status_code": resp.status,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+            "url": url,
+        }
+
+
+@app.post("/api/admin/providers/test")
+def test_provider_connection(request: ProviderTestRequest, _: UserContext = Depends(require_admin_user)):
+    provider = (request.provider or "").strip().lower()
+    configs = get_all_configs()
+    try:
+        if provider == "ollama":
+            base = (configs.get("ollama_base_url") or "http://host.docker.internal:11434").rstrip("/")
+            return _timed_probe(f"{base}/api/tags")
+        if provider == "generic":
+            base = (configs.get("generic_base_url") or "").rstrip("/")
+            if not base:
+                raise HTTPException(status_code=400, detail="generic_base_url is not configured")
+            headers = {"Authorization": f"Bearer {configs.get('generic_api_key') or ''}"} if configs.get("generic_api_key") else {}
+            result = _timed_probe(f"{base}/v1/models", headers=headers)
+            result["model"] = (configs.get("generic_model") or "").strip() or None
+            return result
+        if provider == "openrouter":
+            key = (configs.get("openrouter_api_key") or "").strip()
+            if not key:
+                raise HTTPException(status_code=400, detail="openrouter_api_key is not configured")
+            return _timed_probe("https://openrouter.ai/api/v1/models", headers={"Authorization": f"Bearer {key}"})
+        if provider in {"openai", "gemini", "anthropic"}:
+            key_name = {"openai": "openai_api_key", "gemini": "gemini_api_key", "anthropic": "anthropic_api_key"}[provider]
+            has_key = bool((configs.get(key_name) or "").strip())
+            return {"ok": has_key, "provider": provider, "message": "API key configured" if has_key else f"{key_name} is not configured"}
+        if provider == "anythingllm":
+            base = (configs.get("anythingllm_base_url") or "").rstrip("/")
+            workspace = (configs.get("anythingllm_workspace") or "").strip()
+            if not base or not workspace:
+                raise HTTPException(status_code=400, detail="anythingllm base URL/workspace is not configured")
+            headers = {"Authorization": f"Bearer {configs.get('anythingllm_api_key') or ''}"} if configs.get("anythingllm_api_key") else {}
+            return _timed_probe(f"{base}/api/v1/workspace/{workspace}", headers=headers)
+        raise HTTPException(status_code=400, detail="Unsupported provider")
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "status_code": exc.code, "error": f"HTTP {exc.code}: {exc.reason}"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @app.post("/api/admin/backup/restore")
 def restore_backup(request: BackupRestoreRequest, user: UserContext = Depends(require_admin_user)):
     report = _build_restore_preflight_report(request.backup_json)
@@ -3912,6 +4155,78 @@ def run_retention_now(request: RetentionRunRequest, current_user: UserContext = 
         details=f"max_age_days={request.max_age_days};archive_only={request.archive_only};result={result}",
     )
     return {"status": "success", **result}
+
+
+@app.post("/api/admin/retention/dry-run")
+def retention_dry_run(request: RetentionDryRunRequest, current_user: UserContext = Depends(require_admin_user)):
+    from session_recall import DB_PATH as RECALL_DB_PATH
+    from pathlib import Path
+    import sqlite3
+
+    chat_days = max(1, int(request.chat_history_days))
+    recall_days = max(1, int(request.recall_index_days))
+    logs_days = max(1, int(request.logs_days))
+    backups_days = max(1, int(request.backups_days))
+
+    stale_session_ids: List[str] = []
+    chat_rows = 0
+    if engine:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT session_id
+                    FROM session_metadata
+                    WHERE updated_at IS NOT NULL
+                      AND updated_at::timestamptz < NOW() - make_interval(days => :days)
+                    """
+                ),
+                {"days": chat_days},
+            ).fetchall()
+            stale_session_ids = [r[0] for r in rows if r and r[0]]
+            if stale_session_ids:
+                chat_rows = int(
+                    conn.execute(
+                        text(f"SELECT COUNT(*) FROM {CHAT_HISTORY_TABLE} WHERE session_id = ANY(:ids)"),
+                        {"ids": stale_session_ids},
+                    ).scalar() or 0
+                )
+
+    recall_rows = 0
+    try:
+        with sqlite3.connect(RECALL_DB_PATH) as recall_conn:
+            recall_rows = int(
+                recall_conn.execute(
+                    "SELECT COUNT(*) FROM session_recall_fts WHERE datetime(created_at) < datetime('now', ?)",
+                    (f"-{recall_days} days",),
+                ).fetchone()[0] or 0
+            )
+    except Exception:
+        recall_rows = 0
+
+    def _count_old_files(base: Path, days: int) -> int:
+        if not base.exists():
+            return 0
+        cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
+        total = 0
+        for p in base.rglob("*"):
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                total += 1
+        return total
+
+    logs_files = _count_old_files(Path("logs"), logs_days)
+    backups_files = _count_old_files(Path("backups"), backups_days)
+    result = {
+        "status": "success",
+        "categories": {
+            "chat_history": {"days": chat_days, "would_delete_rows": chat_rows, "affected_sessions": len(stale_session_ids)},
+            "recall_index": {"days": recall_days, "would_delete_rows": recall_rows},
+            "logs": {"days": logs_days, "would_delete_files": logs_files},
+            "backups": {"days": backups_days, "would_delete_files": backups_files},
+        },
+    }
+    log_audit_event(username=current_user.username, action="governance.retention.dry_run", details=json.dumps(result.get("categories", {})))
+    return result
 
 
 @app.get("/api/admin/audit/events")
@@ -4502,9 +4817,106 @@ def root_page():
 def favicon():
     return Response(status_code=204)
 
+def _to_bool(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _add_setting_check(checks: List[Dict[str, str]], key: str, status: str, message: str, fix_hint: str = "") -> None:
+    checks.append({"key": key, "status": status, "message": message, "fix_hint": fix_hint})
+
+
+def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
+    configs = get_all_configs()
+    checks: List[Dict[str, str]] = []
+
+    local_only_mode = _to_bool(configs.get("local_only_mode", "true"))
+    default_provider = (configs.get("default_model_provider") or configs.get("model_provider") or "ollama").strip().lower()
+    provider_key_map = {
+        "openai": "openai_api_key",
+        "gemini": "gemini_api_key",
+        "anthropic": "anthropic_api_key",
+        "openrouter": "openrouter_api_key",
+        "anythingllm": "anythingllm_base_url",
+        "generic": "generic_base_url",
+        "ollama": "ollama_base_url",
+    }
+    required_key = provider_key_map.get(default_provider)
+    provider_ready = local_only_mode or (required_key and bool((configs.get(required_key) or "").strip()))
+    _add_setting_check(
+        checks,
+        key="model_provider_readiness",
+        status="ok" if provider_ready else "error",
+        message=(
+            f"Model provider ready ({default_provider})"
+            if provider_ready
+            else f"Model provider '{default_provider}' is missing required setting: {required_key or 'provider configuration'}"
+        ),
+        fix_hint="Go fix: Models settings" if not provider_ready else "",
+    )
+
+    hybrid_enabled = _to_bool(configs.get("memory_hybrid_retrieval_enabled", "false"))
+    embedding_provider = (configs.get("memory_embedding_provider") or "").strip().lower()
+    embedding_model = (configs.get("memory_embedding_model") or "").strip()
+    embedding_provider_ok = embedding_provider in {"ollama", "openai", "gemini", "openrouter", "anythingllm", "generic"}
+    memory_ready = (not hybrid_enabled) or (embedding_provider_ok and bool(embedding_model))
+    memory_status = "ok" if memory_ready else ("warn" if hybrid_enabled else "ok")
+    _add_setting_check(
+        checks,
+        key="memory_retrieval_readiness",
+        status=memory_status,
+        message=(
+            "Hybrid memory retrieval ready"
+            if memory_ready
+            else "Hybrid memory retrieval is enabled but embedding provider/model is incomplete"
+        ),
+        fix_hint="Go fix: Settings → Memory policy" if not memory_ready else "",
+    )
+
+    mode = (configs.get("backup_mode", "local") or "local").strip().lower()
+    backup_ok = True
+    if mode == "local":
+        backup_ok = bool((configs.get("backup_local_path") or "").strip())
+    elif mode in {"ftp", "smb"}:
+        backup_ok = all(bool((configs.get(k) or "").strip()) for k in ([f"backup_{mode}_host", f"backup_{mode}_user", f"backup_{mode}_path", f"backup_{mode}_password"]))
+    _add_setting_check(
+        checks,
+        key="backup_readiness",
+        status="ok" if backup_ok else "warn",
+        message="Backup destination/profile looks complete" if backup_ok else f"Backup mode '{mode}' has missing destination credentials/paths",
+        fix_hint="Go fix: Admin → Backup" if not backup_ok else "",
+    )
+
+    resend_key = bool((configs.get("resend_api_key") or "").strip())
+    resend_from = bool((configs.get("resend_from_email") or "").strip())
+    notif_ok = resend_key and resend_from
+    _add_setting_check(
+        checks,
+        key="notification_readiness",
+        status="ok" if notif_ok else "warn",
+        message="Email notifications ready" if notif_ok else "Resend notification config is incomplete",
+        fix_hint="Go fix: Settings → Email (Resend)" if not notif_ok else "",
+    )
+
+    jwt_ok = 5 <= JWT_EXPIRY_MINUTES <= 1440 and 1 <= JWT_REMEMBER_ME_DAYS <= 365
+    _add_setting_check(
+        checks,
+        key="auth_session_sanity",
+        status="ok" if jwt_ok else "error",
+        message="JWT/session ranges are sane" if jwt_ok else f"JWT ranges out of bounds (expiry={JWT_EXPIRY_MINUTES}, remember_days={JWT_REMEMBER_ME_DAYS})",
+        fix_hint="Set JWT_EXPIRY_MINUTES (5-1440) and JWT_REMEMBER_ME_DAYS (1-365) environment variables",
+    )
+
+    return checks
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/api/admin/settings/health")
+def admin_settings_health(_: UserContext = Depends(require_admin_user)):
+    return {"checks": _build_admin_settings_health_checks()}
 
 
 @app.get("/api/health")
