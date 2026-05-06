@@ -7,6 +7,8 @@ let _chatHandlersBound = false;
 const PERSONA_PREF_KEY = 'ampai_persona_id';
 const WEB_SEARCH_PREF_KEY = 'ampai_web_search_enabled';
 const SESSIONS_CACHE_KEY = 'ampai_cached_sessions';
+const LOCAL_SESSION_INDEX_KEY = 'ampai_local_session_index';
+const LOCAL_HISTORY_PREFIX = 'ampai_local_history:';
 let chatOutputMode = 'normal';
 
 function chatInit() {
@@ -21,6 +23,48 @@ function chatInit() {
   if (!_chatHandlersBound) {
     _chatHandlersBound = true;
     _bindChatHandlers();
+  }
+}
+
+function _readLocalSessionIndex() {
+  try {
+    const raw = localStorage.getItem(LOCAL_SESSION_INDEX_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function _upsertLocalSessionIndex(sessionId, category = 'Uncategorized') {
+  if (!sessionId) return;
+  const rows = _readLocalSessionIndex().filter((s) => s && s.session_id && s.session_id !== sessionId);
+  rows.unshift({ session_id: sessionId, category, updated_at: new Date().toISOString(), pinned: false, source: 'local' });
+  try { localStorage.setItem(LOCAL_SESSION_INDEX_KEY, JSON.stringify(rows.slice(0, 200))); } catch {}
+}
+
+function _historyKey(sessionId) {
+  return `${LOCAL_HISTORY_PREFIX}${sessionId || ''}`;
+}
+
+function _appendLocalHistory(sessionId, type, content) {
+  if (!sessionId || !content) return;
+  try {
+    const raw = localStorage.getItem(_historyKey(sessionId));
+    const parsed = raw ? JSON.parse(raw) : [];
+    const rows = Array.isArray(parsed) ? parsed : [];
+    rows.push({ type, content, created_at: new Date().toISOString() });
+    localStorage.setItem(_historyKey(sessionId), JSON.stringify(rows.slice(-500)));
+  } catch {}
+}
+
+function _readLocalHistory(sessionId) {
+  try {
+    const raw = localStorage.getItem(_historyKey(sessionId));
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
 }
 
@@ -42,6 +86,7 @@ function _bindChatHandlers() {
   // New chat
   document.getElementById('new-chat-btn')?.addEventListener('click', () => {
     State.sessionId = _newSessionId();
+    _upsertLocalSessionIndex(State.sessionId);
     _updateChatSessionDisplay();
     const msgs = document.getElementById('chat-messages');
     if (msgs) msgs.innerHTML = _welcomeMsg();
@@ -239,11 +284,16 @@ async function loadSessions(query = '') {
   const params = new URLSearchParams({ limit: 60, offset: 0 });
   if (query) params.set('query', query);
   const showSessions = (sessions) => {
-    if (!sessions.length) {
+    const ordered = [...(sessions || [])].sort((a, b) => {
+      const ta = new Date(a.updated_at || 0).getTime();
+      const tb = new Date(b.updated_at || 0).getTime();
+      return tb - ta;
+    });
+    if (!ordered.length) {
       list.innerHTML = '<div style="padding:14px;text-align:center;font-size:.8rem;color:var(--muted)">No sessions yet.<br>Start a new chat!</div>';
       return;
     }
-    list.innerHTML = sessions.map(s => `
+    list.innerHTML = ordered.map(s => `
       <div class="session-item ${s.session_id === State.sessionId ? 'active' : ''}"
         data-sid="${s.session_id}" style="padding:10px 12px;border-radius:8px;cursor:pointer;
         margin-bottom:2px;transition:all .15s;border-left:2px solid transparent">
@@ -315,7 +365,22 @@ async function loadSessions(query = '') {
     }
     return;
   }
-  const sessions = response.data.sessions || [];
+  const serverSessions = response.data.sessions || [];
+  const localSessions = _readLocalSessionIndex();
+  const mergedById = {};
+  [...localSessions, ...serverSessions].forEach((s) => {
+    if (!s?.session_id) return;
+    const existing = mergedById[s.session_id];
+    if (!existing) mergedById[s.session_id] = s;
+    else {
+      const tExisting = new Date(existing.updated_at || 0).getTime();
+      const tCurrent = new Date(s.updated_at || 0).getTime();
+      if (tCurrent >= tExisting) mergedById[s.session_id] = { ...existing, ...s };
+    }
+  });
+  const sessions = Object.values(mergedById).filter((s) =>
+    !query || String(s.session_id || '').toLowerCase().includes(String(query).toLowerCase())
+  );
   if (response.data?.needs_migration) {
     const cta = State.role === 'admin' ? ' <a href="#admin" style="color:var(--accent)">Open Admin</a>' : '';
     toast('Session migration required.' + cta, 'warning');
@@ -330,6 +395,14 @@ async function _loadSessionHistory(sessionId) {
   msgs.innerHTML = '<div style="text-align:center;padding:48px;color:var(--muted)">Loading history…</div>';
   const { ok, data } = await apiJSON(`/api/history/${sessionId}`);
   if (!ok) {
+    const localMessages = _readLocalHistory(sessionId);
+    if (localMessages.length) {
+      msgs.innerHTML = '';
+      localMessages.forEach((m) => _appendMsg(m.type === 'human' ? 'user' : 'ai', m.content));
+      _scrollToBottom();
+      toast('Showing local cached history (server history unavailable).', 'warning');
+      return;
+    }
     msgs.innerHTML = '<div style="text-align:center;padding:48px;color:var(--red)">Failed to load history</div>';
     return;
   }
@@ -354,6 +427,7 @@ async function _sendChat() {
   chatAttachments = [];
   _renderAttachPreviews();
   _appendMsg('user', message || '(attachment)');
+  _appendLocalHistory(State.sessionId, 'human', message || '(attachment)');
   if (inputEl) { inputEl.value = ''; inputEl.style.height = 'auto'; }
   _setSendEnabled(false);
 
@@ -399,8 +473,10 @@ async function _sendChat() {
       const aiText = data.response || data.detail;
       if (!aiText) {
         _appendMsg('ai', '💬 (no text response — check your AI model settings)');
+        _appendLocalHistory(State.sessionId, 'ai', '💬 (no text response — check your AI model settings)');
       } else {
         _appendMsg('ai', aiText);
+        _appendLocalHistory(State.sessionId, 'ai', aiText);
       }
       // Show memory save feedback
       const memStatus = data.memory_status || {};
@@ -415,13 +491,16 @@ async function _sendChat() {
         toast('📥 Memory captured — awaiting approval', 'info');
       }
       _renderTaskSuggestions(data.task_suggestions || []);
+      _upsertLocalSessionIndex(State.sessionId);
       loadSessions(); // refresh sidebar
       _loadSessionTaskSuggestions(State.sessionId);
     } else {
       _appendMsg('ai', '⚠️ ' + (data.detail || 'Something went wrong. Check your AI model config.'));
+      _appendLocalHistory(State.sessionId, 'ai', '⚠️ ' + (data.detail || 'Something went wrong. Check your AI model config.'));
     }
   } catch (err) {
     _appendMsg('ai', '⚠️ Failed to send message: ' + (err?.message || 'unknown error'));
+    _appendLocalHistory(State.sessionId, 'ai', '⚠️ Failed to send message: ' + (err?.message || 'unknown error'));
   } finally {
     _removeTyping(typId);
   }
