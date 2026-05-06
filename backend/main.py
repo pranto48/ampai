@@ -335,6 +335,8 @@ class MemoryPolicyRequest(BaseModel):
 
 class ChatPreferencesUpdateRequest(BaseModel):
     low_token_mode: bool = False
+    retrieval_default_preset: str = "balanced"
+    retrieval_scope: str = "user"
 
 
 class PersonaCreateRequest(BaseModel):
@@ -2441,6 +2443,8 @@ def update_my_chat_preferences(
     ok = upsert_user_chat_preferences(
         username=current_user.username,
         low_token_mode=bool(request.low_token_mode),
+        retrieval_default_preset=request.retrieval_default_preset,
+        retrieval_scope=request.retrieval_scope,
     )
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to save chat preferences")
@@ -4081,6 +4085,9 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "memory_embedding_provider": configs.get("memory_embedding_provider", "ollama"),
         "memory_embedding_model": configs.get("memory_embedding_model", "nomic-embed-text"),
         "memory_hybrid_retrieval_enabled": configs.get("memory_hybrid_retrieval_enabled", "false"),
+        "retrieval_preset_keys": configs.get("retrieval_preset_keys", '["balanced","fast","deep"]'),
+        "retrieval_default_preset": configs.get("retrieval_default_preset", "balanced"),
+        "retrieval_default_scope": configs.get("retrieval_default_scope", "user"),
     }
 
 

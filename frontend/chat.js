@@ -9,6 +9,13 @@ const WEB_SEARCH_PREF_KEY = 'ampai_web_search_enabled';
 const SESSIONS_CACHE_KEY = 'ampai_cached_sessions';
 const LOCAL_SESSION_INDEX_KEY = 'ampai_local_session_index';
 let chatOutputMode = 'normal';
+const RETRIEVAL_PRESETS = {
+  balanced: { topK: 6, recencyBias: 0.35, semanticWeight: 0.55, contextBudget: 3200, hybridEnabled: true },
+  fast: { topK: 3, recencyBias: 0.2, semanticWeight: 0.45, contextBudget: 1800, hybridEnabled: true },
+  deep: { topK: 12, recencyBias: 0.15, semanticWeight: 0.7, contextBudget: 5000, hybridEnabled: true },
+};
+let currentRetrievalPreset = 'balanced';
+let retrievalPresetScope = 'user';
 
 function chatInit() {
   // Only load sessions each time; bind handlers only once
@@ -46,6 +53,27 @@ async function _loadChatPreferences() {
   const { ok, data } = await apiJSON('/api/users/me/chat-preferences');
   if (!ok) return;
   chatOutputMode = (data?.chat_output_mode || 'normal') === 'compact' ? 'compact' : 'normal';
+  const preset = (data?.retrieval_default_preset || 'balanced').toLowerCase();
+  retrievalPresetScope = (data?.retrieval_scope || 'user').toLowerCase() === 'chat' ? 'chat' : 'user';
+  const chatScopedPreset = localStorage.getItem(`ampai_retrieval_preset:${State.sessionId || ''}`);
+  const effectivePreset = retrievalPresetScope === 'chat' && chatScopedPreset ? chatScopedPreset : preset;
+  if (RETRIEVAL_PRESETS[effectivePreset]) {
+    currentRetrievalPreset = effectivePreset;
+    _applyRetrievalPreset(effectivePreset);
+  }
+}
+
+function _applyRetrievalPreset(preset) {
+  const topK = document.getElementById('memory-top-k');
+  const recency = document.getElementById('memory-recency-bias') || document.getElementById('recency-bias');
+  if (!topK || !recency || !RETRIEVAL_PRESETS[preset]) return;
+  const cfg = RETRIEVAL_PRESETS[preset];
+  topK.value = String(cfg.topK);
+  recency.value = String(cfg.recencyBias);
+  currentRetrievalPreset = preset;
+  if (retrievalPresetScope === 'chat' && State.sessionId) {
+    localStorage.setItem(`ampai_retrieval_preset:${State.sessionId}`, preset);
+  }
 }
 
 async function loadMemoryPolicyBadge() {
@@ -149,31 +177,9 @@ function _bindChatHandlers() {
     if (inputBox) inputBox.style.borderColor = 'var(--border)';
   });
 
-  const applyRetrievalPreset = (preset) => {
-    const topK = document.getElementById('memory-top-k');
-    const recency = document.getElementById('recency-bias');
-    const category = document.getElementById('category-filter');
-    if (!topK || !recency || !category) return;
-    if (preset === 'recent') {
-      topK.value = '4';
-      recency.value = '0.8';
-      category.value = '';
-      return;
-    }
-    if (preset === 'deep') {
-      topK.value = '12';
-      recency.value = '0.15';
-      category.value = '';
-      return;
-    }
-    topK.value = '5';
-    recency.value = '0.35';
-    category.value = '';
-  };
-
-  document.getElementById('retrieval-preset-balanced')?.addEventListener('click', () => applyRetrievalPreset('balanced'));
-  document.getElementById('retrieval-preset-recent')?.addEventListener('click', () => applyRetrievalPreset('recent'));
-  document.getElementById('retrieval-preset-deep')?.addEventListener('click', () => applyRetrievalPreset('deep'));
+  document.getElementById('retrieval-preset-balanced')?.addEventListener('click', () => _applyRetrievalPreset('balanced'));
+  document.getElementById('retrieval-preset-fast')?.addEventListener('click', () => _applyRetrievalPreset('fast'));
+  document.getElementById('retrieval-preset-deep')?.addEventListener('click', () => _applyRetrievalPreset('deep'));
 }
 
 function _restoreLocalPreferences() {
@@ -427,6 +433,10 @@ async function _sendChat() {
         memory_top_k: Number(document.getElementById('memory-top-k')?.value || 5),
         memory_recency_bias: Number(document.getElementById('memory-recency-bias')?.value || 0),
         memory_category_filter: document.getElementById('memory-category-filter')?.value || '',
+        metadata: {
+          retrieval_preset: currentRetrievalPreset,
+          retrieval_preset_values: RETRIEVAL_PRESETS[currentRetrievalPreset] || RETRIEVAL_PRESETS.balanced,
+        },
         persona_id: document.getElementById('persona-select')?.value || null,
         chat_output_mode: chatOutputMode,
         use_web_search: !!(document.getElementById('web-search-toggle')?.checked),
