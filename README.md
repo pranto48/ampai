@@ -93,6 +93,7 @@ Starter assets in this repo:
 Starter assets in this repo:
 - Docker runtime: `Dockerfile`, `docker-compose.yml`
 - Docker release workflow: `.github/workflows/release-docker.yml`
+- CI/CD release pipeline guide: `RELEASE_PIPELINE.md`
 
 ## Installation & quick start
 
