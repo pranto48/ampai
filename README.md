@@ -65,6 +65,31 @@ AmpAI is being built toward a Hermes-agent-like workflow:
 
 ---
 
+## Distribution options (product shape)
+
+AmpAI ships in two aligned options that share the same backend/frontend codebase:
+
+### Option A — AmpAI Desktop for Windows (.exe)
+- One-click installer for end users
+- Launches local UI automatically
+- Manages local services (backend + runtime dependencies)
+- Supports optional start-on-boot setup in installer/launcher policy
+
+Starter assets in this repo:
+- Tauri desktop scaffold: `desktop/tauri/`
+- Windows build/packaging scripts: `packaging/windows/scripts/`
+- Inno Setup installer spec: `packaging/windows/installer/AmpAI.iss`
+- Windows release workflow: `.github/workflows/release-windows.yml`
+
+### Option B — AmpAI Docker
+- For devops/power users and homelab deployments
+- Runs via Docker Compose
+- Keeps service behavior aligned with desktop build
+
+Starter assets in this repo:
+- Docker runtime: `Dockerfile`, `docker-compose.yml`
+- Docker release workflow: `.github/workflows/release-docker.yml`
+
 ## Installation & quick start
 
 ## Prerequisites
