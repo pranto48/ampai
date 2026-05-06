@@ -20,6 +20,7 @@ from database import (
     create_curator_nudge,
     list_agent_skills,
     get_skill_performance,
+    apply_retention_policy,
     set_config,
     get_config,
 )
@@ -213,6 +214,13 @@ def run_chat_reply_digest():
         grouped.setdefault(username, []).append(row)
         delivered_ids.append(int(row["id"]))
 
+
+def run_retention_cleanup():
+    max_age_days = max(1, int(get_config("retention_chat_history_days", "365") or "365"))
+    archive_only = str(get_config("retention_archive_only", "true")).strip().lower() not in {"0", "false", "no"}
+    result = apply_retention_policy(max_age_days=max_age_days, archive_only=archive_only)
+    logger.info("Retention cleanup complete: %s", result)
+
     lines = []
     for username, entries in grouped.items():
         lines.append(f"User: {username} ({len(entries)} replies)")
@@ -347,6 +355,7 @@ def run_skill_improvement_pass():
 
 def start_scheduler():
     if not scheduler.running:
+        retention_interval_hours = max(1, int(get_config("retention_cleanup_interval_hours", "24") or "24"))
         scheduler.add_job(run_network_sweep, 'cron', hour=9, minute=0)
         scheduler.add_job(run_task_digest, 'interval', minutes=30)
         scheduler.add_job(run_chat_reply_digest, 'interval', minutes=5)
@@ -358,6 +367,7 @@ def start_scheduler():
         scheduler.add_job(run_memory_curation, 'interval', hours=6, id='ampai_memory_curation')
         scheduler.add_job(run_skill_improvement_pass, 'interval', hours=1, id='ampai_skill_improvement')
         scheduler.add_job(run_session_fts_indexer, 'cron', hour=2, minute=0, id='ampai_fts_indexer')
+        scheduler.add_job(run_retention_cleanup, 'interval', hours=retention_interval_hours, id='ampai_retention_cleanup')
         scheduler.start()
         logger.info("Background scheduler started")
 

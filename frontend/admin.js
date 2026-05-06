@@ -146,6 +146,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const backupRestoreJson = document.getElementById('backup-restore-json');
     const backupRestoreDryRun = document.getElementById('backup-restore-dry-run');
     const runRetentionBtn = document.getElementById('run-retention-btn');
+    const retentionDryRunBtn = document.getElementById('retention-dry-run-btn');
+    const retentionDryRunTbody = document.getElementById('retention-dry-run-tbody');
     const retentionStatus = document.getElementById('retention-status');
     const groupNameInput = document.getElementById('group-name');
     const groupMembersInput = document.getElementById('group-members');
@@ -187,6 +189,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (runRetentionBtn) {
             runRetentionBtn.addEventListener('click', runRetentionNow);
         }
+        if (retentionDryRunBtn) {
+            retentionDryRunBtn.addEventListener('click', runRetentionDryRun);
+        }
         loadBackupHistory();
         if (createGroupBtn) {
             createGroupBtn.addEventListener('click', createGroup);
@@ -223,7 +228,7 @@ document.addEventListener('DOMContentLoaded', () => {
         runRetentionBtn.disabled = true;
         retentionStatus.textContent = 'Running...';
         try {
-            const maxAge = Number(document.getElementById('config-retention-max-age-days')?.value || 365);
+            const maxAge = Number(document.getElementById('retention-chat-days')?.value || 365);
             const res = await apiFetch('/api/admin/retention/run', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -238,6 +243,49 @@ document.addEventListener('DOMContentLoaded', () => {
             retentionStatus.style.color = '#ef4444';
         } finally {
             runRetentionBtn.disabled = false;
+        }
+    }
+
+    function retentionPayloadFromForm() {
+        return {
+            chat_history_days: Number(document.getElementById('retention-chat-days')?.value || 365),
+            recall_index_days: Number(document.getElementById('retention-recall-days')?.value || 365),
+            logs_days: Number(document.getElementById('retention-logs-days')?.value || 30),
+            backups_days: Number(document.getElementById('retention-backups-days')?.value || 30),
+        };
+    }
+
+    function renderRetentionDryRunTable(categories = {}) {
+        if (!retentionDryRunTbody) return;
+        const rows = [
+            ['chat_history', categories.chat_history?.days, categories.chat_history?.would_delete_rows ?? 0],
+            ['recall_index', categories.recall_index?.days, categories.recall_index?.would_delete_rows ?? 0],
+            ['logs', categories.logs?.days, categories.logs?.would_delete_files ?? 0],
+            ['backups', categories.backups?.days, categories.backups?.would_delete_files ?? 0],
+        ];
+        retentionDryRunTbody.innerHTML = rows.map((r) => `<tr><td>${r[0]}</td><td>${r[1] ?? '-'}</td><td>${r[2]}</td></tr>`).join('');
+    }
+
+    async function runRetentionDryRun() {
+        if (!retentionDryRunBtn) return;
+        retentionDryRunBtn.disabled = true;
+        retentionStatus.textContent = 'Running dry-run...';
+        try {
+            const res = await apiFetch('/api/admin/retention/dry-run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(retentionPayloadFromForm()),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Dry-run failed');
+            renderRetentionDryRunTable(data.categories || {});
+            retentionStatus.textContent = 'Dry-run complete';
+            retentionStatus.style.color = '#10b981';
+        } catch (error) {
+            retentionStatus.textContent = error.message;
+            retentionStatus.style.color = '#ef4444';
+        } finally {
+            retentionDryRunBtn.disabled = false;
         }
     }
 
