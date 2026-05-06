@@ -1704,6 +1704,11 @@ def _process_telegram_update(update: Dict[str, Any]) -> None:
     if not get_user(username):
         db_create_user(username=username, role="user", password_hash=pwd_context.hash(uuid.uuid4().hex))
 
+    # Ensure Telegram conversations are discoverable in the regular chat history list
+    # before model processing begins.
+    ensure_session_owner(session_id, username)
+    touch_session(session_id)
+
     model_type = (get_config("default_model", "ollama") or "ollama").strip().lower()
     policy = _get_memory_policy(username)
     try:
@@ -1735,8 +1740,7 @@ def _process_telegram_update(update: Dict[str, Any]) -> None:
                 logger.exception("telegram provider send failure")
                 log_audit_event(username=username, action="integration.telegram.provider_send_failure", session_id=session_id)
                 raise
-        ensure_session_owner(session_id, username)
-        touch_session(session_id)
+        touch_session_updated_at(session_id)
         log_audit_event(username=username, action="integration.telegram.message_processed", session_id=session_id)
     except Exception:
         logger.exception("telegram update processing failed")
