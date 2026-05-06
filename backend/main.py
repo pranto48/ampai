@@ -142,7 +142,7 @@ from database import (
     engine,
 )
 from memory_persistence import memory_persistence_manager
-from session_recall import index_chat_turn, search_recall, search_recall_hybrid, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions, DB_PATH as SESSION_RECALL_DB_PATH
+from session_recall import index_chat_turn, search_recall, search_recall_hybrid, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions
 from integrations.telegram_api import get_me, set_webhook, delete_webhook, send_message
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
@@ -4252,9 +4252,6 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "memory_embedding_provider": configs.get("memory_embedding_provider", "ollama"),
         "memory_embedding_model": configs.get("memory_embedding_model", "nomic-embed-text"),
         "memory_hybrid_retrieval_enabled": configs.get("memory_hybrid_retrieval_enabled", "false"),
-        "retrieval_preset_keys": configs.get("retrieval_preset_keys", '["balanced","fast","deep"]'),
-        "retrieval_default_preset": configs.get("retrieval_default_preset", "balanced"),
-        "retrieval_default_scope": configs.get("retrieval_default_scope", "user"),
     }
 
 
