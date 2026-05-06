@@ -98,6 +98,7 @@ try {
   Start-Redis
   Start-Postgres
 
+  $env:HOST = "127.0.0.1"
   $env:PORT = "$BackendPort"
   $env:DATABASE_URL = "postgresql+psycopg2://ampai:ampai@127.0.0.1:$PostgresPort/ampai"
   $env:REDIS_URL = "redis://127.0.0.1:$RedisPort/0"
