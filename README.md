@@ -81,6 +81,9 @@ Starter assets in this repo:
 - Inno Setup installer spec: `packaging/windows/installer/AmpAI.iss`
 - Windows release workflow: `.github/workflows/release-windows.yml`
 - Windows target architecture spec: `packaging/windows/ARCHITECTURE_WINDOWS.md`
+- Docker vs Windows parity checklist: `packaging/windows/PARITY_MATRIX.md`
+- Windows security/ops decisions: `packaging/windows/SECURITY_OPS.md`
+- Hardened Docker compose template: `packaging/docker/compose.hardened.yml`
 
 ### Option B — AmpAI Docker
 - For devops/power users and homelab deployments
