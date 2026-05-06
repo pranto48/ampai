@@ -612,6 +612,15 @@ function buildAdminPage() {
 
 <!-- Sessions panel -->
 <div id="tab-sessions" class="hidden">
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-title">Session Maintenance</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input id="admin-rebuild-assignee" class="input" placeholder="Assign unowned to user (single-user mode)" style="min-width:280px;flex:1"/>
+      <button id="admin-rebuild-index-btn" class="btn btn-secondary">Rebuild Session Index</button>
+      <button id="admin-rebuild-ownership-btn" class="btn btn-primary">Rebuild Ownership</button>
+    </div>
+    <div id="admin-rebuild-result" style="margin-top:8px;font-size:.85rem;color:var(--muted)"></div>
+  </div>
   <div class="card" style="overflow-x:auto">
     <table class="tbl">
       <thead><tr><th>Session ID</th><th>Category</th><th>Owner</th><th>Pinned</th><th>Actions</th></tr></thead>
