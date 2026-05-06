@@ -600,6 +600,28 @@ function buildAdminPage() {
     <div class="card-title">Scheduler Diagnostics</div>
     <pre id="scheduler-diag" style="font-size:.8rem;color:var(--muted);white-space:pre-wrap;margin:0">Loading…</pre>
   </div>
+  <div class="card" style="margin-top:16px">
+    <div class="card-title">Retention Cleanup</div>
+    <div style="display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:8px">
+      <input id="retention-chat-days" class="input" type="number" min="1" value="365" placeholder="Chat days"/>
+      <input id="retention-recall-days" class="input" type="number" min="1" value="365" placeholder="Recall index days"/>
+      <input id="retention-logs-days" class="input" type="number" min="1" value="30" placeholder="Logs days"/>
+      <input id="retention-backups-days" class="input" type="number" min="1" value="30" placeholder="Backups days"/>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+      <button id="retention-dry-run-btn" class="btn btn-secondary">Dry-run cleanup</button>
+      <button id="run-retention-btn" class="btn btn-danger">Apply cleanup now</button>
+    </div>
+    <div id="retention-status" style="font-size:.85rem;margin-top:8px"></div>
+    <div style="overflow-x:auto;margin-top:10px">
+      <table class="tbl">
+        <thead><tr><th>Category</th><th>Retention (days)</th><th>Would delete</th></tr></thead>
+        <tbody id="retention-dry-run-tbody">
+          <tr><td colspan="3" style="text-align:center;padding:16px;color:var(--muted)">Run dry-run to preview impact.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <!-- Users panel -->

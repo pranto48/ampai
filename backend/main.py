@@ -559,6 +559,13 @@ class RetentionRunRequest(BaseModel):
     archive_only: bool = True
 
 
+class RetentionDryRunRequest(BaseModel):
+    chat_history_days: int = 365
+    recall_index_days: int = 365
+    logs_days: int = 30
+    backups_days: int = 30
+
+
 class BackupProfileDestination(BaseModel):
     type: str = "local"
     path: Optional[str] = ""
@@ -4055,6 +4062,78 @@ def run_retention_now(request: RetentionRunRequest, current_user: UserContext = 
         details=f"max_age_days={request.max_age_days};archive_only={request.archive_only};result={result}",
     )
     return {"status": "success", **result}
+
+
+@app.post("/api/admin/retention/dry-run")
+def retention_dry_run(request: RetentionDryRunRequest, current_user: UserContext = Depends(require_admin_user)):
+    from session_recall import DB_PATH as RECALL_DB_PATH
+    from pathlib import Path
+    import sqlite3
+
+    chat_days = max(1, int(request.chat_history_days))
+    recall_days = max(1, int(request.recall_index_days))
+    logs_days = max(1, int(request.logs_days))
+    backups_days = max(1, int(request.backups_days))
+
+    stale_session_ids: List[str] = []
+    chat_rows = 0
+    if engine:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT session_id
+                    FROM session_metadata
+                    WHERE updated_at IS NOT NULL
+                      AND updated_at::timestamptz < NOW() - make_interval(days => :days)
+                    """
+                ),
+                {"days": chat_days},
+            ).fetchall()
+            stale_session_ids = [r[0] for r in rows if r and r[0]]
+            if stale_session_ids:
+                chat_rows = int(
+                    conn.execute(
+                        text(f"SELECT COUNT(*) FROM {CHAT_HISTORY_TABLE} WHERE session_id = ANY(:ids)"),
+                        {"ids": stale_session_ids},
+                    ).scalar() or 0
+                )
+
+    recall_rows = 0
+    try:
+        with sqlite3.connect(RECALL_DB_PATH) as recall_conn:
+            recall_rows = int(
+                recall_conn.execute(
+                    "SELECT COUNT(*) FROM session_recall_fts WHERE datetime(created_at) < datetime('now', ?)",
+                    (f"-{recall_days} days",),
+                ).fetchone()[0] or 0
+            )
+    except Exception:
+        recall_rows = 0
+
+    def _count_old_files(base: Path, days: int) -> int:
+        if not base.exists():
+            return 0
+        cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
+        total = 0
+        for p in base.rglob("*"):
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                total += 1
+        return total
+
+    logs_files = _count_old_files(Path("logs"), logs_days)
+    backups_files = _count_old_files(Path("backups"), backups_days)
+    result = {
+        "status": "success",
+        "categories": {
+            "chat_history": {"days": chat_days, "would_delete_rows": chat_rows, "affected_sessions": len(stale_session_ids)},
+            "recall_index": {"days": recall_days, "would_delete_rows": recall_rows},
+            "logs": {"days": logs_days, "would_delete_files": logs_files},
+            "backups": {"days": backups_days, "would_delete_files": backups_files},
+        },
+    }
+    log_audit_event(username=current_user.username, action="governance.retention.dry_run", details=json.dumps(result.get("categories", {})))
+    return result
 
 
 @app.get("/api/admin/audit/events")
