@@ -33,3 +33,13 @@
 - Supports install path, start menu shortcut, desktop shortcut.
 - Optional run at startup task.
 - Uninstall keeps user data stored in `%APPDATA%\AmpAI` by default.
+
+## Runtime orchestration responsibilities
+- Check required ports and report reuse/collision state before starting services.
+- Start Postgres if not already running.
+- Start Redis if not already running.
+- Run DB migration check/hook before backend startup.
+- Start AmpAI backend and wait for health endpoint readiness.
+- Open local UI route after health passes.
+- Monitor backend process and auto-restart on crash.
+- Gracefully stop managed services on launcher exit.
