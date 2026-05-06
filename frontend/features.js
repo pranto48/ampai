@@ -1002,6 +1002,10 @@ async function _loadSettingsValues() {
     const pref = chatPrefRes.data || {};
     const compact = document.getElementById('chat-low-token-mode');
     if (compact) compact.checked = !!pref.low_token_mode;
+    const retrievalPreset = document.getElementById('chat-retrieval-default-preset');
+    if (retrievalPreset) retrievalPreset.value = pref.retrieval_default_preset || 'balanced';
+    const retrievalScope = document.getElementById('chat-retrieval-scope');
+    if (retrievalScope) retrievalScope.value = pref.retrieval_scope || 'user';
   }
 }
 
@@ -1051,6 +1055,8 @@ async function settingsLoad() {
   document.getElementById('save-chat-prefs-btn')?.addEventListener('click', async () => {
     const payload = {
       low_token_mode: !!document.getElementById('chat-low-token-mode')?.checked,
+      retrieval_default_preset: document.getElementById('chat-retrieval-default-preset')?.value || 'balanced',
+      retrieval_scope: document.getElementById('chat-retrieval-scope')?.value || 'user',
     };
     const { ok } = await apiJSON('/api/users/me/chat-preferences', { method: 'PUT', body: JSON.stringify(payload) });
     toast(ok ? 'Chat preferences saved' : 'Failed to save chat preferences', ok ? 'success' : 'error');

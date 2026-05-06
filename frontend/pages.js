@@ -90,7 +90,7 @@ function buildChatPage() {
             <label style="display:block;font-size:.75rem;color:var(--muted);margin-bottom:4px">Quick presets</label>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
               <button id="retrieval-preset-balanced" type="button" class="btn btn-secondary btn-sm">Balanced</button>
-              <button id="retrieval-preset-recent" type="button" class="btn btn-secondary btn-sm">Recent-first</button>
+              <button id="retrieval-preset-fast" type="button" class="btn btn-secondary btn-sm">Fast</button>
               <button id="retrieval-preset-deep" type="button" class="btn btn-secondary btn-sm">Deep context</button>
             </div>
           </div>
@@ -494,6 +494,23 @@ function buildSettingsPage() {
         <input type="checkbox" id="chat-low-token-mode" style="accent-color:var(--accent)"/>
         <span style="font-size:.875rem">Low token mode (compact replies)</span>
       </label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+        <div>
+          <label class="lbl">Default retrieval preset</label>
+          <select id="chat-retrieval-default-preset" class="input">
+            <option value="balanced">Balanced</option>
+            <option value="fast">Fast</option>
+            <option value="deep">Deep</option>
+          </select>
+        </div>
+        <div>
+          <label class="lbl">Preset scope</label>
+          <select id="chat-retrieval-scope" class="input">
+            <option value="user">Per user</option>
+            <option value="chat">Per chat</option>
+          </select>
+        </div>
+      </div>
       <button id="save-chat-prefs-btn" class="btn btn-primary btn-sm">Save Chat Preferences</button>
     </div>
 
