@@ -1,0 +1,59 @@
+name: release-windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build backend
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File packaging/windows/scripts/build_backend.ps1
+
+      - name: Build frontend
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File packaging/windows/scripts/build_frontend.ps1
+
+      - name: Stage release files
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File packaging/windows/scripts/stage_release.ps1
+
+      - name: Build Tauri app
+        working-directory: desktop/tauri
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build installer
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File packaging/windows/scripts/build_installer.ps1
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ampai-windows-installer
+          path: dist/windows/*.exe
