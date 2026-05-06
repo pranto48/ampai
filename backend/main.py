@@ -3345,6 +3345,19 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
                 raise HTTPException(status_code=403, detail="Forbidden session")
     try:
         messages = list_chat_messages(session_id, dedupe=True)
+
+        # Count raw rows so the client can distinguish parse-failure from empty session
+        raw_row_count = 0
+        if not messages:
+            try:
+                with db_engine.connect() as _conn:
+                    raw_row_count = _conn.execute(
+                        text(f"SELECT COUNT(*) FROM {CHAT_HISTORY_TABLE} WHERE session_id = :s"),
+                        {"s": session_id},
+                    ).scalar() or 0
+            except Exception:
+                pass
+
         if not messages:
             try:
                 redis_msgs = get_redis_history(session_id).messages
@@ -3364,13 +3377,14 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
                 messages = get_session_recall_messages(session_id=session_id, limit=500)
             except Exception:
                 pass
-        log_audit_event(username=user.username, action="memory.read.history", session_id=session_id, details=f"count={len(messages)}")
-        return {"messages": messages}
+        log_audit_event(username=user.username, action="memory.read.history", session_id=session_id, details=f"count={len(messages)};raw_rows={raw_row_count}")
+        return {"messages": messages, "raw_row_count": raw_row_count}
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Error loading history for session %s", session_id)
         return {"messages": [], "error": str(e)}
+
 
 
 @app.get("/api/sessions/{session_id}/task-suggestions")

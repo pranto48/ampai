@@ -409,19 +409,31 @@ async function _loadSessionHistory(sessionId) {
       toast('Showing local cached history (server history unavailable).', 'warning');
       return;
     }
-    msgs.innerHTML = '<div style="text-align:center;padding:48px;color:var(--red)">Failed to load history</div>';
+    msgs.innerHTML = `<div style="text-align:center;padding:48px;color:var(--red)">Failed to load history${data?.detail ? ': ' + data.detail : ''}</div>`;
     return;
   }
   msgs.innerHTML = '';
   const messages = data.messages || [];
+  const rawRowCount = data.raw_row_count || 0;
   _hideSuggestedActions();
   if (!messages.length) {
-    msgs.innerHTML = _welcomeMsg();
+    if (rawRowCount > 0) {
+      // Messages exist in DB but couldn't be parsed — surface this clearly
+      msgs.innerHTML = `<div style="text-align:center;padding:48px;color:var(--yellow)">
+        ⚠️ This session has ${rawRowCount} stored message(s) but they could not be decoded.<br>
+        <span style="font-size:.8rem;color:var(--muted);margin-top:8px;display:block">
+          Try restarting the backend — a message format fix was applied.
+        </span>
+      </div>`;
+    } else {
+      msgs.innerHTML = _welcomeMsg();
+    }
     return;
   }
   messages.forEach(m => _appendMsg(m.type === 'human' ? 'user' : 'ai', m.content));
   _scrollToBottom();
 }
+
 
 // ── Send ───────────────────────────────────────────
 async function _sendChat() {

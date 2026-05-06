@@ -493,15 +493,49 @@ def get_sql_chat_history(session_id: str) -> SQLChatMessageHistory:
 
 
 def _parse_chat_payload(raw_message: str) -> Optional[Tuple[str, str]]:
+    """
+    Parse a LangChain SQLChatMessageHistory message row.
+    Handles multiple storage formats across LangChain versions:
+      - {"type": "human"|"ai", "data": {"content": "..."}}
+      - {"type": "HumanMessage"|"AIMessage", "data": {"content": "..."}}
+      - {"type": "human"|"ai", "content": "..."}
+      - {"role": "user"|"assistant"|"human"|"ai", "content": "..."}
+    """
+    if not raw_message:
+        return None
     try:
         payload = json.loads(raw_message)
     except (TypeError, json.JSONDecodeError):
         return None
 
-    msg_type = payload.get("type")
-    content = ((payload.get("data") or {}).get("content")) if isinstance(payload, dict) else None
-    if msg_type not in {"human", "ai"} or not isinstance(content, str):
+    if not isinstance(payload, dict):
         return None
+
+    # Normalise the type/role field
+    raw_type = (payload.get("type") or payload.get("role") or "").lower()
+    _HUMAN_ALIASES = {"human", "humanmessage", "user"}
+    _AI_ALIASES    = {"ai", "aimessage", "assistant", "bot", "system"}
+    if raw_type in _HUMAN_ALIASES:
+        msg_type = "human"
+    elif raw_type in _AI_ALIASES:
+        msg_type = "ai"
+    else:
+        return None
+
+    # Try data.content first (older LangChain), then top-level content
+    data_block = payload.get("data")
+    if isinstance(data_block, dict):
+        content = data_block.get("content")
+    else:
+        content = payload.get("content")
+
+    if not isinstance(content, str):
+        # Last resort: stringify whatever is there
+        if content is not None:
+            content = str(content)
+        else:
+            return None
+
     return msg_type, content
 
 
