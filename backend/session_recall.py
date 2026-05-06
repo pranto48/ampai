@@ -258,3 +258,34 @@ def get_fts_stats() -> Dict[str, Any]:
         }
     finally:
         conn.close()
+
+
+def get_session_recall_messages(session_id: str, limit: int = 500) -> List[Dict[str, Any]]:
+    """Return indexed recall turns for a session as a fallback conversation history source."""
+    if not session_id:
+        return []
+    ensure_session_recall_tables()
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT session_id, role, content, created_at
+            FROM session_recall_fts
+            WHERE session_id = ?
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (session_id, max(1, min(int(limit), 2000))),
+        ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            role = (r["role"] or "").lower()
+            msg_type = "human" if role in {"human", "user"} else "ai"
+            out.append({
+                "type": msg_type,
+                "content": r["content"] or "",
+                "created_at": r["created_at"],
+            })
+        return out
+    finally:
+        conn.close()

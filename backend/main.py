@@ -142,7 +142,7 @@ from database import (
     engine,
 )
 from memory_persistence import memory_persistence_manager
-from session_recall import index_chat_turn, search_recall, search_recall_hybrid, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions
+from session_recall import index_chat_turn, search_recall, search_recall_hybrid, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions, get_session_recall_messages
 from integrations.telegram_api import get_me, set_webhook, delete_webhook, send_message
 from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
@@ -3349,6 +3349,11 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
                         mapped.append({"type": role, "content": content})
                 if mapped:
                     messages = mapped
+            except Exception:
+                pass
+        if not messages:
+            try:
+                messages = get_session_recall_messages(session_id=session_id, limit=500)
             except Exception:
                 pass
         log_audit_event(username=user.username, action="memory.read.history", session_id=session_id, details=f"count={len(messages)}")
