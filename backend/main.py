@@ -412,6 +412,15 @@ class ImportRequest(BaseModel):
 class ConfigUpdateRequest(BaseModel):
     configs: Dict[str, str]
 
+class AdminSettingsExportRequest(BaseModel):
+    include_secrets: bool = False
+    confirm_include_secrets: bool = False
+
+class AdminSettingsImportRequest(BaseModel):
+    configs: Dict[str, Any]
+    dry_run: bool = True
+    conflict_strategy: str = "skip"  # skip|overwrite
+
 class OrphanAdoptionRunRequest(BaseModel):
     force: bool = False
     batch_size: int = 100
@@ -3414,6 +3423,85 @@ def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admi
         saved.append(k)
     log_audit_event(username=user.username, action="admin.configs.update", details=f"saved={len(saved)};skipped={len(skipped)}")
     return {"status": "success", "saved": saved, "skipped": skipped}
+
+
+@app.get("/api/admin/settings/export")
+def export_admin_settings(
+    include_secrets: bool = Query(default=False),
+    confirm_include_secrets: bool = Query(default=False),
+    user: UserContext = Depends(require_admin_user),
+):
+    if include_secrets and not confirm_include_secrets:
+        raise HTTPException(status_code=400, detail="include_secrets=true requires confirm_include_secrets=true")
+    raw_configs = get_all_configs()
+    exported: Dict[str, str] = {}
+    redacted: List[str] = []
+    for key, value in raw_configs.items():
+        safe_value = value or ""
+        is_secret = key in SECRET_CONFIG_KEYS or "api_key" in key or "password" in key
+        if is_secret and not include_secrets:
+            redacted.append(key)
+            continue
+        exported[key] = safe_value
+    log_audit_event(
+        username=user.username,
+        action="admin.settings.export",
+        details=f"include_secrets={include_secrets};exported={len(exported)};redacted={len(redacted)}",
+    )
+    return {
+        "configs": exported,
+        "meta": {
+            "include_secrets": include_secrets,
+            "redacted_keys": sorted(redacted),
+            "exported_key_count": len(exported),
+        },
+    }
+
+
+@app.post("/api/admin/settings/import")
+def import_admin_settings(request: AdminSettingsImportRequest, user: UserContext = Depends(require_admin_user)):
+    strategy = (request.conflict_strategy or "skip").strip().lower()
+    if strategy not in {"skip", "overwrite"}:
+        raise HTTPException(status_code=400, detail="conflict_strategy must be skip or overwrite")
+    incoming = request.configs or {}
+    if not isinstance(incoming, dict):
+        raise HTTPException(status_code=400, detail="configs must be an object of key/value pairs")
+    existing = get_all_configs()
+    results: List[Dict[str, Any]] = []
+    summary = {"created": 0, "updated": 0, "skipped_conflict": 0, "skipped_invalid": 0, "unchanged": 0}
+    to_apply: List[tuple[str, str]] = []
+    for key, raw_value in sorted(incoming.items(), key=lambda kv: kv[0]):
+        normalized_key = (key or "").strip()
+        if not normalized_key:
+            summary["skipped_invalid"] += 1
+            results.append({"key": key, "status": "skipped_invalid", "reason": "empty key"})
+            continue
+        value = "" if raw_value is None else str(raw_value)
+        current = existing.get(normalized_key)
+        if current is None:
+            status = "created"
+            summary["created"] += 1
+            to_apply.append((normalized_key, value))
+        elif current == value:
+            status = "unchanged"
+            summary["unchanged"] += 1
+        elif strategy == "skip":
+            status = "skipped_conflict"
+            summary["skipped_conflict"] += 1
+        else:
+            status = "updated"
+            summary["updated"] += 1
+            to_apply.append((normalized_key, value))
+        results.append({"key": normalized_key, "status": status, "previous": current, "incoming": value})
+    if not request.dry_run:
+        for key, value in to_apply:
+            set_config(key, value)
+    log_audit_event(
+        username=user.username,
+        action="admin.settings.import",
+        details=f"dry_run={request.dry_run};strategy={strategy};keys={len(incoming)};changes={len(to_apply)}",
+    )
+    return {"dry_run": request.dry_run, "conflict_strategy": strategy, "summary": summary, "results": results}
 
 
 @app.post("/api/admin/change-password")
