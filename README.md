@@ -95,11 +95,6 @@ Starter assets in this repo:
 - Docker release workflow: `.github/workflows/release-docker.yml`
 - CI/CD release pipeline guide: `RELEASE_PIPELINE.md`
 
-## Download UX
-
-- Website downloads page template: `frontend/downloads.html`
-- Migration guide: `MIGRATION_GUIDE.md`
-
 ## Installation & quick start
 
 ## Prerequisites
