@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional
+
+from backend.policy.repo_edit_policy import RepoEditPolicy, RepoEditPolicyError
 from urllib import error, request
 
 JobStatus = Literal[
@@ -62,6 +64,8 @@ class OrchestratorJob:
     pr_url: Optional[str] = None
     changed_files: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    risk_score: int = 0
+    pr_labels: List[str] = field(default_factory=list)
 
 
 class RepoEditOrchestrator:
@@ -74,6 +78,7 @@ class RepoEditOrchestrator:
         self.github_token = github_token
         self.planner = planner
         self.api_base = api_base.rstrip("/")
+        self.policy = RepoEditPolicy()
 
     def run(self, instruction: str, context: RepoTargetContext) -> OrchestratorJob:
         job = self._new_job(instruction, context)
@@ -83,7 +88,7 @@ class RepoEditOrchestrator:
             plan = self.planner(instruction, context, snapshot)
 
             job = self._set_phase(job, "editing")
-            self._validate_plan(plan, context)
+            decision = self._validate_plan(plan, context)
 
             job = self._set_phase(job, "validating")
             workspace = self._apply_plan(plan, snapshot)
@@ -94,7 +99,7 @@ class RepoEditOrchestrator:
             changed_files = sorted(plan.files_to_modify)
             self._push_branch(context, branch_name, workspace, commit_message)
 
-            pr_payload = self._build_pr_payload(plan, context, branch_name, changed_files, instruction)
+            pr_payload = self._build_pr_payload(plan, context, branch_name, changed_files, instruction, decision.labels, decision.risk_score)
             pr_response = self._open_pr(context, pr_payload)
 
             job.status = "pr_opened"
@@ -102,6 +107,8 @@ class RepoEditOrchestrator:
             job.branch_name = branch_name
             job.pr_url = pr_response.get("html_url")
             job.changed_files = changed_files
+            job.risk_score = decision.risk_score
+            job.pr_labels = decision.labels
             job.updated_at = datetime.now(timezone.utc).isoformat()
             return job
         except Exception as exc:  # noqa: BLE001
@@ -154,7 +161,7 @@ class RepoEditOrchestrator:
         )
         return base64.b64decode(payload["content"]).decode("utf-8")
 
-    def _validate_plan(self, plan: EditPlan, context: RepoTargetContext) -> None:
+    def _validate_plan(self, plan: EditPlan, context: RepoTargetContext):
         allowed = tuple(context.allow_paths)
         for hunk in plan.patch_hunks:
             if allowed and not hunk.file_path.startswith(allowed):
@@ -164,6 +171,11 @@ class RepoEditOrchestrator:
             if len(hunk.content.encode("utf-8")) > int(context.constraints.get("max_file_bytes", 500_000)):
                 raise ValueError(f"Patched file too large: {hunk.file_path}")
             self._syntax_heuristics(hunk.file_path, hunk.content)
+
+        decision = self.policy.evaluate(plan, context)
+        if not decision.allowed:
+            raise RepoEditPolicyError("; ".join(decision.rejection_reasons))
+        return decision
 
     def _syntax_heuristics(self, path: str, content: str) -> None:
         if path.endswith(".py"):
@@ -204,6 +216,8 @@ class RepoEditOrchestrator:
         branch_name: str,
         changed_files: List[str],
         instruction: str,
+        labels: List[str],
+        risk_score: int,
     ) -> Dict[str, str]:
         summary = plan.summary or f"Automated repository edits for: {instruction}"
         risks = plan.risk_notes or "Review generated edits carefully before merge."
@@ -212,6 +226,8 @@ class RepoEditOrchestrator:
             f"## Summary\n{summary}\n\n"
             f"## Rationale\n{plan.rationale}\n\n"
             f"## Risk Notes\n{risks}\n\n"
+            f"## Policy Labels\n{", ".join(labels)}\n\n"
+            f"## Risk Score\n{risk_score}\n\n"
             f"## Changed Files\n{files_list}\n"
         )
         return {
