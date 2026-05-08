@@ -1,8 +1,11 @@
 from typing import Optional
+import uuid
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from audit.records import list_activity_report
+from observability.metrics import METRICS
 from .service import GitHubIntegrationService
 
 router = APIRouter(tags=["github"])
@@ -51,3 +54,31 @@ def github_repo_select(req: RepoSelectionRequest):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"selected": {"owner": req.owner, "repo": req.repo}, "capabilities": caps}
+
+
+class RevertRequest(BaseModel):
+    owner: str
+    repo: str
+    commit_sha: str
+    base_branch: str = "main"
+
+
+@router.post("/github/repo/revert-pr")
+def github_revert_pr(req: RevertRequest):
+    service = GitHubIntegrationService()
+    trace_id = str(uuid.uuid4())
+    try:
+        pr = service.open_revert_pr(req.owner, req.repo, req.commit_sha, req.base_branch, trace_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"trace_id": trace_id, "pull_request": pr}
+
+
+@router.get("/admin/ai-edit-activity")
+def admin_ai_edit_activity(limit: int = 200):
+    return {"items": list_activity_report(limit=limit)}
+
+
+@router.get("/admin/ai-edit-metrics")
+def admin_ai_edit_metrics():
+    return METRICS.snapshot()
