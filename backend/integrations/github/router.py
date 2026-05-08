@@ -1,9 +1,11 @@
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .service import GitHubIntegrationService
+from backend.jobs_repo_edit import manager, stream_events
 
 router = APIRouter(tags=["github"])
 
@@ -51,3 +53,39 @@ def github_repo_select(req: RepoSelectionRequest):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"selected": {"owner": req.owner, "repo": req.repo}, "capabilities": caps}
+
+
+class RepoEditRequest(BaseModel):
+    github_token: str
+    instruction: str
+    context: dict
+    max_attempts: int = 4
+
+
+@router.post("/github/repo-edit/jobs")
+def enqueue_repo_edit(req: RepoEditRequest, idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    job = manager.enqueue(req.model_dump(), idempotency_key=idempotency_key)
+    return {"job_id": job["id"], "status": job["status"], "idempotency_key": idempotency_key}
+
+
+@router.get("/github/repo-edit/jobs/{job_id}")
+def get_repo_edit_job(job_id: str):
+    job = manager.store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job": job}
+
+
+@router.post("/github/repo-edit/jobs/{job_id}/cancel")
+def cancel_repo_edit_job(job_id: str):
+    job = manager.cancel(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job": job}
+
+
+@router.get("/github/repo-edit/jobs/{job_id}/events")
+def stream_repo_edit_job(job_id: str):
+    if not manager.store.get_job(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return StreamingResponse(stream_events(job_id), media_type="text/event-stream")
