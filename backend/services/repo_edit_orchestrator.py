@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
 import shutil
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from ai.providers import AIProvider, ProviderError, resolve_provider
+from audit.records import write_immutable_record
+from observability.logging import emit_structured
+from observability.metrics import METRICS
 from urllib import error, request
 
 JobStatus = Literal[
@@ -63,6 +68,8 @@ class OrchestratorJob:
     updated_at: str
     branch_name: Optional[str] = None
     pr_url: Optional[str] = None
+    trace_id: Optional[str] = None
+    commit_sha: Optional[str] = None
     changed_files: List[str] = field(default_factory=list)
     error: Optional[str] = None
 
@@ -84,6 +91,8 @@ class RepoEditOrchestrator:
 
     def run(self, instruction: str, context: RepoTargetContext) -> OrchestratorJob:
         job = self._new_job(instruction, context)
+        METRICS.start_job(job.id)
+        emit_structured("repo_edit_job_started", job.trace_id or job.id, repo=f"{context.owner}/{context.repo}")
         try:
             job = self._set_phase(job, "planning")
             snapshot = self._fetch_snapshot(context)
@@ -99,7 +108,7 @@ class RepoEditOrchestrator:
             branch_name = self._branch_name(instruction)
             commit_message = self._build_commit_message(plan, instruction)
             changed_files = sorted(plan.files_to_modify)
-            self._push_branch(context, branch_name, workspace, commit_message)
+            commit_sha = self._push_branch(context, branch_name, workspace, commit_message)
 
             pr_payload = self._build_pr_payload(plan, context, branch_name, changed_files, instruction)
             pr_response = self._open_pr(context, pr_payload)
@@ -108,13 +117,19 @@ class RepoEditOrchestrator:
             job.phase = "pr_opened"
             job.branch_name = branch_name
             job.pr_url = pr_response.get("html_url")
+            job.commit_sha = commit_sha
             job.changed_files = changed_files
+            self._record_audit(job, changed_files)
+            METRICS.end_job(job.id, success=True, policy_rejected=False)
+            emit_structured("repo_edit_job_completed", job.trace_id or job.id, pr_url=job.pr_url, commit_sha=job.commit_sha)
             job.updated_at = datetime.now(timezone.utc).isoformat()
             return job
         except Exception as exc:  # noqa: BLE001
             job.status = "failed"
             job.phase = "failed"
             job.error = str(exc)
+            METRICS.end_job(job.id, success=False, policy_rejected="Path not allowed" in str(exc))
+            emit_structured("repo_edit_job_failed", job.trace_id or job.id, error=str(exc))
             job.updated_at = datetime.now(timezone.utc).isoformat()
             return job
 
@@ -168,6 +183,7 @@ class RepoEditOrchestrator:
         now = datetime.now(timezone.utc).isoformat()
         return OrchestratorJob(
             id=f"job_{int(datetime.now(timezone.utc).timestamp())}",
+            trace_id=str(uuid.uuid4()),
             status="queued",
             phase="queued",
             context=context,
@@ -274,10 +290,12 @@ class RepoEditOrchestrator:
             "body": body,
         }
 
-    def _push_branch(self, context: RepoTargetContext, branch_name: str, workspace: str, commit_message: str) -> None:
+    def _push_branch(self, context: RepoTargetContext, branch_name: str, workspace: str, commit_message: str) -> str:
         # Stub integration point for local git flow; implement with subprocess in deployment.
         _ = (context, branch_name, workspace, commit_message)
+        pseudo_commit = hashlib.sha1(f"{branch_name}:{commit_message}".encode("utf-8")).hexdigest()
         shutil.rmtree(workspace, ignore_errors=True)
+        return pseudo_commit
 
     def _open_pr(self, context: RepoTargetContext, payload: Dict[str, str]) -> Dict[str, Any]:
         return self._github_post(f"/repos/{context.owner}/{context.repo}/pulls", payload)
@@ -310,6 +328,19 @@ class RepoEditOrchestrator:
             raw = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"GitHub POST failed {exc.code}: {raw}") from exc
 
+
+    def _record_audit(self, job: OrchestratorJob, changed_files: List[str]) -> None:
+        write_immutable_record({
+            "trace_id": job.trace_id or job.id,
+            "workspace": self.workspace_config.get("workspace", "default"),
+            "repository": f"{job.context.owner}/{job.context.repo}",
+            "username": self.workspace_config.get("username", "system"),
+            "prompt": job.instruction,
+            "selected_files": changed_files,
+            "model_provider": getattr(self.provider, "name", self.provider.__class__.__name__),
+            "commit_sha": job.commit_sha,
+            "pr_url": job.pr_url,
+        })
     def _headers(self) -> Dict[str, str]:
         return {
             "Accept": "application/vnd.github+json",
