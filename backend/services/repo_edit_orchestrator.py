@@ -72,6 +72,8 @@ class OrchestratorJob:
     commit_sha: Optional[str] = None
     changed_files: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    risk_score: int = 0
+    pr_labels: List[str] = field(default_factory=list)
 
 
 class RepoEditOrchestrator:
@@ -86,8 +88,7 @@ class RepoEditOrchestrator:
         self.github_token = github_token
         self.planner = planner
         self.api_base = api_base.rstrip("/")
-        self.workspace_config = workspace_config or {}
-        self.provider = provider or resolve_provider(self.workspace_config)
+        self.policy = RepoEditPolicy()
 
     def run(self, instruction: str, context: RepoTargetContext) -> OrchestratorJob:
         job = self._new_job(instruction, context)
@@ -99,7 +100,7 @@ class RepoEditOrchestrator:
             plan = self._build_plan(instruction, context, snapshot, job.id)
 
             job = self._set_phase(job, "editing")
-            self._validate_plan(plan, context)
+            decision = self._validate_plan(plan, context)
 
             job = self._set_phase(job, "validating")
             workspace = self._apply_plan(plan, snapshot)
@@ -110,7 +111,7 @@ class RepoEditOrchestrator:
             changed_files = sorted(plan.files_to_modify)
             commit_sha = self._push_branch(context, branch_name, workspace, commit_message)
 
-            pr_payload = self._build_pr_payload(plan, context, branch_name, changed_files, instruction)
+            pr_payload = self._build_pr_payload(plan, context, branch_name, changed_files, instruction, decision.labels, decision.risk_score)
             pr_response = self._open_pr(context, pr_payload)
 
             job.status = "pr_opened"
@@ -223,7 +224,7 @@ class RepoEditOrchestrator:
         )
         return base64.b64decode(payload["content"]).decode("utf-8")
 
-    def _validate_plan(self, plan: EditPlan, context: RepoTargetContext) -> None:
+    def _validate_plan(self, plan: EditPlan, context: RepoTargetContext):
         allowed = tuple(context.allow_paths)
         for hunk in plan.patch_hunks:
             if allowed and not hunk.file_path.startswith(allowed):
@@ -233,6 +234,11 @@ class RepoEditOrchestrator:
             if len(hunk.content.encode("utf-8")) > int(context.constraints.get("max_file_bytes", 500_000)):
                 raise ValueError(f"Patched file too large: {hunk.file_path}")
             self._syntax_heuristics(hunk.file_path, hunk.content)
+
+        decision = self.policy.evaluate(plan, context)
+        if not decision.allowed:
+            raise RepoEditPolicyError("; ".join(decision.rejection_reasons))
+        return decision
 
     def _syntax_heuristics(self, path: str, content: str) -> None:
         if path.endswith(".py"):
@@ -273,6 +279,8 @@ class RepoEditOrchestrator:
         branch_name: str,
         changed_files: List[str],
         instruction: str,
+        labels: List[str],
+        risk_score: int,
     ) -> Dict[str, str]:
         summary = plan.summary or f"Automated repository edits for: {instruction}"
         risks = plan.risk_notes or "Review generated edits carefully before merge."
@@ -281,6 +289,8 @@ class RepoEditOrchestrator:
             f"## Summary\n{summary}\n\n"
             f"## Rationale\n{plan.rationale}\n\n"
             f"## Risk Notes\n{risks}\n\n"
+            f"## Policy Labels\n{", ".join(labels)}\n\n"
+            f"## Risk Score\n{risk_score}\n\n"
             f"## Changed Files\n{files_list}\n"
         )
         return {
