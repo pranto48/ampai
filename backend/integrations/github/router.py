@@ -1,9 +1,12 @@
 from typing import Optional
+import uuid
 
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from audit.records import list_activity_report
+from observability.metrics import METRICS
 from .service import GitHubIntegrationService
 from backend.jobs_repo_edit import manager, stream_events
 

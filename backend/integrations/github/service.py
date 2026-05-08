@@ -131,6 +131,20 @@ class GitHubIntegrationService:
         token = self.access_token()
         return _json_request(f"{GITHUB_API}/repos/{owner}/{repo}/pulls", method="POST", payload={"title": title, "head": head, "base": base, "body": body}, headers={"Authorization": f"Bearer {token}"})
 
+
+    def open_revert_pr(self, owner: str, repo: str, commit_sha: str, base_branch: str, trace_id: str) -> Dict[str, Any]:
+        self.ensure_edit_permissions()
+        token = self.access_token()
+        branch = f"revert/{commit_sha[:12]}"
+        self.create_branch(owner, repo, branch, base_branch)
+        title = f"revert: {commit_sha[:12]}"
+        body = f"Automated rollback for commit `{commit_sha}`.\n\nTrace ID: `{trace_id}`"
+        return _json_request(
+            f"{GITHUB_API}/repos/{owner}/{repo}/pulls",
+            method="POST",
+            payload={"title": title, "head": branch, "base": base_branch, "body": body},
+            headers={"Authorization": f"Bearer {token}"},
+        )
     def comment_on_pr_with_ai_summary(self, owner: str, repo: str, pr_number: int, summary: str) -> Dict[str, Any]:
         self.ensure_edit_permissions()
         token = self.access_token()
