@@ -289,7 +289,7 @@ class RepoEditOrchestrator:
             f"## Summary\n{summary}\n\n"
             f"## Rationale\n{plan.rationale}\n\n"
             f"## Risk Notes\n{risks}\n\n"
-            f"## Policy Labels\n{", ".join(labels)}\n\n"
+            f"## Policy Labels\n{', '.join(labels)}\n\n"
             f"## Risk Score\n{risk_score}\n\n"
             f"## Changed Files\n{files_list}\n"
         )
