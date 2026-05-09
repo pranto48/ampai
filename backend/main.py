@@ -148,6 +148,7 @@ from integrations.gmail_api import (
     fetch_todays_messages as fetch_gmail_todays_messages,
     refresh_access_token as refresh_gmail_access_token,
 )
+from integrations.github import router as github_router
 
 from scheduler import start_scheduler, run_network_sweep
 from backup_helpers import (
@@ -167,6 +168,7 @@ from langchain_community.chat_message_histories import SQLChatMessageHistory
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+app.include_router(github_router)
 
 # Add CORS middleware
 app.add_middleware(
