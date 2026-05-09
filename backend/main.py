@@ -5473,11 +5473,12 @@ async def api_fullbackup_restore_upload(
     tmp_dir = tempfile.mkdtemp(prefix="ampai_restore_")
     tmp_zip = os.path.join(tmp_dir, "uploaded_full_backup.zip")
     try:
-        content = await backup_file.read()
-        if not content:
-            raise HTTPException(status_code=400, detail="Uploaded backup file is empty")
         with open(tmp_zip, "wb") as f:
-            f.write(content)
+            import shutil
+            shutil.copyfileobj(backup_file.file, f)
+        
+        if os.path.getsize(tmp_zip) == 0:
+            raise HTTPException(status_code=400, detail="Uploaded backup file is empty")
 
         try:
             zf_ctx = zipfile.ZipFile(tmp_zip)
