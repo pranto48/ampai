@@ -1,0 +1,80 @@
+name: release-windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive semantic version
+        id: semver
+        shell: powershell
+        run: |
+          $raw = "${env:GITHUB_REF_NAME}"
+          $version = $raw.TrimStart('v')
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build backend
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File packaging/windows/scripts/build_backend.ps1
+
+      - name: Build frontend
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File packaging/windows/scripts/build_frontend.ps1
+
+      - name: Stage release files
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File packaging/windows/scripts/stage_release.ps1
+
+      - name: Build Tauri app
+        working-directory: desktop/tauri
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build installer
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File packaging/windows/scripts/build_installer.ps1
+
+      - name: Optional code signing
+        if: ${{ secrets.WINDOWS_SIGN_CERT_BASE64 != '' && secrets.WINDOWS_SIGN_CERT_PASSWORD != '' }}
+        shell: powershell
+        run: |
+          $certPath = "$env:RUNNER_TEMP\codesign.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String("${{ secrets.WINDOWS_SIGN_CERT_BASE64 }}"))
+          $installer = Get-ChildItem dist/windows/*.exe | Select-Object -First 1
+          & signtool sign /f $certPath /p "${{ secrets.WINDOWS_SIGN_CERT_PASSWORD }}" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $installer.FullName
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ampai-windows-installer
+          path: dist/windows/*.exe
+
+      - name: Publish GitHub Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/windows/*.exe
