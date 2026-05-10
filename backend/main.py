@@ -1,156 +1,30 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-import logging
+import base64
 import hashlib
 import json
+import logging
 import os
-import base64
-import json
+import re
+import shutil
 import sqlite3
 import tempfile
-from typing import List, Dict, Optional, Any
-from datetime import datetime, timedelta, timezone
-import shutil
-import uuid
+import threading
+import time
 import urllib.parse
 import urllib.request
-import time
-import re
-import threading
+import uuid
 import zipfile
-from queue import Queue, Empty
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
-
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import FileResponse, HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from pydantic import BaseModel
-from redis import Redis
-from sqlalchemy import text
+from queue import Empty, Queue
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
-from core.logging import configure_logging
 
+from agent import (
+    _extract_explicit_memory_request,
+    chat_with_agent,
+    get_llm,
+    get_redis_history,
+)
 from auth import bootstrap_default_admin
-from agent import chat_with_agent, get_llm, get_redis_history, _extract_explicit_memory_request
-from memory_indexer import MemoryIndexer
-from database import (
-    add_core_memory,
-    add_network_target,
-    create_task,
-    delete_core_memory,
-    update_core_memory,
-    delete_network_target,
-    delete_session_metadata,
-    delete_task,
-    get_all_configs,
-    get_all_sessions,
-    get_config,
-    get_core_memories,
-    get_memory_candidate_by_id,
-    get_network_targets,
-    get_duplicate_message_counts,
-    get_or_create_telegram_user,
-    get_user,
-    list_users as db_list_users,
-    create_user as db_create_user,
-    update_user as db_update_user,
-    delete_user as db_delete_user,
-    ensure_default_users,
-    add_media_asset,
-    list_media_assets,
-    create_memory_group,
-    add_user_to_memory_group,
-    share_session_to_group,
-    get_memory_group_members,
-    get_memory_group_sessions,
-    remove_user_from_memory_group,
-    unshare_session_from_group,
-    memory_group_membership_exists,
-    memory_group_session_share_exists,
-    session_exists,
-    memory_group_exists,
-    list_memory_groups_for_user,
-    list_shared_sessions_for_user,
-    get_session_owner,
-    session_exists,
-    set_session_owner,
-    user_can_access_session,
-    export_all_sessions_for_backup,
-    ensure_session_owner,
-    find_report_matches,
-    build_session_report_card,
-    get_accessible_session_ids,
-    list_chat_messages,
-    get_sql_chat_history,
-    list_tasks,
-    list_personas,
-    migrate_app_config_encryption,
-    set_config,
-    set_session_archived,
-    set_session_category,
-    set_session_pinned,
-    touch_session,
-    touch_session_updated_at,
-    update_memory_candidate_status,
-    update_task,
-    log_audit_event,
-    apply_retention_policy,
-    upsert_session_insight,
-    get_session_insight,
-    list_audit_events,
-    get_memory_analytics,
-    get_effective_notification_preferences,
-    get_effective_memory_policy,
-    get_effective_chat_preferences,
-    list_backup_profiles,
-    create_backup_profile,
-    update_backup_profile,
-    delete_backup_profile,
-    get_backup_profile,
-    create_backup_job,
-    update_backup_job,
-    list_backup_jobs,
-    get_backup_job,
-    get_backup_verification_kpis,
-    engine as db_engine,
-    CHAT_HISTORY_TABLE,
-    create_restore_job,
-    update_restore_job,
-    list_restore_jobs,
-    lookup_username_by_telegram_user_id,
-    get_restore_job,
-    upsert_user_notification_preferences,
-    upsert_user_memory_policy,
-    upsert_user_chat_preferences,
-    enqueue_pending_reply_notification,
-    create_persona,
-    update_persona,
-    delete_persona,
-    get_memory_rollup_metrics,
-    list_curator_nudges,
-    acknowledge_curator_nudge,
-    create_agent_skill,
-    list_agent_skills,
-    ensure_skill_registry_tables,
-    record_skill_run,
-    get_skill_performance,
-    create_skill_version,
-    engine,
-)
-from memory_persistence import memory_persistence_manager
-from session_recall import index_chat_turn, search_recall, search_recall_hybrid, summarize_hits, search_and_summarize, get_fts_stats, bulk_index_unindexed_sessions, get_session_recall_messages
-from integrations.telegram_api import get_me, set_webhook, delete_webhook, send_message
-from integrations.gmail_api import (
-    fetch_todays_messages as fetch_gmail_todays_messages,
-    refresh_access_token as refresh_gmail_access_token,
-)
-from integrations.github import router as github_router
-
-from scheduler import start_scheduler, run_network_sweep
 from backup_helpers import (
     build_backup_payload,
     test_ftp_connection,
@@ -159,21 +33,193 @@ from backup_helpers import (
     write_backup_local,
     write_backup_smb,
 )
-from langchain_community.chat_message_histories import SQLChatMessageHistory
+from core.logging import configure_logging
+from database import (
+    CHAT_HISTORY_TABLE,
+    acknowledge_curator_nudge,
+    add_core_memory,
+    add_media_asset,
+    add_network_target,
+    add_user_to_memory_group,
+    apply_retention_policy,
+    build_session_report_card,
+    create_agent_skill,
+    create_backup_job,
+    create_backup_profile,
+    create_memory_group,
+    create_persona,
+    create_restore_job,
+    create_skill_version,
+    create_task,
+    delete_backup_profile,
+    delete_core_memory,
+    delete_network_target,
+    delete_persona,
+    delete_session_metadata,
+    delete_task,
+    engine,
+    enqueue_pending_reply_notification,
+    ensure_default_users,
+    ensure_session_owner,
+    ensure_skill_registry_tables,
+    export_all_sessions_for_backup,
+    find_report_matches,
+    get_accessible_session_ids,
+    get_all_configs,
+    get_all_sessions,
+    get_backup_job,
+    get_backup_profile,
+    get_backup_verification_kpis,
+    get_config,
+    get_core_memories,
+    get_duplicate_message_counts,
+    get_effective_chat_preferences,
+    get_effective_memory_policy,
+    get_effective_notification_preferences,
+    get_memory_analytics,
+    get_memory_candidate_by_id,
+    get_memory_group_members,
+    get_memory_group_sessions,
+    get_memory_rollup_metrics,
+    get_network_targets,
+    get_or_create_telegram_user,
+    get_restore_job,
+    get_session_insight,
+    get_session_owner,
+    get_skill_performance,
+    get_sql_chat_history,
+    get_user,
+    list_agent_skills,
+    list_audit_events,
+    list_backup_jobs,
+    list_backup_profiles,
+    list_chat_messages,
+    list_curator_nudges,
+    list_media_assets,
+    list_memory_groups_for_user,
+    list_personas,
+    list_restore_jobs,
+    list_shared_sessions_for_user,
+    list_tasks,
+    log_audit_event,
+    lookup_username_by_telegram_user_id,
+    memory_group_exists,
+    memory_group_membership_exists,
+    memory_group_session_share_exists,
+    migrate_app_config_encryption,
+    record_skill_run,
+    remove_user_from_memory_group,
+    session_exists,
+    set_config,
+    set_session_archived,
+    set_session_category,
+    set_session_owner,
+    set_session_pinned,
+    share_session_to_group,
+    touch_session,
+    touch_session_updated_at,
+    unshare_session_from_group,
+    update_backup_job,
+    update_backup_profile,
+    update_core_memory,
+    update_memory_candidate_status,
+    update_persona,
+    update_restore_job,
+    update_task,
+    upsert_session_insight,
+    upsert_user_chat_preferences,
+    upsert_user_memory_policy,
+    upsert_user_notification_preferences,
+    user_can_access_session,
+)
+from database import (
+    create_user as db_create_user,
+)
+from database import (
+    delete_user as db_delete_user,
+)
+from database import (
+    engine as db_engine,
+)
+from database import (
+    list_users as db_list_users,
+)
+from database import (
+    update_user as db_update_user,
+)
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
+
 # NOTE:
 # This file provides the active auth endpoints used by the frontend app.
 # We intentionally do not include auth.py routers to avoid duplicate/conflicting
 # /api/auth and /api/admin/users route registrations.
-
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
+from integrations.github import router as github_router
+from integrations.gmail_api import (
+    fetch_todays_messages as fetch_gmail_todays_messages,
+)
+from integrations.gmail_api import (
+    refresh_access_token as refresh_gmail_access_token,
+)
+from integrations.telegram_api import delete_webhook, get_me, send_message, set_webhook
+from jose import JWTError, jwt
+from langchain_community.chat_message_histories import SQLChatMessageHistory
+from memory_indexer import MemoryIndexer
+from memory_persistence import memory_persistence_manager
+from passlib.context import CryptContext
+from pydantic import BaseModel
+from redis import Redis
+from scheduler import run_network_sweep, start_scheduler
+from session_recall import (
+    bulk_index_unindexed_sessions,
+    get_fts_stats,
+    get_session_recall_messages,
+    index_chat_turn,
+    search_and_summarize,
+    search_recall,
+    search_recall_hybrid,
+    summarize_hits,
+)
+from sqlalchemy import text
 
 app = FastAPI()
 app.include_router(github_router)
 
 # Add CORS middleware
+# CORS — allow the Tauri desktop client plus any localhost port.
+# Set ALLOWED_ORIGINS env var to a comma-separated list to override.
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
+if _raw_origins:
+    _cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+else:
+    _cors_origins = [
+        "http://localhost:8000",
+        "http://localhost:8001",
+        "http://localhost:18000",
+        "http://127.0.0.1:8000",
+        "http://127.0.0.1:8001",
+        "http://127.0.0.1:18000",
+        "tauri://localhost",
+        "https://tauri.localhost",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8000"],  # Frontend origin
+    allow_origins=_cors_origins,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -196,11 +242,19 @@ JWT_REMEMBER_ME_DAYS = int(os.getenv("JWT_REMEMBER_ME_DAYS", "30"))
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 SECRET_CONFIG_KEYS = {
-    "openai_api_key", "gemini_api_key", "anthropic_api_key",
-    "openrouter_api_key", "anythingllm_api_key", "serpapi_api_key",
-    "resend_api_key", "backup_ftp_password", "backup_smb_password",
-    "bing_api_key", "generic_api_key",
-    "telegram_bot_token", "telegram_webhook_secret",
+    "openai_api_key",
+    "gemini_api_key",
+    "anthropic_api_key",
+    "openrouter_api_key",
+    "anythingllm_api_key",
+    "serpapi_api_key",
+    "resend_api_key",
+    "backup_ftp_password",
+    "backup_smb_password",
+    "bing_api_key",
+    "generic_api_key",
+    "telegram_bot_token",
+    "telegram_webhook_secret",
 }
 RESTORE_PREFLIGHT_CACHE: Dict[str, Dict[str, Any]] = {}
 RESTORE_PREFLIGHT_TTL_SECONDS = 15 * 60
@@ -226,13 +280,12 @@ class ChatRequest(BaseModel):
     api_key: Optional[str] = None
     model_name: Optional[str] = None
     memory_mode: str = "indexed"
-    memory_top_k: int = 5
+    memory_top_k: Optional[int] = 5
     memory_recency_bias: float = 0.0
     memory_category_filter: Optional[str] = ""
     persona_id: Optional[str] = None
     use_web_search: bool = False
     attachments: List[Attachment] = []
-    memory_top_k: Optional[int] = None
     recency_bias: Optional[float] = None
     category_filter: Optional[str] = None
     chat_output_mode: Optional[str] = None
@@ -305,22 +358,32 @@ def _mask_telegram_token(token: str) -> str:
     return f"{normalized[:4]}...{normalized[-4:]}"
 
 
-def _telegram_api_call(method: str, bot_token: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _telegram_api_call(
+    method: str, bot_token: str, payload: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     token = (bot_token or "").strip()
     if not token:
-        raise HTTPException(status_code=400, detail="Telegram bot token is not configured")
+        raise HTTPException(
+            status_code=400, detail="Telegram bot token is not configured"
+        )
     url = f"https://api.telegram.org/bot{token}/{method}"
     data = None
     headers = {}
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST" if payload is not None else "GET")
+    req = urllib.request.Request(
+        url, data=data, headers=headers, method="POST" if payload is not None else "GET"
+    )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             parsed = json.loads((resp.read() or b"{}").decode("utf-8"))
     except Exception:
-        logger.exception("telegram api call failed: method=%s token=%s", method, _mask_telegram_token(token))
+        logger.exception(
+            "telegram api call failed: method=%s token=%s",
+            method,
+            _mask_telegram_token(token),
+        )
         raise
     if not isinstance(parsed, dict):
         raise HTTPException(status_code=502, detail="Invalid Telegram API response")
@@ -418,19 +481,21 @@ class ImportRequest(BaseModel):
 class ConfigUpdateRequest(BaseModel):
     configs: Dict[str, str]
 
+
 class AdminSettingsExportRequest(BaseModel):
     include_secrets: bool = False
     confirm_include_secrets: bool = False
+
 
 class AdminSettingsImportRequest(BaseModel):
     configs: Dict[str, Any]
     dry_run: bool = True
     conflict_strategy: str = "skip"  # skip|overwrite
 
+
 class OrphanAdoptionRunRequest(BaseModel):
     force: bool = False
     batch_size: int = 100
-
 
 
 class SessionRepairRequest(BaseModel):
@@ -672,7 +737,10 @@ def _can_manage_workspace(user: UserContext, workspace: Dict[str, Any]) -> bool:
     if user.role == "admin":
         return True
     for member in workspace.get("members", []):
-        if member.get("username") == user.username and member.get("role") in {"owner", "admin"}:
+        if member.get("username") == user.username and member.get("role") in {
+            "owner",
+            "admin",
+        }:
             return True
     return False
 
@@ -696,7 +764,9 @@ def _get_memory_policy(username: str) -> Dict[str, Any]:
     }
 
 
-def _create_memory_candidate(username: str, session_id: str, text: str, confidence: float = 0.5) -> Dict[str, Any]:
+def _create_memory_candidate(
+    username: str, session_id: str, text: str, confidence: float = 0.5
+) -> Dict[str, Any]:
     candidate = {
         "id": str(uuid.uuid4()),
         "username": username,
@@ -712,8 +782,12 @@ def _create_memory_candidate(username: str, session_id: str, text: str, confiden
 
 
 def _bootstrap_default_users() -> None:
-    admin_username = os.getenv("ADMIN_USERNAME") or os.getenv("AMPAI_DEFAULT_ADMIN_USERNAME", "admin")
-    admin_password = os.getenv("ADMIN_PASSWORD") or os.getenv("AMPAI_DEFAULT_ADMIN_PASSWORD", "P@ssw0rd")
+    admin_username = os.getenv("ADMIN_USERNAME") or os.getenv(
+        "AMPAI_DEFAULT_ADMIN_USERNAME", "admin"
+    )
+    admin_password = os.getenv("ADMIN_PASSWORD") or os.getenv(
+        "AMPAI_DEFAULT_ADMIN_PASSWORD", "P@ssw0rd"
+    )
 
     user_username = os.getenv("USER_USERNAME", "user")
     user_password = os.getenv("USER_PASSWORD", "user123")
@@ -733,7 +807,9 @@ def _bootstrap_default_users() -> None:
         ]
     )
     # Enforce configured/default admin credentials on startup for predictable first login.
-    db_update_user(admin_username, role="admin", password_hash=pwd_context.hash(admin_password))
+    db_update_user(
+        admin_username, role="admin", password_hash=pwd_context.hash(admin_password)
+    )
 
 
 def _load_integration_credentials(provider: str) -> Dict[str, str]:
@@ -756,11 +832,16 @@ def _send_resend_email(subject: str, body_text: str) -> bool:
     if not api_key or not from_email or not to_email:
         return False
 
-    payload = json.dumps({"from": from_email, "to": [to_email], "subject": subject, "text": body_text}).encode("utf-8")
+    payload = json.dumps(
+        {"from": from_email, "to": [to_email], "subject": subject, "text": body_text}
+    ).encode("utf-8")
     req = urllib.request.Request(
         "https://api.resend.com/emails",
         data=payload,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
         method="POST",
     )
     try:
@@ -819,7 +900,9 @@ def _profile_from_legacy_configs() -> Dict[str, Any]:
     }
 
 
-def _execute_backup(actor: str, trigger: str = "manual", profile: Optional[Dict[str, Any]] = None) -> Dict:
+def _execute_backup(
+    actor: str, trigger: str = "manual", profile: Optional[Dict[str, Any]] = None
+) -> Dict:
     backup_profile = profile or _profile_from_legacy_configs()
     backup_mode = (backup_profile.get("destination_type") or "local").strip().lower()
     sessions = export_all_sessions_for_backup()
@@ -836,19 +919,33 @@ def _execute_backup(actor: str, trigger: str = "manual", profile: Optional[Dict[
             remote_path = backup_profile.get("destination_path", "/")
             if not host or not user or not password:
                 raise ValueError("FTP backup is not fully configured")
-            outcome = write_backup_ftp(host, user, password, remote_path, filename, serialized, manifest)
+            outcome = write_backup_ftp(
+                host, user, password, remote_path, filename, serialized, manifest
+            )
         elif backup_mode == "smb":
             host = backup_profile.get("destination_host")
             share = (backup_profile.get("destination_path") or "").split("/", 1)[0]
             remote_path = ""
             if "/" in (backup_profile.get("destination_path") or ""):
-                remote_path = (backup_profile.get("destination_path") or "").split("/", 1)[1]
+                remote_path = (backup_profile.get("destination_path") or "").split(
+                    "/", 1
+                )[1]
             user = backup_profile.get("destination_username")
             password = _profile_destination_password(backup_profile)
             domain = ""
             if not host or not share or not user or not password:
                 raise ValueError("SMB backup is not fully configured")
-            outcome = write_backup_smb(host, share, remote_path, user, password, domain, filename, serialized, manifest)
+            outcome = write_backup_smb(
+                host,
+                share,
+                remote_path,
+                user,
+                password,
+                domain,
+                filename,
+                serialized,
+                manifest,
+            )
         else:
             local_dir = backup_profile.get("destination_path") or "/tmp/ampai_backups"
             outcome = write_backup_local(local_dir, filename, serialized, manifest)
@@ -867,7 +964,13 @@ def _execute_backup(actor: str, trigger: str = "manual", profile: Optional[Dict[
                 "message_count": manifest["message_count"],
             }
         )
-        return {"status": "success", **outcome, "manifest": manifest, "bytes_written": payload_bytes, "serialized_payload": serialized}
+        return {
+            "status": "success",
+            **outcome,
+            "manifest": manifest,
+            "bytes_written": payload_bytes,
+            "serialized_payload": serialized,
+        }
     except Exception as exc:
         _record_backup_status(
             {
@@ -883,7 +986,9 @@ def _execute_backup(actor: str, trigger: str = "manual", profile: Optional[Dict[
         raise
 
 
-def _run_backup_verification(serialized_payload: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
+def _run_backup_verification(
+    serialized_payload: str, manifest: Dict[str, Any]
+) -> Dict[str, Any]:
     payload_checksum = hashlib.sha256(serialized_payload.encode("utf-8")).hexdigest()
     expected_checksum = (manifest.get("checksum_sha256") or "").strip()
     if not expected_checksum or payload_checksum != expected_checksum:
@@ -896,7 +1001,11 @@ def _run_backup_verification(serialized_payload: str, manifest: Dict[str, Any]) 
     if not isinstance(archive_json, dict):
         raise ValueError("archive open/read test failed: root is not an object")
 
-    if not isinstance(manifest, dict) or not manifest.get("schema_version") or not manifest.get("timestamp"):
+    if (
+        not isinstance(manifest, dict)
+        or not manifest.get("schema_version")
+        or not manifest.get("timestamp")
+    ):
         raise ValueError("manifest parse failed")
 
     sessions = archive_json.get("sessions")
@@ -904,7 +1013,9 @@ def _run_backup_verification(serialized_payload: str, manifest: Dict[str, Any]) 
         raise ValueError("restore smoke test failed: sessions is not an array")
 
     with sqlite3.connect(":memory:") as temp_conn:
-        temp_conn.execute("CREATE TABLE restore_sessions (session_id TEXT PRIMARY KEY, message_count INTEGER NOT NULL)")
+        temp_conn.execute(
+            "CREATE TABLE restore_sessions (session_id TEXT PRIMARY KEY, message_count INTEGER NOT NULL)"
+        )
         for row in sessions[:10]:
             if not isinstance(row, dict):
                 continue
@@ -917,14 +1028,24 @@ def _run_backup_verification(serialized_payload: str, manifest: Dict[str, Any]) 
                 "INSERT OR REPLACE INTO restore_sessions (session_id, message_count) VALUES (?, ?)",
                 (session_id, message_count),
             )
-        restored_count = int(temp_conn.execute("SELECT COUNT(*) FROM restore_sessions").fetchone()[0] or 0)
-        valid_count = int(temp_conn.execute("SELECT COUNT(*) FROM restore_sessions WHERE message_count >= 0").fetchone()[0] or 0)
+        restored_count = int(
+            temp_conn.execute("SELECT COUNT(*) FROM restore_sessions").fetchone()[0]
+            or 0
+        )
+        valid_count = int(
+            temp_conn.execute(
+                "SELECT COUNT(*) FROM restore_sessions WHERE message_count >= 0"
+            ).fetchone()[0]
+            or 0
+        )
     if restored_count != valid_count:
         raise ValueError("restore smoke test failed: validation query mismatch")
     return {"ok": True, "restored_sample_rows": restored_count}
 
 
-def _alert_backup_verification_failure(job_id: int, error_message: str, actor: str) -> None:
+def _alert_backup_verification_failure(
+    job_id: int, error_message: str, actor: str
+) -> None:
     subject = f"AmpAI Backup Verification Failed (job #{job_id})"
     body = "\n".join(
         [
@@ -938,7 +1059,9 @@ def _alert_backup_verification_failure(job_id: int, error_message: str, actor: s
     _send_resend_email(subject, body)
 
 
-def _enqueue_backup_job(actor: str, trigger: str, profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _enqueue_backup_job(
+    actor: str, trigger: str, profile: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
     backup_profile = profile or _profile_from_legacy_configs()
     job_id = create_backup_job(profile_id=backup_profile.get("id"), status="queued")
     if not job_id:
@@ -953,8 +1076,15 @@ def _enqueue_backup_job(actor: str, trigger: str, profile: Optional[Dict[str, An
             }
         )
     except Exception as exc:
-        update_backup_job(job_id, status="failed", finished_at=datetime.now(timezone.utc), error_message=f"Queue full: {exc}")
-        raise HTTPException(status_code=503, detail="Backup queue is full, try again shortly") from exc
+        update_backup_job(
+            job_id,
+            status="failed",
+            finished_at=datetime.now(timezone.utc),
+            error_message=f"Queue full: {exc}",
+        )
+        raise HTTPException(
+            status_code=503, detail="Backup queue is full, try again shortly"
+        ) from exc
     return {"job_id": job_id, "status": "queued"}
 
 
@@ -969,8 +1099,14 @@ def _backup_job_worker() -> None:
         trigger = payload.get("trigger", "manual")
         profile = payload.get("profile")
         started_at = datetime.now(timezone.utc)
-        update_backup_job(job_id, status="running", started_at=started_at, error_message=None)
-        log_audit_event(username=actor, action="admin.backup.run.start", details=f"job_id={job_id} trigger={trigger}")
+        update_backup_job(
+            job_id, status="running", started_at=started_at, error_message=None
+        )
+        log_audit_event(
+            username=actor,
+            action="admin.backup.run.start",
+            details=f"job_id={job_id} trigger={trigger}",
+        )
         try:
             result = _execute_backup(actor=actor, trigger=trigger, profile=profile)
             artifact_path = result.get("path") or result.get("file") or ""
@@ -989,7 +1125,11 @@ def _backup_job_worker() -> None:
                 verification_error=None,
                 error_message=None,
             )
-            log_audit_event(username=actor, action="admin.backup.run.finish", details=f"job_id={job_id} artifact={artifact_path}")
+            log_audit_event(
+                username=actor,
+                action="admin.backup.run.finish",
+                details=f"job_id={job_id} artifact={artifact_path}",
+            )
         except Exception as exc:
             update_backup_job(
                 job_id,
@@ -999,8 +1139,14 @@ def _backup_job_worker() -> None:
                 verification_error=str(exc),
                 error_message=str(exc),
             )
-            _alert_backup_verification_failure(job_id=job_id, error_message=str(exc), actor=actor)
-            log_audit_event(username=actor, action="admin.backup.run.failure", details=f"job_id={job_id} error={exc}")
+            _alert_backup_verification_failure(
+                job_id=job_id, error_message=str(exc), actor=actor
+            )
+            log_audit_event(
+                username=actor,
+                action="admin.backup.run.failure",
+                details=f"job_id={job_id} error={exc}",
+            )
         finally:
             BACKUP_JOB_QUEUE.task_done()
 
@@ -1021,14 +1167,18 @@ def _build_restore_preflight_report(raw_json: str) -> Dict[str, Any]:
     try:
         archive_root = json.loads(raw_json)
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid backup JSON: {exc}") from exc
+        raise HTTPException(
+            status_code=400, detail=f"Invalid backup JSON: {exc}"
+        ) from exc
 
     normalized = _normalize_restore_archive(archive_root)
     manifest = normalized["manifest"]
     payload = normalized["payload"]
     payload_text = json.dumps(payload, sort_keys=True)
     payload_checksum = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
-    expected_checksum = (manifest.get("checksum_sha256") or payload.get("checksum_sha256") or "").strip()
+    expected_checksum = (
+        manifest.get("checksum_sha256") or payload.get("checksum_sha256") or ""
+    ).strip()
     sessions = payload.get("sessions")
     uploads = payload.get("uploads")
     configs = payload.get("configs")
@@ -1046,7 +1196,8 @@ def _build_restore_preflight_report(raw_json: str) -> Dict[str, Any]:
     checks.append(
         {
             "name": "manifest_schema_version",
-            "ok": (manifest.get("schema_version") or payload.get("schema_version")) == RESTORE_SCHEMA_VERSION,
+            "ok": (manifest.get("schema_version") or payload.get("schema_version"))
+            == RESTORE_SCHEMA_VERSION,
             "value": manifest.get("schema_version") or payload.get("schema_version"),
             "expected": RESTORE_SCHEMA_VERSION,
         }
@@ -1073,7 +1224,9 @@ def _build_restore_preflight_report(raw_json: str) -> Dict[str, Any]:
         }
     )
     db_ok = _check_db_health().get("ok", False)
-    checks.append({"name": "db_connectivity", "ok": bool(db_ok), "detail": "database ping"})
+    checks.append(
+        {"name": "db_connectivity", "ok": bool(db_ok), "detail": "database ping"}
+    )
 
     archive_bytes = len(raw_json.encode("utf-8"))
     free_bytes = shutil.disk_usage(UPLOAD_DIR).free
@@ -1093,7 +1246,8 @@ def _build_restore_preflight_report(raw_json: str) -> Dict[str, Any]:
         "ok": ok,
         "checks": checks,
         "manifest": {
-            "schema_version": manifest.get("schema_version") or payload.get("schema_version"),
+            "schema_version": manifest.get("schema_version")
+            or payload.get("schema_version"),
             "app_version": manifest.get("app_version") or payload.get("app_version"),
             "timestamp": manifest.get("timestamp") or payload.get("created_at"),
             "checksum_sha256": expected_checksum,
@@ -1120,10 +1274,14 @@ def _store_restore_preflight(report: Dict[str, Any], payload_checksum: str) -> s
 
 
 def _create_pre_restore_snapshot(actor: str) -> Dict[str, Any]:
-    snapshot_root = os.path.join(os.path.dirname(__file__), "..", "data", "restore_snapshots")
+    snapshot_root = os.path.join(
+        os.path.dirname(__file__), "..", "data", "restore_snapshots"
+    )
     os.makedirs(snapshot_root, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    snapshot_path = os.path.join(snapshot_root, f"snapshot_{ts}_{uuid.uuid4().hex[:8]}.json")
+    snapshot_path = os.path.join(
+        snapshot_root, f"snapshot_{ts}_{uuid.uuid4().hex[:8]}.json"
+    )
     data = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "created_by": actor,
@@ -1132,10 +1290,15 @@ def _create_pre_restore_snapshot(actor: str) -> Dict[str, Any]:
     }
     with open(snapshot_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-    return {"snapshot_path": snapshot_path, "bytes_written": os.path.getsize(snapshot_path)}
+    return {
+        "snapshot_path": snapshot_path,
+        "bytes_written": os.path.getsize(snapshot_path),
+    }
 
 
-def _append_restore_log(logs: List[Dict[str, Any]], level: str, step: str, message: str) -> None:
+def _append_restore_log(
+    logs: List[Dict[str, Any]], level: str, step: str, message: str
+) -> None:
     logs.append(
         {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1158,22 +1321,39 @@ def _restore_job_worker() -> None:
         logs: List[Dict[str, Any]] = []
         snapshot_path = ""
         try:
-            update_restore_job(job_id, status="running", current_step="maintenance_on", progress_percent=5, started_at=datetime.now(timezone.utc), error_message=None)
+            update_restore_job(
+                job_id,
+                status="running",
+                current_step="maintenance_on",
+                progress_percent=5,
+                started_at=datetime.now(timezone.utc),
+                error_message=None,
+            )
             set_config("maintenance_mode_enabled", "true")
-            _append_restore_log(logs, "info", "maintenance_on", "Maintenance mode enabled")
+            _append_restore_log(
+                logs, "info", "maintenance_on", "Maintenance mode enabled"
+            )
             update_restore_job(job_id, log_lines=logs)
 
             update_restore_job(job_id, current_step="snapshot", progress_percent=20)
             snapshot = _create_pre_restore_snapshot(actor)
             snapshot_path = snapshot["snapshot_path"]
-            _append_restore_log(logs, "info", "snapshot", f"Snapshot captured at {snapshot_path}")
+            _append_restore_log(
+                logs, "info", "snapshot", f"Snapshot captured at {snapshot_path}"
+            )
             update_restore_job(job_id, log_lines=logs, snapshot_path=snapshot_path)
 
-            update_restore_job(job_id, current_step="restore_database", progress_percent=40)
+            update_restore_job(
+                job_id, current_step="restore_database", progress_percent=40
+            )
             archive = json.loads(backup_json)
             normalized = _normalize_restore_archive(archive)
             restore_payload = normalized["payload"]
-            sessions = restore_payload.get("sessions") if isinstance(restore_payload.get("sessions"), list) else []
+            sessions = (
+                restore_payload.get("sessions")
+                if isinstance(restore_payload.get("sessions"), list)
+                else []
+            )
             summary = {"session_count": 0, "message_count": 0, "invalid_sessions": 0}
             for session in sessions:
                 session_id = (session or {}).get("session_id")
@@ -1190,7 +1370,11 @@ def _restore_job_worker() -> None:
                     try:
                         msg = json.loads(raw)
                         kind = msg.get("type")
-                        content = ((msg.get("data") or {}).get("content")) if isinstance(msg, dict) else None
+                        content = (
+                            ((msg.get("data") or {}).get("content"))
+                            if isinstance(msg, dict)
+                            else None
+                        )
                         if kind == "human" and isinstance(content, str):
                             history.add_user_message(content)
                         elif kind == "ai" and isinstance(content, str):
@@ -1198,10 +1382,17 @@ def _restore_job_worker() -> None:
                     except Exception:
                         continue
                 set_session_category(session_id, "Restored Backup")
-            _append_restore_log(logs, "info", "restore_database", f"Restored {summary['session_count']} sessions")
+            _append_restore_log(
+                logs,
+                "info",
+                "restore_database",
+                f"Restored {summary['session_count']} sessions",
+            )
             update_restore_job(job_id, log_lines=logs)
 
-            update_restore_job(job_id, current_step="restore_uploads", progress_percent=65)
+            update_restore_job(
+                job_id, current_step="restore_uploads", progress_percent=65
+            )
             uploads = restore_payload.get("uploads")
             if isinstance(uploads, list):
                 restored_uploads = 0
@@ -1221,12 +1412,21 @@ def _restore_job_worker() -> None:
                         restored_uploads += 1
                     except Exception:
                         continue
-                _append_restore_log(logs, "info", "restore_uploads", f"Restored {restored_uploads} uploaded files")
+                _append_restore_log(
+                    logs,
+                    "info",
+                    "restore_uploads",
+                    f"Restored {restored_uploads} uploaded files",
+                )
             else:
-                _append_restore_log(logs, "info", "restore_uploads", "No uploads found in archive")
+                _append_restore_log(
+                    logs, "info", "restore_uploads", "No uploads found in archive"
+                )
             update_restore_job(job_id, log_lines=logs)
 
-            update_restore_job(job_id, current_step="restore_configs", progress_percent=80)
+            update_restore_job(
+                job_id, current_step="restore_configs", progress_percent=80
+            )
             configs = restore_payload.get("configs")
             if isinstance(configs, dict):
                 updated = 0
@@ -1237,9 +1437,13 @@ def _restore_job_worker() -> None:
                         continue
                     set_config(key, str(value))
                     updated += 1
-                _append_restore_log(logs, "info", "restore_configs", f"Restored {updated} config keys")
+                _append_restore_log(
+                    logs, "info", "restore_configs", f"Restored {updated} config keys"
+                )
             else:
-                _append_restore_log(logs, "info", "restore_configs", "No configs found in archive")
+                _append_restore_log(
+                    logs, "info", "restore_configs", "No configs found in archive"
+                )
 
             update_restore_job(
                 job_id,
@@ -1251,7 +1455,11 @@ def _restore_job_worker() -> None:
                 log_lines=logs,
                 error_message=None,
             )
-            log_audit_event(username=actor, action="admin.restore.run.finish", details=f"job_id={job_id} snapshot={snapshot_path}")
+            log_audit_event(
+                username=actor,
+                action="admin.restore.run.finish",
+                details=f"job_id={job_id} snapshot={snapshot_path}",
+            )
         except Exception as exc:
             _append_restore_log(logs, "error", "failed", str(exc))
             update_restore_job(
@@ -1262,9 +1470,15 @@ def _restore_job_worker() -> None:
                 finished_at=datetime.now(timezone.utc),
                 log_lines=logs,
                 snapshot_path=snapshot_path,
-                error_message=f"{exc}; snapshot preserved at {snapshot_path}" if snapshot_path else str(exc),
+                error_message=f"{exc}; snapshot preserved at {snapshot_path}"
+                if snapshot_path
+                else str(exc),
             )
-            log_audit_event(username=actor, action="admin.restore.run.failure", details=f"job_id={job_id} error={exc}")
+            log_audit_event(
+                username=actor,
+                action="admin.restore.run.failure",
+                details=f"job_id={job_id} error={exc}",
+            )
         finally:
             set_config("maintenance_mode_enabled", "false")
             RESTORE_JOB_QUEUE.task_done()
@@ -1273,7 +1487,9 @@ def _restore_job_worker() -> None:
 def _ensure_valid_email_access_token(provider: str) -> str:
     credentials = _load_integration_credentials(provider)
     if not credentials:
-        raise HTTPException(status_code=400, detail=f"{provider} integration is not configured")
+        raise HTTPException(
+            status_code=400, detail=f"{provider} integration is not configured"
+        )
 
     expires_at = int(credentials.get("expires_at") or 0)
     if credentials.get("access_token") and expires_at > int(time.time()) + 60:
@@ -1290,16 +1506,24 @@ def _ensure_valid_email_access_token(provider: str) -> str:
     return refreshed["access_token"]
 
 
-def _fetch_todays_email_messages(provider: str, timezone_name: str, max_results: int) -> List[Dict[str, str]]:
+def _fetch_todays_email_messages(
+    provider: str, timezone_name: str, max_results: int
+) -> List[Dict[str, str]]:
     access_token = _ensure_valid_email_access_token(provider)
     if provider == "gmail":
-        return fetch_gmail_todays_messages(access_token=access_token, tz=timezone_name, max_results=max_results)
+        return fetch_gmail_todays_messages(
+            access_token=access_token, tz=timezone_name, max_results=max_results
+        )
     if provider == "outlook":
-        return fetch_outlook_todays_messages(access_token=access_token, tz=timezone_name, max_results=max_results)
+        return fetch_outlook_todays_messages(
+            access_token=access_token, tz=timezone_name, max_results=max_results
+        )
     raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
 
-def _create_access_token(data: Dict[str, str], expiry_minutes: Optional[int] = None) -> str:
+def _create_access_token(
+    data: Dict[str, str], expiry_minutes: Optional[int] = None
+) -> str:
     payload = data.copy()
     exp_minutes = int(expiry_minutes or JWT_EXPIRY_MINUTES)
     expiry = datetime.now(timezone.utc) + timedelta(minutes=max(1, exp_minutes))
@@ -1330,7 +1554,9 @@ def _check_redis_health() -> dict:
         return {"ok": False, "details": str(exc)}
 
 
-def _notification_throttle_active(username: str, session_id: str, interval_seconds: int) -> bool:
+def _notification_throttle_active(
+    username: str, session_id: str, interval_seconds: int
+) -> bool:
     if interval_seconds <= 0:
         return False
     try:
@@ -1366,17 +1592,23 @@ def _check_search_provider_health() -> dict:
 
 def _get_current_user(access_token: Optional[str] = None) -> UserContext:
     if not access_token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
+        )
 
     try:
         payload = jwt.decode(access_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         username = payload.get("sub")
         role = payload.get("role")
         if not username or role not in {"admin", "user"}:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload"
+            )
         return UserContext(username=username, role=role)
     except JWTError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token"
+        ) from exc
 
 
 def get_current_user_from_cookie(request: Request):
@@ -1389,38 +1621,62 @@ def get_current_user_from_cookie(request: Request):
     return _get_current_user(token)
 
 
-def require_authenticated_user(current_user: UserContext = Depends(get_current_user_from_cookie)) -> UserContext:
+def require_authenticated_user(
+    current_user: UserContext = Depends(get_current_user_from_cookie),
+) -> UserContext:
     return current_user
 
 
-def require_admin_user(current_user: UserContext = Depends(get_current_user_from_cookie)) -> UserContext:
+def require_admin_user(
+    current_user: UserContext = Depends(get_current_user_from_cookie),
+) -> UserContext:
     if current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required"
+        )
     return current_user
 
 
 @app.post("/api/auth/login", response_model=UserLoginResponse)
 def login(payload: UserLoginRequest):
-    admin_username = os.getenv("ADMIN_USERNAME") or os.getenv("AMPAI_DEFAULT_ADMIN_USERNAME", "admin")
-    configured_admin_password = os.getenv("ADMIN_PASSWORD") or os.getenv("AMPAI_DEFAULT_ADMIN_PASSWORD", "P@ssw0rd")
+    admin_username = os.getenv("ADMIN_USERNAME") or os.getenv(
+        "AMPAI_DEFAULT_ADMIN_USERNAME", "admin"
+    )
+    configured_admin_password = os.getenv("ADMIN_PASSWORD") or os.getenv(
+        "AMPAI_DEFAULT_ADMIN_PASSWORD", "P@ssw0rd"
+    )
     fallback_admin_passwords = {
         configured_admin_password,
         os.getenv("AMPAI_DEFAULT_ADMIN_PASSWORD", "P@ssw0rd"),
         "P@ssw0rd",
         "admin123",
     }
-    admin_override = payload.username == admin_username and payload.password in fallback_admin_passwords
+    admin_override = (
+        payload.username == admin_username
+        and payload.password in fallback_admin_passwords
+    )
 
     user = get_user(payload.username)
     if admin_override:
         # Ensure admin user exists with the supplied password
         if not user:
-            db_create_user(username=admin_username, role="admin", password_hash=pwd_context.hash(payload.password))
-        db_update_user(admin_username, role="admin", password_hash=pwd_context.hash(payload.password))
+            db_create_user(
+                username=admin_username,
+                role="admin",
+                password_hash=pwd_context.hash(payload.password),
+            )
+        db_update_user(
+            admin_username,
+            role="admin",
+            password_hash=pwd_context.hash(payload.password),
+        )
         user = get_user(admin_username)
 
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
+        )
 
     # If admin_override is True, skip further verification — credentials already confirmed above
     if not admin_override:
@@ -1430,21 +1686,39 @@ def login(payload: UserLoginRequest):
             password_ok = pwd_context.verify(payload.password, stored_hash)
         except Exception:
             # Backward compatibility: legacy SHA256 hashes from older create_user code paths.
-            password_ok = hashlib.sha256(payload.password.encode("utf-8")).hexdigest() == stored_hash
+            password_ok = (
+                hashlib.sha256(payload.password.encode("utf-8")).hexdigest()
+                == stored_hash
+            )
             if password_ok:
-                db_update_user(user["username"], password_hash=pwd_context.hash(payload.password))
+                db_update_user(
+                    user["username"], password_hash=pwd_context.hash(payload.password)
+                )
         if not password_ok:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid username or password",
+            )
 
     effective_username = admin_username if admin_override else user["username"]
     effective_role = "admin" if admin_override else user["role"]
     remember_me = bool(payload.remember_me)
-    max_age_seconds = (JWT_REMEMBER_ME_DAYS * 24 * 60 * 60) if remember_me else (JWT_EXPIRY_MINUTES * 60)
+    max_age_seconds = (
+        (JWT_REMEMBER_ME_DAYS * 24 * 60 * 60)
+        if remember_me
+        else (JWT_EXPIRY_MINUTES * 60)
+    )
     token = _create_access_token(
-        {"sub": effective_username, "role": effective_role, "trusted_device": "1" if remember_me else "0"},
+        {
+            "sub": effective_username,
+            "role": effective_role,
+            "trusted_device": "1" if remember_me else "0",
+        },
         expiry_minutes=max(1, int(max_age_seconds // 60)),
     )
-    body = UserLoginResponse(username=effective_username, role=effective_role, token=token)
+    body = UserLoginResponse(
+        username=effective_username, role=effective_role, token=token
+    )
     response = Response(content=body.model_dump_json(), media_type="application/json")
     response.set_cookie(
         key="access_token",
@@ -1461,13 +1735,19 @@ def login(payload: UserLoginRequest):
 def register(payload: UserRegisterRequest):
     username = (payload.username or "").strip()
     if not username or not payload.password:
-        raise HTTPException(status_code=400, detail="Username and password are required")
+        raise HTTPException(
+            status_code=400, detail="Username and password are required"
+        )
     if len(payload.password) < 4:
-        raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 4 characters"
+        )
     if get_user(username):
         raise HTTPException(status_code=400, detail="Username already exists")
 
-    ok = db_create_user(username=username, role="user", password_hash=pwd_context.hash(payload.password))
+    ok = db_create_user(
+        username=username, role="user", password_hash=pwd_context.hash(payload.password)
+    )
     if not ok:
         raise HTTPException(status_code=400, detail="Failed to create user")
     return {"status": "success"}
@@ -1489,6 +1769,7 @@ def logout():
     response.delete_cookie("access_token")
     return response
 
+
 @app.on_event("startup")
 def startup_event():
     try:
@@ -1499,11 +1780,17 @@ def startup_event():
     start_scheduler()
     # Initialize memory persistence manager
     memory_persistence_manager.initialize()
-    worker = threading.Thread(target=_insight_worker, daemon=True, name="ampai-insight-worker")
+    worker = threading.Thread(
+        target=_insight_worker, daemon=True, name="ampai-insight-worker"
+    )
     worker.start()
-    backup_worker = threading.Thread(target=_backup_job_worker, daemon=True, name="ampai-backup-worker")
+    backup_worker = threading.Thread(
+        target=_backup_job_worker, daemon=True, name="ampai-backup-worker"
+    )
     backup_worker.start()
-    restore_worker = threading.Thread(target=_restore_job_worker, daemon=True, name="ampai-restore-worker")
+    restore_worker = threading.Thread(
+        target=_restore_job_worker, daemon=True, name="ampai-restore-worker"
+    )
     restore_worker.start()
     _start_telegram_poller_if_enabled()
 
@@ -1512,7 +1799,10 @@ def _enforce_session_access_or_403(session_id: str, current_user: UserContext) -
     if user_can_access_session(session_id, current_user.username, current_user.role):
         return
     if session_exists(session_id):
-        raise HTTPException(status_code=403, detail="Forbidden: you do not have permission to access this session")
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: you do not have permission to access this session",
+        )
     raise HTTPException(status_code=404, detail="Session not found")
 
 
@@ -1521,7 +1811,11 @@ def _ensure_session_owner_for_user(session_id: str, current_user: UserContext) -
         return
     if get_session_owner(session_id):
         return
-    set_session_owner(session_id=session_id, owner_username=current_user.username, visibility="private")
+    set_session_owner(
+        session_id=session_id,
+        owner_username=current_user.username,
+        visibility="private",
+    )
 
 
 def _build_lightweight_insight(session_id: str) -> None:
@@ -1535,15 +1829,32 @@ def _build_lightweight_insight(session_id: str) -> None:
         if msg.get("type") == "ai" and content:
             last_ai = content
         elif msg.get("type") == "human":
-            user_words.extend([w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", content)])
+            user_words.extend(
+                [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", content)]
+            )
 
-    stop_words = {"the", "and", "for", "with", "that", "this", "from", "have", "about", "your", "you", "are"}
+    stop_words = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "that",
+        "this",
+        "from",
+        "have",
+        "about",
+        "your",
+        "you",
+        "are",
+    }
     freq: Dict[str, int] = {}
     for word in user_words:
         if word in stop_words:
             continue
         freq[word] = freq.get(word, 0) + 1
-    top_tags = [k for k, _ in sorted(freq.items(), key=lambda kv: kv[1], reverse=True)[:8]]
+    top_tags = [
+        k for k, _ in sorted(freq.items(), key=lambda kv: kv[1], reverse=True)[:8]
+    ]
     summary = (last_ai or "No AI summary yet.")[:500]
     upsert_session_insight(session_id=session_id, summary=summary, tags=top_tags)
 
@@ -1569,8 +1880,13 @@ def api_list_personas(user: UserContext = Depends(require_authenticated_user)):
 
 
 @app.post("/api/personas")
-def api_create_persona(request: PersonaCreateRequest, user: UserContext = Depends(require_authenticated_user)):
-    owner_username = None if (request.is_global and user.role == "admin") else user.username
+def api_create_persona(
+    request: PersonaCreateRequest,
+    user: UserContext = Depends(require_authenticated_user),
+):
+    owner_username = (
+        None if (request.is_global and user.role == "admin") else user.username
+    )
     persona = create_persona(
         username=owner_username,
         name=request.name,
@@ -1584,7 +1900,11 @@ def api_create_persona(request: PersonaCreateRequest, user: UserContext = Depend
 
 
 @app.patch("/api/personas/{persona_id}")
-def api_update_persona(persona_id: int, request: PersonaUpdateRequest, user: UserContext = Depends(require_authenticated_user)):
+def api_update_persona(
+    persona_id: int,
+    request: PersonaUpdateRequest,
+    user: UserContext = Depends(require_authenticated_user),
+):
     updated = update_persona(
         persona_id=persona_id,
         actor_username=user.username,
@@ -1597,10 +1917,18 @@ def api_update_persona(persona_id: int, request: PersonaUpdateRequest, user: Use
 
 
 @app.delete("/api/personas/{persona_id}")
-def api_delete_persona(persona_id: int, user: UserContext = Depends(require_authenticated_user)):
-    deleted = delete_persona(persona_id=persona_id, actor_username=user.username, is_admin=(user.role == "admin"))
+def api_delete_persona(
+    persona_id: int, user: UserContext = Depends(require_authenticated_user)
+):
+    deleted = delete_persona(
+        persona_id=persona_id,
+        actor_username=user.username,
+        is_admin=(user.role == "admin"),
+    )
     if not deleted:
-        raise HTTPException(status_code=404, detail="Persona not found or not deletable")
+        raise HTTPException(
+            status_code=404, detail="Persona not found or not deletable"
+        )
     return {"status": "success"}
 
 
@@ -1626,7 +1954,11 @@ def _resolve_telegram_username(user_id: Any) -> str:
     user_id_str = str(user_id or "").strip()
     if not user_id_str:
         return "telegram-bot"
-    strategy = (get_config("telegram_user_mapping_mode", "per_user") or "per_user").strip().lower()
+    strategy = (
+        (get_config("telegram_user_mapping_mode", "per_user") or "per_user")
+        .strip()
+        .lower()
+    )
     if strategy == "service_account":
         return "telegram-bot"
     return f"telegram-{user_id_str}"
@@ -1638,12 +1970,18 @@ def _send_telegram_message(bot_token: str, chat_id: Any, text: str) -> None:
     text = str(text)[:3500]
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.read()
     except Exception:
-        logger.exception("telegram sendMessage failed: chat_id=%s token=%s", chat_id, _mask_telegram_token(bot_token))
+        logger.exception(
+            "telegram sendMessage failed: chat_id=%s token=%s",
+            chat_id,
+            _mask_telegram_token(bot_token),
+        )
         raise
 
 
@@ -1651,7 +1989,9 @@ TELEGRAM_MAX_MESSAGE_CHARS = 4000
 TELEGRAM_MAX_WEBHOOK_BYTES = 1024 * 1024  # 1MB
 TELEGRAM_RATE_LIMIT_COUNT = 8
 TELEGRAM_RATE_LIMIT_WINDOW_SECONDS = 20
-TELEGRAM_GENERIC_FAILURE_TEXT = "Sorry, something went wrong while processing your message."
+TELEGRAM_GENERIC_FAILURE_TEXT = (
+    "Sorry, something went wrong while processing your message."
+)
 TELEGRAM_POLL_TIMEOUT_SECONDS = 25
 TELEGRAM_POLL_SLEEP_SECONDS = 1.5
 _telegram_rate_limit_lock = threading.Lock()
@@ -1690,7 +2030,12 @@ def _process_telegram_update(update: Dict[str, Any]) -> None:
     user_id = fields.get("user_id")
     chat_id = fields.get("chat_id")
     incoming_text = _sanitize_telegram_text(fields.get("text"))
-    if not fields.get("is_text_update") or not user_id or not chat_id or not incoming_text:
+    if (
+        not fields.get("is_text_update")
+        or not user_id
+        or not chat_id
+        or not incoming_text
+    ):
         return
     if _is_rate_limited(user_id, chat_id):
         return
@@ -1698,13 +2043,21 @@ def _process_telegram_update(update: Dict[str, Any]) -> None:
     session_id = f"tg_{chat_id}_{user_id}"
     resolved_username = _resolve_telegram_username(user_id)
     mapped_username = lookup_username_by_telegram_user_id(user_id)
-    username = mapped_username or get_or_create_telegram_user(
-        telegram_user_id=user_id,
-        telegram_chat_id=chat_id,
-        default_username=resolved_username,
-    ) or resolved_username
+    username = (
+        mapped_username
+        or get_or_create_telegram_user(
+            telegram_user_id=user_id,
+            telegram_chat_id=chat_id,
+            default_username=resolved_username,
+        )
+        or resolved_username
+    )
     if not get_user(username):
-        db_create_user(username=username, role="user", password_hash=pwd_context.hash(uuid.uuid4().hex))
+        db_create_user(
+            username=username,
+            role="user",
+            password_hash=pwd_context.hash(uuid.uuid4().hex),
+        )
 
     # Ensure Telegram conversations are discoverable in the regular chat history list
     # before model processing begins.
@@ -1737,20 +2090,40 @@ def _process_telegram_update(update: Dict[str, Any]) -> None:
         response_text = str((result or {}).get("response") or "").strip()
         if response_text:
             try:
-                _send_telegram_message((get_config("telegram_bot_token") or "").strip(), chat_id, response_text)
+                _send_telegram_message(
+                    (get_config("telegram_bot_token") or "").strip(),
+                    chat_id,
+                    response_text,
+                )
             except Exception:
                 logger.exception("telegram provider send failure")
-                log_audit_event(username=username, action="integration.telegram.provider_send_failure", session_id=session_id)
+                log_audit_event(
+                    username=username,
+                    action="integration.telegram.provider_send_failure",
+                    session_id=session_id,
+                )
                 raise
         touch_session_updated_at(session_id)
-        log_audit_event(username=username, action="integration.telegram.message_processed", session_id=session_id)
+        log_audit_event(
+            username=username,
+            action="integration.telegram.message_processed",
+            session_id=session_id,
+        )
     except Exception:
         logger.exception("telegram update processing failed")
         try:
-            _send_telegram_message((get_config("telegram_bot_token") or "").strip(), chat_id, TELEGRAM_GENERIC_FAILURE_TEXT)
+            _send_telegram_message(
+                (get_config("telegram_bot_token") or "").strip(),
+                chat_id,
+                TELEGRAM_GENERIC_FAILURE_TEXT,
+            )
         except Exception:
             logger.exception("telegram provider send failure")
-            log_audit_event(username=username, action="integration.telegram.provider_send_failure", session_id=session_id)
+            log_audit_event(
+                username=username,
+                action="integration.telegram.provider_send_failure",
+                session_id=session_id,
+            )
 
 
 def _mark_telegram_update_processed(update_id: Any) -> bool:
@@ -1764,7 +2137,9 @@ def _mark_telegram_update_processed(update_id: Any) -> bool:
         _telegram_processed_update_ids.add(normalized)
         if len(_telegram_processed_update_ids) > 2000:
             floor = max(_telegram_next_update_offset - 2000, 0)
-            _telegram_processed_update_ids.difference_update({uid for uid in _telegram_processed_update_ids if uid < floor})
+            _telegram_processed_update_ids.difference_update(
+                {uid for uid in _telegram_processed_update_ids if uid < floor}
+            )
     return True
 
 
@@ -1773,7 +2148,9 @@ def _poll_telegram_updates_forever() -> None:
     logger.info("Starting Telegram polling worker")
     while True:
         try:
-            if not _config_bool("telegram_enabled", default=False) or not _config_bool("telegram_polling_enabled", default=False):
+            if not _config_bool("telegram_enabled", default=False) or not _config_bool(
+                "telegram_polling_enabled", default=False
+            ):
                 time.sleep(3)
                 continue
             bot_token = (get_config("telegram_bot_token") or "").strip()
@@ -1782,13 +2159,19 @@ def _poll_telegram_updates_forever() -> None:
                 continue
             with _telegram_offset_lock:
                 offset = max(0, int(_telegram_next_update_offset or 0))
-            params = urllib.parse.urlencode({
-                "timeout": TELEGRAM_POLL_TIMEOUT_SECONDS,
-                "offset": offset,
-                "allowed_updates": json.dumps(["message", "edited_message", "callback_query"]),
-            })
+            params = urllib.parse.urlencode(
+                {
+                    "timeout": TELEGRAM_POLL_TIMEOUT_SECONDS,
+                    "offset": offset,
+                    "allowed_updates": json.dumps(
+                        ["message", "edited_message", "callback_query"]
+                    ),
+                }
+            )
             url = f"https://api.telegram.org/bot{bot_token}/getUpdates?{params}"
-            with urllib.request.urlopen(url, timeout=TELEGRAM_POLL_TIMEOUT_SECONDS + 10) as resp:
+            with urllib.request.urlopen(
+                url, timeout=TELEGRAM_POLL_TIMEOUT_SECONDS + 10
+            ) as resp:
                 payload = json.loads((resp.read() or b"{}").decode("utf-8"))
             if not isinstance(payload, dict) or not payload.get("ok"):
                 time.sleep(TELEGRAM_POLL_SLEEP_SECONDS)
@@ -1799,7 +2182,9 @@ def _poll_telegram_updates_forever() -> None:
                     continue
                 if isinstance(update_id, int):
                     with _telegram_offset_lock:
-                        _telegram_next_update_offset = max(_telegram_next_update_offset, update_id + 1)
+                        _telegram_next_update_offset = max(
+                            _telegram_next_update_offset, update_id + 1
+                        )
                 _process_telegram_update(update or {})
         except Exception:
             logger.exception("telegram polling worker iteration failed")
@@ -1813,11 +2198,13 @@ def _start_telegram_poller_if_enabled() -> None:
     with _telegram_poller_lock:
         if _telegram_poller_started:
             return
-        worker = threading.Thread(target=_poll_telegram_updates_forever, daemon=True, name="ampai-telegram-poller")
+        worker = threading.Thread(
+            target=_poll_telegram_updates_forever,
+            daemon=True,
+            name="ampai-telegram-poller",
+        )
         worker.start()
         _telegram_poller_started = True
-
-
 
 
 @app.get("/api/admin/integrations/telegram/status")
@@ -1826,7 +2213,9 @@ def admin_telegram_status(current_user: UserContext = Depends(require_admin_user
     webhook_url = (get_config("telegram_webhook_url") or "").strip()
     enabled = _config_bool("telegram_enabled", default=False)
     polling_enabled = _config_bool("telegram_polling_enabled", default=False)
-    log_audit_event(username=current_user.username, action="integration.telegram.admin_status")
+    log_audit_event(
+        username=current_user.username, action="integration.telegram.admin_status"
+    )
     return {
         "ok": True,
         "enabled": enabled,
@@ -1834,18 +2223,25 @@ def admin_telegram_status(current_user: UserContext = Depends(require_admin_user
         "webhook_url": webhook_url,
         "token_configured": bool(bot_token),
         "token_masked": _mask_telegram_token(bot_token),
-        "secret_configured": bool((get_config("telegram_webhook_secret") or "").strip()),
+        "secret_configured": bool(
+            (get_config("telegram_webhook_secret") or "").strip()
+        ),
     }
 
 
 @app.post("/api/admin/integrations/telegram/save")
-def admin_telegram_save(request: TelegramIntegrationSaveRequest, current_user: UserContext = Depends(require_admin_user)):
+def admin_telegram_save(
+    request: TelegramIntegrationSaveRequest,
+    current_user: UserContext = Depends(require_admin_user),
+):
     set_config("telegram_bot_token", request.bot_token or "")
     set_config("telegram_webhook_url", (request.webhook_url or "").strip())
     set_config("telegram_webhook_secret", (request.secret_token or "").strip())
     set_config("telegram_enabled", "true" if request.enabled else "false")
     # Preserve polling_enabled — it is managed separately via /enable-polling endpoint
-    log_audit_event(username=current_user.username, action="integration.telegram.admin_save")
+    log_audit_event(
+        username=current_user.username, action="integration.telegram.admin_save"
+    )
     return {
         "ok": True,
         "enabled": bool(request.enabled),
@@ -1857,7 +2253,9 @@ def admin_telegram_save(request: TelegramIntegrationSaveRequest, current_user: U
 
 
 @app.post("/api/admin/integrations/telegram/enable-polling")
-def admin_telegram_enable_polling(current_user: UserContext = Depends(require_admin_user)):
+def admin_telegram_enable_polling(
+    current_user: UserContext = Depends(require_admin_user),
+):
     """Switch to long-polling mode (disables webhook)."""
     token = (get_config("telegram_bot_token") or "").strip()
     if not token:
@@ -1870,19 +2268,27 @@ def admin_telegram_enable_polling(current_user: UserContext = Depends(require_ad
     set_config("telegram_polling_enabled", "true")
     set_config("telegram_enabled", "true")
     _start_telegram_poller_if_enabled()
-    log_audit_event(username=current_user.username, action="integration.telegram.enable_polling")
+    log_audit_event(
+        username=current_user.username, action="integration.telegram.enable_polling"
+    )
     return {"ok": True, "mode": "polling"}
 
 
 @app.post("/api/admin/integrations/telegram/disable-polling")
-def admin_telegram_disable_polling(current_user: UserContext = Depends(require_admin_user)):
+def admin_telegram_disable_polling(
+    current_user: UserContext = Depends(require_admin_user),
+):
     set_config("telegram_polling_enabled", "false")
-    log_audit_event(username=current_user.username, action="integration.telegram.disable_polling")
+    log_audit_event(
+        username=current_user.username, action="integration.telegram.disable_polling"
+    )
     return {"ok": True, "mode": "webhook"}
 
 
 @app.get("/api/admin/integrations/telegram/webhook-info")
-def admin_telegram_webhook_info(current_user: UserContext = Depends(require_admin_user)):
+def admin_telegram_webhook_info(
+    current_user: UserContext = Depends(require_admin_user),
+):
     """Returns live webhook status from Telegram's getWebhookInfo."""
     token = (get_config("telegram_bot_token") or "").strip()
     if not token:
@@ -1892,7 +2298,9 @@ def admin_telegram_webhook_info(current_user: UserContext = Depends(require_admi
         with urllib.request.urlopen(url, timeout=10) as resp:
             payload = json.loads((resp.read() or b"{}").decode("utf-8"))
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Telegram API error: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Telegram API error: {exc}"
+        ) from exc
     result = payload.get("result") or {}
     return {
         "ok": True,
@@ -1911,8 +2319,7 @@ def admin_telegram_sessions(current_user: UserContext = Depends(require_admin_us
     """Lists all Telegram chat sessions and their message counts."""
     all_sessions = get_all_sessions()
     tg_sessions = [
-        s for s in (all_sessions or [])
-        if (s.get("session_id") or "").startswith("tg_")
+        s for s in (all_sessions or []) if (s.get("session_id") or "").startswith("tg_")
     ]
     return {"sessions": tg_sessions, "total": len(tg_sessions)}
 
@@ -1926,14 +2333,25 @@ def admin_telegram_test(current_user: UserContext = Depends(require_admin_user))
         payload = get_me(token)
     except urllib.error.HTTPError as exc:
         detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
-        raise HTTPException(status_code=502, detail=f"Telegram getMe failed: {detail or exc.reason}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Telegram getMe failed: {detail or exc.reason}"
+        ) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Telegram getMe failed") from exc
     if not payload.get("ok"):
-        raise HTTPException(status_code=400, detail=str(payload.get("description") or "Telegram getMe failed"))
+        raise HTTPException(
+            status_code=400,
+            detail=str(payload.get("description") or "Telegram getMe failed"),
+        )
     result = payload.get("result") or {}
-    log_audit_event(username=current_user.username, action="integration.telegram.admin_test")
-    return {"ok": True, "bot_username": result.get("username"), "bot_id": result.get("id")}
+    log_audit_event(
+        username=current_user.username, action="integration.telegram.admin_test"
+    )
+    return {
+        "ok": True,
+        "bot_username": result.get("username"),
+        "bot_id": result.get("id"),
+    }
 
 
 @app.post("/api/admin/integrations/telegram/connect")
@@ -1943,18 +2361,30 @@ def admin_telegram_connect(current_user: UserContext = Depends(require_admin_use
     if not token:
         raise HTTPException(status_code=400, detail="Telegram bot token is required")
     if not webhook_url:
-        raise HTTPException(status_code=400, detail="Telegram webhook URL is not configured")
+        raise HTTPException(
+            status_code=400, detail="Telegram webhook URL is not configured"
+        )
     secret_token = (get_config("telegram_webhook_secret") or "").strip()
     try:
         payload = set_webhook(token, webhook_url, secret_token=secret_token or None)
     except urllib.error.HTTPError as exc:
         detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
-        raise HTTPException(status_code=502, detail=f"Telegram setWebhook failed: {detail or exc.reason}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"Telegram setWebhook failed: {detail or exc.reason}",
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="Telegram setWebhook failed") from exc
+        raise HTTPException(
+            status_code=502, detail="Telegram setWebhook failed"
+        ) from exc
     if not payload.get("ok"):
-        raise HTTPException(status_code=400, detail=str(payload.get("description") or "Telegram setWebhook failed"))
-    log_audit_event(username=current_user.username, action="integration.telegram.admin_connect")
+        raise HTTPException(
+            status_code=400,
+            detail=str(payload.get("description") or "Telegram setWebhook failed"),
+        )
+    log_audit_event(
+        username=current_user.username, action="integration.telegram.admin_connect"
+    )
     return {"ok": True, "description": payload.get("description", "Webhook connected")}
 
 
@@ -1967,13 +2397,27 @@ def admin_telegram_disconnect(current_user: UserContext = Depends(require_admin_
         payload = delete_webhook(token)
     except urllib.error.HTTPError as exc:
         detail = (exc.read() or b"").decode("utf-8", errors="ignore")[:500]
-        raise HTTPException(status_code=502, detail=f"Telegram deleteWebhook failed: {detail or exc.reason}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"Telegram deleteWebhook failed: {detail or exc.reason}",
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="Telegram deleteWebhook failed") from exc
+        raise HTTPException(
+            status_code=502, detail="Telegram deleteWebhook failed"
+        ) from exc
     if not payload.get("ok"):
-        raise HTTPException(status_code=400, detail=str(payload.get("description") or "Telegram deleteWebhook failed"))
-    log_audit_event(username=current_user.username, action="integration.telegram.admin_disconnect")
-    return {"ok": True, "description": payload.get("description", "Webhook disconnected")}
+        raise HTTPException(
+            status_code=400,
+            detail=str(payload.get("description") or "Telegram deleteWebhook failed"),
+        )
+    log_audit_event(
+        username=current_user.username, action="integration.telegram.admin_disconnect"
+    )
+    return {
+        "ok": True,
+        "description": payload.get("description", "Webhook disconnected"),
+    }
+
 
 @app.post("/api/integrations/telegram/webhook")
 def telegram_webhook(
@@ -1987,7 +2431,10 @@ def telegram_webhook(
         raise HTTPException(status_code=400, detail="Telegram bot token is required")
 
     expected_secret = (get_config("telegram_webhook_secret") or "").strip()
-    if expected_secret and (x_telegram_bot_api_secret_token or "").strip() != expected_secret:
+    if (
+        expected_secret
+        and (x_telegram_bot_api_secret_token or "").strip() != expected_secret
+    ):
         logger.warning("telegram webhook rejected: invalid secret")
         return {"status": "ok"}
 
@@ -2027,10 +2474,18 @@ def telegram_webhook(
             send_message(bot_token, chat_id, response_text)
         ensure_session_owner(session_id, username)
         touch_session(session_id)
-        log_audit_event(username=username, action="integration.telegram.webhook_processed", session_id=session_id)
+        log_audit_event(
+            username=username,
+            action="integration.telegram.webhook_processed",
+            session_id=session_id,
+        )
     except Exception:
         logger.exception("telegram webhook processing failed")
-        log_audit_event(username=username, action="integration.telegram.webhook.process_failure", session_id=session_id)
+        log_audit_event(
+            username=username,
+            action="integration.telegram.webhook.process_failure",
+            session_id=session_id,
+        )
 
     return {"status": "ok"}
 
@@ -2038,11 +2493,24 @@ def telegram_webhook(
 @app.post("/api/chat")
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
-        logger.info("CHAT REQUEST model_type=%s, model_name=%s, memory_mode=%s, user=%s",
-                     request.model_type, request.model_name, request.memory_mode, user.username)
+        logger.info(
+            "CHAT REQUEST model_type=%s, model_name=%s, memory_mode=%s, user=%s",
+            request.model_type,
+            request.model_name,
+            request.memory_mode,
+            user.username,
+        )
 
-        local_only_mode = str(get_config("local_only_mode", "true")).strip().lower() in {"1", "true", "yes", "on"}
-        if local_only_mode and (request.model_type or "").strip().lower() not in {"", "ollama", "generic", "anythingllm", "ampai_default"}:
+        local_only_mode = str(
+            get_config("local_only_mode", "true")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if local_only_mode and (request.model_type or "").strip().lower() not in {
+            "",
+            "ollama",
+            "generic",
+            "anythingllm",
+            "ampai_default",
+        }:
             requested = (request.model_type or "").strip().lower() or "unknown"
             raise HTTPException(
                 status_code=400,
@@ -2058,15 +2526,25 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         effective_model_type = (request.model_type or "ollama").strip().lower()
         if effective_model_type == "ollama":
             configured_default = (get_config("default_model") or "").strip().lower()
-            if configured_default and configured_default != "ollama" and not local_only_mode:
+            if (
+                configured_default
+                and configured_default != "ollama"
+                and not local_only_mode
+            ):
                 effective_model_type = configured_default
-                logger.info("Auto-resolved model_type from 'ollama' to configured default '%s'", effective_model_type)
+                logger.info(
+                    "Auto-resolved model_type from 'ollama' to configured default '%s'",
+                    effective_model_type,
+                )
             else:
                 # Check if Ollama is reachable; if not, try to find an alternative
-                ollama_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+                ollama_url = get_config("ollama_base_url") or os.getenv(
+                    "OLLAMA_BASE_URL", "http://host.docker.internal:11434"
+                )
                 ollama_alive = False
                 try:
                     import urllib.request as _ur
+
                     _ur.urlopen(ollama_url, timeout=2)
                     ollama_alive = True
                 except Exception:
@@ -2075,7 +2553,9 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                     if local_only_mode:
                         # In local-only mode, fall back to built-in AmpAI engine instead of 503
                         effective_model_type = "ampai_default"
-                        logger.info("Ollama unreachable in local-only mode — switching to ampai_default engine")
+                        logger.info(
+                            "Ollama unreachable in local-only mode — switching to ampai_default engine"
+                        )
                     else:
                         # Try known providers in priority order
                         provider_keys = [
@@ -2089,19 +2569,25 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                         for prov, key_name in provider_keys:
                             if get_config(key_name):
                                 effective_model_type = prov
-                                logger.info("Ollama unreachable; auto-resolved model_type to '%s'", prov)
+                                logger.info(
+                                    "Ollama unreachable; auto-resolved model_type to '%s'",
+                                    prov,
+                                )
                                 resolved = True
                                 break
                         if not resolved:
                             # No API keys either — use built-in AmpAI engine
                             effective_model_type = "ampai_default"
-                            logger.info("No AI provider available — using built-in ampai_default engine")
+                            logger.info(
+                                "No AI provider available — using built-in ampai_default engine"
+                            )
         request.model_type = effective_model_type
 
         # ── AmpAI Default Mode: built-in engine, no model needed ──────────────
         if effective_model_type == "ampai_default":
             from ampai_default_engine import ampai_default_chat
             from database import get_core_memories
+
             _ensure_session_owner_for_user(request.session_id, user)
             core_mems = get_core_memories()
             default_result = ampai_default_chat(
@@ -2111,8 +2597,15 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                 core_mems=core_mems,
             )
             # Handle memory candidate from built-in engine
-            if default_result.get("memory_action") == "pending_approval" and default_result.get("memory_fact"):
-                _create_memory_candidate(user.username, request.session_id, default_result["memory_fact"], confidence=0.75)
+            if default_result.get(
+                "memory_action"
+            ) == "pending_approval" and default_result.get("memory_fact"):
+                _create_memory_candidate(
+                    user.username,
+                    request.session_id,
+                    default_result["memory_fact"],
+                    confidence=0.75,
+                )
             return {
                 "response": default_result["response"],
                 "web_search": default_result.get("web_search", {}),
@@ -2133,7 +2626,9 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         persona_prompt = ""
         if request.persona_id:
             personas = _load_config_list("personas_library")
-            persona = next((p for p in personas if p.get("id") == request.persona_id), None)
+            persona = next(
+                (p for p in personas if p.get("id") == request.persona_id), None
+            )
             if persona and persona.get("system_prompt"):
                 persona_prompt = str(persona.get("system_prompt")).strip()
         message_for_agent = request.message
@@ -2142,21 +2637,37 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         effective_chat_prefs = get_effective_chat_preferences(user.username)
         requested_mode = (request.chat_output_mode or "").strip().lower()
         if requested_mode not in {"compact", "normal"}:
-            requested_mode = str(effective_chat_prefs.get("chat_output_mode") or "normal").strip().lower()
+            requested_mode = (
+                str(effective_chat_prefs.get("chat_output_mode") or "normal")
+                .strip()
+                .lower()
+            )
         if requested_mode not in {"compact", "normal"}:
             requested_mode = "normal"
         low_token_mode = bool(effective_chat_prefs.get("low_token_mode"))
         requested_memory_mode = (request.memory_mode or "").strip().lower()
         if requested_memory_mode not in {"indexed", "full"}:
             requested_memory_mode = "indexed"
-        effective_memory_mode = requested_memory_mode if user.role == "admin" else "indexed"
-        requested_top_k = request.memory_top_k if request.memory_top_k is not None else 5
+        effective_memory_mode = (
+            requested_memory_mode if user.role == "admin" else "indexed"
+        )
+        requested_top_k = (
+            request.memory_top_k if request.memory_top_k is not None else 5
+        )
         max_top_k = 3 if low_token_mode else 5
         clamped_top_k = max(1, min(max_top_k, int(requested_top_k or 5)))
-        raw_recency_bias = request.recency_bias if request.recency_bias is not None else request.memory_recency_bias
-        effective_recency_bias = float(raw_recency_bias if raw_recency_bias is not None else 0.6)
+        raw_recency_bias = (
+            request.recency_bias
+            if request.recency_bias is not None
+            else request.memory_recency_bias
+        )
+        effective_recency_bias = float(
+            raw_recency_bias if raw_recency_bias is not None else 0.6
+        )
         effective_recency_bias = max(0.0, min(1.0, effective_recency_bias))
-        category_filter_value = (request.category_filter or request.memory_category_filter or "").strip()
+        category_filter_value = (
+            request.category_filter or request.memory_category_filter or ""
+        ).strip()
         policy = _get_memory_policy(user.username)
         # Detect whether the user is explicitly asking to save — bypass approval gate
         explicit_save_fact = _extract_explicit_memory_request(request.message)
@@ -2184,7 +2695,9 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         memory_action = (result.get("memory_action") or "").strip().lower()
         memory_fact = (result.get("memory_fact") or "").strip()
         if memory_action == "pending_approval" and memory_fact:
-            _create_memory_candidate(user.username, request.session_id, memory_fact, confidence=0.9)
+            _create_memory_candidate(
+                user.username, request.session_id, memory_fact, confidence=0.9
+            )
         elif memory_action == "saved" and memory_fact:
             try:
                 add_core_memory(memory_fact)
@@ -2206,7 +2719,9 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             details=f"chars={injected_chars},tokens={injected_tokens},mode={effective_memory_mode}",
         )
         suggestions: List[Dict[str, Any]] = []
-        for match in re.finditer(r"\[CREATE_TASK:\s*(.*?)\]", response_text, re.IGNORECASE | re.DOTALL):
+        for match in re.finditer(
+            r"\[CREATE_TASK:\s*(.*?)\]", response_text, re.IGNORECASE | re.DOTALL
+        ):
             raw = match.group(1)
             fields: Dict[str, str] = {}
             for part in raw.split("|"):
@@ -2233,7 +2748,12 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             all_suggestions = suggestions + all_suggestions
             _save_config_list("task_suggestions", all_suggestions[:500])
             result["task_suggestions"] = suggestions
-            cleaned = re.sub(r"\[CREATE_TASK:\s*.*?\]", "", response_text, flags=re.IGNORECASE | re.DOTALL).strip()
+            cleaned = re.sub(
+                r"\[CREATE_TASK:\s*.*?\]",
+                "",
+                response_text,
+                flags=re.IGNORECASE | re.DOTALL,
+            ).strip()
             result["response"] = cleaned or response_text
         if policy.get("auto_capture_enabled") and policy.get("require_approval"):
             user_msg = (request.message or "").strip()
@@ -2246,12 +2766,21 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                 re.IGNORECASE,
             )
             if user_msg and _AUTO_CAPTURE_RE.search(user_msg):
-                _create_memory_candidate(user.username, request.session_id, user_msg, confidence=0.75)
+                _create_memory_candidate(
+                    user.username, request.session_id, user_msg, confidence=0.75
+                )
         ensure_session_owner(request.session_id, user.username)
         touch_session(request.session_id)
-        created_suggestions = _append_session_suggestions(request.session_id, result.get("task_suggestions") or [])
+        created_suggestions = _append_session_suggestions(
+            request.session_id, result.get("task_suggestions") or []
+        )
         result["task_suggestions"] = created_suggestions
-        log_audit_event(username=user.username, action="memory.write.chat", session_id=request.session_id, details=f"model={request.model_type}")
+        log_audit_event(
+            username=user.username,
+            action="memory.write.chat",
+            session_id=request.session_id,
+            details=f"model={request.model_type}",
+        )
         if created_suggestions:
             log_audit_event(
                 username=user.username,
@@ -2260,8 +2789,20 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                 details=f"count={len(created_suggestions)}",
             )
         try:
-            index_chat_turn(request.session_id, user.username, "user", request.message or "", tags="chat")
-            index_chat_turn(request.session_id, user.username, "assistant", str(result.get("response") or ""), tags="chat")
+            index_chat_turn(
+                request.session_id,
+                user.username,
+                "user",
+                request.message or "",
+                tags="chat",
+            )
+            index_chat_turn(
+                request.session_id,
+                user.username,
+                "assistant",
+                str(result.get("response") or ""),
+                tags="chat",
+            )
         except Exception:
             logger.exception("session recall indexing failed")
         result["memory_status"] = {
@@ -2291,7 +2832,11 @@ def list_memory_inbox(
     current_user: UserContext = Depends(require_authenticated_user),
 ):
     rows = _load_config_list("memory_inbox_candidates")
-    scoped = [r for r in rows if current_user.role == "admin" or r.get("username") == current_user.username]
+    scoped = [
+        r
+        for r in rows
+        if current_user.role == "admin" or r.get("username") == current_user.username
+    ]
     status_value = (status or "").strip().lower()
     if status_value and status_value != "all":
         scoped = [r for r in scoped if (r.get("status") or "").lower() == status_value]
@@ -2303,7 +2848,8 @@ def list_memory_inbox(
     query_text = (q or "").strip().lower()
     if query_text:
         scoped = [
-            r for r in scoped
+            r
+            for r in scoped
             if query_text in (r.get("candidate_text") or "").lower()
             or query_text in (r.get("edited_text") or "").lower()
             or query_text in (r.get("session_id") or "").lower()
@@ -2312,12 +2858,16 @@ def list_memory_inbox(
     from_dt = _parse_iso_dt(date_from)
     to_dt = _parse_iso_dt(date_to)
     if from_dt:
-        scoped = [r for r in scoped if r.get("created_at") and str(r["created_at"]) >= from_dt]
+        scoped = [
+            r for r in scoped if r.get("created_at") and str(r["created_at"]) >= from_dt
+        ]
     if to_dt:
-        scoped = [r for r in scoped if r.get("created_at") and str(r["created_at"]) <= to_dt]
+        scoped = [
+            r for r in scoped if r.get("created_at") and str(r["created_at"]) <= to_dt
+        ]
 
     scoped = sorted(scoped, key=lambda r: r.get("created_at") or "", reverse=True)
-    page = scoped[offset: offset + limit]
+    page = scoped[offset : offset + limit]
     return {
         "items": page,
         "candidates": page,
@@ -2330,26 +2880,40 @@ def list_memory_inbox(
 
 
 @app.post("/api/memory/inbox/capture")
-def capture_memory_candidate(payload: Dict[str, str], current_user: UserContext = Depends(require_authenticated_user)):
+def capture_memory_candidate(
+    payload: Dict[str, str],
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     text = (payload.get("text") or "").strip()
     session_id = (payload.get("session_id") or "").strip() or "manual"
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
-    item = _create_memory_candidate(current_user.username, session_id, text, confidence=0.8)
+    item = _create_memory_candidate(
+        current_user.username, session_id, text, confidence=0.8
+    )
     return {"status": "success", "item": item}
 
 
 @app.patch("/api/memory/inbox/{candidate_id}")
-def update_memory_inbox(candidate_id: str, request: MemoryInboxUpdateRequest, current_user: UserContext = Depends(require_authenticated_user)):
+def update_memory_inbox(
+    candidate_id: str,
+    request: MemoryInboxUpdateRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     next_status = (request.status or "").strip().lower()
     if next_status not in {"approved", "rejected", "pending"}:
-        raise HTTPException(status_code=400, detail="status must be approved, rejected, or pending")
+        raise HTTPException(
+            status_code=400, detail="status must be approved, rejected, or pending"
+        )
     rows = _load_config_list("memory_inbox_candidates")
     updated = None
     for row in rows:
         if row.get("id") != candidate_id:
             continue
-        if current_user.role != "admin" and row.get("username") != current_user.username:
+        if (
+            current_user.role != "admin"
+            and row.get("username") != current_user.username
+        ):
             raise HTTPException(status_code=403, detail="Forbidden")
         row["status"] = next_status
         row["edited_text"] = (request.edited_text or "").strip()
@@ -2366,12 +2930,19 @@ def update_memory_inbox(candidate_id: str, request: MemoryInboxUpdateRequest, cu
     if not updated:
         raise HTTPException(status_code=404, detail="Candidate not found")
     _save_config_list("memory_inbox_candidates", rows)
-    log_audit_event(username=current_user.username, action=f"memory.review.{next_status}", session_id=updated.get("session_id"), details=updated.get("id"))
+    log_audit_event(
+        username=current_user.username,
+        action=f"memory.review.{next_status}",
+        session_id=updated.get("session_id"),
+        details=updated.get("id"),
+    )
     return {"status": "success", "item": updated}
 
 
 @app.delete("/api/memory/inbox/{candidate_id}")
-def delete_memory_inbox(candidate_id: str, current_user: UserContext = Depends(require_authenticated_user)):
+def delete_memory_inbox(
+    candidate_id: str, current_user: UserContext = Depends(require_authenticated_user)
+):
     rows = _load_config_list("memory_inbox_candidates")
     kept: List[Dict[str, Any]] = []
     removed: Optional[Dict[str, Any]] = None
@@ -2379,7 +2950,10 @@ def delete_memory_inbox(candidate_id: str, current_user: UserContext = Depends(r
         if str(row.get("id")) != str(candidate_id):
             kept.append(row)
             continue
-        if current_user.role != "admin" and row.get("username") != current_user.username:
+        if (
+            current_user.role != "admin"
+            and row.get("username") != current_user.username
+        ):
             raise HTTPException(status_code=403, detail="Forbidden")
         removed = row
     if not removed:
@@ -2395,10 +2969,15 @@ def delete_memory_inbox(candidate_id: str, current_user: UserContext = Depends(r
 
 
 @app.post("/api/notifications/chat-reply")
-def notify_chat_reply(request: ChatReplyNotificationRequest, current_user: UserContext = Depends(require_authenticated_user)):
+def notify_chat_reply(
+    request: ChatReplyNotificationRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     prefs = get_effective_notification_preferences(current_user.username)
     interval_seconds = int(prefs.get("minimum_notify_interval_seconds") or 0)
-    if _notification_throttle_active(current_user.username, request.session_id, interval_seconds):
+    if _notification_throttle_active(
+        current_user.username, request.session_id, interval_seconds
+    ):
         return {"status": "throttled"}
 
     preview = (request.reply_preview or "").strip()
@@ -2407,7 +2986,9 @@ def notify_chat_reply(request: ChatReplyNotificationRequest, current_user: UserC
 
     digest_mode = (prefs.get("digest_mode") or "immediate").strip().lower()
     if digest_mode == "periodic":
-        queued = enqueue_pending_reply_notification(current_user.username, request.session_id, preview)
+        queued = enqueue_pending_reply_notification(
+            current_user.username, request.session_id, preview
+        )
         return {"status": "queued" if queued else "queue_failed"}
 
     if not bool(prefs.get("email_notify_on_away_replies")):
@@ -2421,7 +3002,9 @@ def notify_chat_reply(request: ChatReplyNotificationRequest, current_user: UserC
 
 
 @app.get("/api/users/me/notification-preferences")
-def get_my_notification_preferences(current_user: UserContext = Depends(require_authenticated_user)):
+def get_my_notification_preferences(
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     return get_effective_notification_preferences(current_user.username)
 
 
@@ -2432,28 +3015,41 @@ def update_my_notification_preferences(
 ):
     digest_mode = (request.digest_mode or "immediate").strip().lower()
     if digest_mode not in {"immediate", "periodic"}:
-        raise HTTPException(status_code=400, detail="digest_mode must be immediate or periodic")
+        raise HTTPException(
+            status_code=400, detail="digest_mode must be immediate or periodic"
+        )
 
     ok = upsert_user_notification_preferences(
         username=current_user.username,
         browser_notify_on_away_replies=bool(request.browser_notify_on_away_replies),
         email_notify_on_away_replies=bool(request.email_notify_on_away_replies),
-        minimum_notify_interval_seconds=max(0, int(request.minimum_notify_interval_seconds)),
+        minimum_notify_interval_seconds=max(
+            0, int(request.minimum_notify_interval_seconds)
+        ),
         digest_mode=digest_mode,
         digest_interval_minutes=max(1, int(request.digest_interval_minutes)),
     )
     if not ok:
-        raise HTTPException(status_code=500, detail="Failed to save notification preferences")
-    return {"status": "success", "preferences": get_effective_notification_preferences(current_user.username)}
+        raise HTTPException(
+            status_code=500, detail="Failed to save notification preferences"
+        )
+    return {
+        "status": "success",
+        "preferences": get_effective_notification_preferences(current_user.username),
+    }
 
 
 @app.get("/api/users/me/memory-policy")
-def get_my_memory_policy(current_user: UserContext = Depends(require_authenticated_user)):
+def get_my_memory_policy(
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     return _get_memory_policy(current_user.username)
 
 
 @app.get("/api/users/me/chat-preferences")
-def get_my_chat_preferences(current_user: UserContext = Depends(require_authenticated_user)):
+def get_my_chat_preferences(
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     return get_effective_chat_preferences(current_user.username)
 
 
@@ -2470,17 +3066,25 @@ def update_my_chat_preferences(
     )
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to save chat preferences")
-    return {"status": "success", "preferences": get_effective_chat_preferences(current_user.username)}
+    return {
+        "status": "success",
+        "preferences": get_effective_chat_preferences(current_user.username),
+    }
 
 
 @app.put("/api/users/me/memory-policy")
-def update_my_memory_policy(request: MemoryPolicyRequest, current_user: UserContext = Depends(require_authenticated_user)):
+def update_my_memory_policy(
+    request: MemoryPolicyRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     payload = {
         "auto_capture_enabled": bool(request.auto_capture_enabled),
         "require_approval": bool(request.require_approval),
         "pii_strict_mode": bool(request.pii_strict_mode),
         "retention_days": max(1, int(request.retention_days)),
-        "allowed_categories": [c.strip() for c in (request.allowed_categories or []) if c and c.strip()],
+        "allowed_categories": [
+            c.strip() for c in (request.allowed_categories or []) if c and c.strip()
+        ],
     }
     set_config(f"memory_policy_{current_user.username}", json.dumps(payload))
     return {"status": "success", **payload}
@@ -2492,13 +3096,18 @@ def list_workspaces(current_user: UserContext = Depends(require_authenticated_us
     scoped = []
     for row in rows:
         members = row.get("members", [])
-        if current_user.role == "admin" or any(m.get("username") == current_user.username for m in members):
+        if current_user.role == "admin" or any(
+            m.get("username") == current_user.username for m in members
+        ):
             scoped.append(row)
     return {"workspaces": scoped[:200]}
 
 
 @app.post("/api/workspaces")
-def create_workspace(request: WorkspaceCreateRequest, current_user: UserContext = Depends(require_authenticated_user)):
+def create_workspace(
+    request: WorkspaceCreateRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     name = (request.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
@@ -2525,7 +3134,12 @@ def create_workspace(request: WorkspaceCreateRequest, current_user: UserContext 
 
 
 @app.post("/api/workspaces/{workspace_id}/members/{username}")
-def upsert_workspace_member(workspace_id: str, username: str, request: WorkspaceMemberUpdateRequest, current_user: UserContext = Depends(require_authenticated_user)):
+def upsert_workspace_member(
+    workspace_id: str,
+    username: str,
+    request: WorkspaceMemberUpdateRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     role = (request.role or "").strip().lower()
     if role not in {"owner", "admin", "editor", "viewer"}:
         raise HTTPException(status_code=400, detail="Invalid role")
@@ -2551,7 +3165,11 @@ def upsert_workspace_member(workspace_id: str, username: str, request: Workspace
 
 
 @app.delete("/api/workspaces/{workspace_id}/members/{username}")
-def remove_workspace_member(workspace_id: str, username: str, current_user: UserContext = Depends(require_authenticated_user)):
+def remove_workspace_member(
+    workspace_id: str,
+    username: str,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     rows = _workspace_store()
     target = None
     for row in rows:
@@ -2569,7 +3187,11 @@ def remove_workspace_member(workspace_id: str, username: str, current_user: User
 
 
 @app.post("/api/workspaces/{workspace_id}/share-session")
-def share_session_to_workspace(workspace_id: str, request: WorkspaceShareSessionRequest, current_user: UserContext = Depends(require_authenticated_user)):
+def share_session_to_workspace(
+    workspace_id: str,
+    request: WorkspaceShareSessionRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     rows = _workspace_store()
     target = None
     for row in rows:
@@ -2595,7 +3217,9 @@ def get_daily_brief(current_user: UserContext = Depends(require_authenticated_us
     all_tasks = list_tasks()
     open_tasks = [t for t in all_tasks if (t.get("status") or "todo") != "done"][:10]
     memories = get_core_memories()[:8]
-    pending_replies_raw = get_config(f"pending_reply_notifications_{current_user.username}", "[]") or "[]"
+    pending_replies_raw = (
+        get_config(f"pending_reply_notifications_{current_user.username}", "[]") or "[]"
+    )
     try:
         pending_replies = json.loads(pending_replies_raw)
         if not isinstance(pending_replies, list):
@@ -2603,7 +3227,11 @@ def get_daily_brief(current_user: UserContext = Depends(require_authenticated_us
     except Exception:
         pending_replies = []
     candidates = _load_config_list("memory_inbox_candidates")
-    pending_candidates = [c for c in candidates if c.get("username") == current_user.username and c.get("status") == "pending"][:8]
+    pending_candidates = [
+        c
+        for c in candidates
+        if c.get("username") == current_user.username and c.get("status") == "pending"
+    ][:8]
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "open_tasks": open_tasks,
@@ -2614,44 +3242,73 @@ def get_daily_brief(current_user: UserContext = Depends(require_authenticated_us
 
 
 @app.post("/api/integrations/context/pull")
-def pull_external_context(payload: Dict[str, Any], current_user: UserContext = Depends(require_authenticated_user)):
+def pull_external_context(
+    payload: Dict[str, Any],
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     provider = (payload.get("provider") or "email").strip().lower()
     if provider not in {"email", "calendar"}:
-        raise HTTPException(status_code=400, detail="provider must be email or calendar")
+        raise HTTPException(
+            status_code=400, detail="provider must be email or calendar"
+        )
     summary = ""
     if provider == "email":
         timezone_name = (payload.get("timezone") or "UTC").strip() or "UTC"
-        messages = _fetch_todays_email_messages(provider="outlook", timezone_name=timezone_name, max_results=20)
-        summary = "\n".join([f"- {(m.get('subject') or '(no subject)')} | {(m.get('from') or '')}" for m in messages[:15]])
+        messages = _fetch_todays_email_messages(
+            provider="outlook", timezone_name=timezone_name, max_results=20
+        )
+        summary = "\n".join(
+            [
+                f"- {(m.get('subject') or '(no subject)')} | {(m.get('from') or '')}"
+                for m in messages[:15]
+            ]
+        )
     else:
         calendar_feed = (get_config("calendar_feed_url") or "").strip()
         summary = f"Calendar connector configured: {'yes' if calendar_feed else 'no'}; events sync placeholder."
     session_id = (payload.get("session_id") or "external_context").strip()
-    created = _create_memory_candidate(current_user.username, session_id, f"[{provider.upper()} CONTEXT]\n{summary}", confidence=0.7)
+    created = _create_memory_candidate(
+        current_user.username,
+        session_id,
+        f"[{provider.upper()} CONTEXT]\n{summary}",
+        confidence=0.7,
+    )
     return {"status": "success", "provider": provider, "candidate": created}
 
 
 @app.post("/api/quick-capture")
-def quick_capture(payload: Dict[str, str], current_user: UserContext = Depends(require_authenticated_user)):
+def quick_capture(
+    payload: Dict[str, str],
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     text = (payload.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
     session_id = (payload.get("session_id") or "quick_capture").strip()
-    item = _create_memory_candidate(current_user.username, session_id, text, confidence=0.9)
+    item = _create_memory_candidate(
+        current_user.username, session_id, text, confidence=0.9
+    )
     return {"status": "success", "item": item}
 
+
 @app.get("/api/sessions/{session_id}/task-suggestions")
-def list_session_task_suggestions(session_id: str, current_user: UserContext = Depends(require_authenticated_user)):
+def list_session_task_suggestions(
+    session_id: str, current_user: UserContext = Depends(require_authenticated_user)
+):
     rows = _load_config_list("task_suggestions")
     scoped = [
-        r for r in rows
-        if r.get("session_id") == session_id and (current_user.role == "admin" or r.get("username") == current_user.username)
+        r
+        for r in rows
+        if r.get("session_id") == session_id
+        and (current_user.role == "admin" or r.get("username") == current_user.username)
     ]
     return {"suggestions": scoped[:200]}
 
 
 @app.post("/api/tasks/from-suggestion/{suggestion_id}")
-def create_task_from_suggestion(suggestion_id: str, current_user: UserContext = Depends(require_authenticated_user)):
+def create_task_from_suggestion(
+    suggestion_id: str, current_user: UserContext = Depends(require_authenticated_user)
+):
     rows = _load_config_list("task_suggestions")
     target = None
     for row in rows:
@@ -2677,7 +3334,9 @@ def create_task_from_suggestion(suggestion_id: str, current_user: UserContext = 
 
 
 @app.get("/api/memory/analytics")
-def get_memory_analytics(days: int = 30, current_user: UserContext = Depends(require_authenticated_user)):
+def get_memory_analytics(
+    days: int = 30, current_user: UserContext = Depends(require_authenticated_user)
+):
     days = max(1, min(days, 365))
     sessions = get_all_sessions()
     visible_sessions = []
@@ -2691,7 +3350,11 @@ def get_memory_analytics(days: int = 30, current_user: UserContext = Depends(req
     for s in visible_sessions:
         raw = s.get("updated_at")
         try:
-            ts = datetime.fromisoformat(raw.replace("Z", "+00:00")) if isinstance(raw, str) else None
+            ts = (
+                datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if isinstance(raw, str)
+                else None
+            )
         except Exception:
             ts = None
         if ts and ts >= since:
@@ -2703,8 +3366,12 @@ def get_memory_analytics(days: int = 30, current_user: UserContext = Depends(req
     candidates = _load_config_list("memory_inbox_candidates")
     suggestions = _load_config_list("task_suggestions")
     if current_user.role != "admin":
-        candidates = [c for c in candidates if c.get("username") == current_user.username]
-        suggestions = [s for s in suggestions if s.get("username") == current_user.username]
+        candidates = [
+            c for c in candidates if c.get("username") == current_user.username
+        ]
+        suggestions = [
+            s for s in suggestions if s.get("username") == current_user.username
+        ]
     approved_count = sum(1 for c in candidates if c.get("status") == "approved")
     pending_count = sum(1 for c in candidates if c.get("status") == "pending")
     converted_count = sum(1 for s in suggestions if s.get("status") == "converted")
@@ -2717,18 +3384,27 @@ def get_memory_analytics(days: int = 30, current_user: UserContext = Depends(req
         "memory_candidates_approved": approved_count,
         "task_suggestions_total": total_suggestions,
         "task_suggestions_converted": converted_count,
-        "task_suggestion_conversion_rate": round((converted_count / total_suggestions), 3) if total_suggestions else 0.0,
+        "task_suggestion_conversion_rate": round(
+            (converted_count / total_suggestions), 3
+        )
+        if total_suggestions
+        else 0.0,
     }
 
 
 @app.post("/api/integrations/email/summary-today")
-def summarize_todays_email(request: EmailSummaryTodayRequest, _: UserContext = Depends(require_authenticated_user)):
+def summarize_todays_email(
+    request: EmailSummaryTodayRequest,
+    _: UserContext = Depends(require_authenticated_user),
+):
     provider = request.provider.strip().lower()
     tz_name = request.timezone.strip() or "UTC"
     try:
         ZoneInfo(tz_name)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid timezone: {tz_name}") from exc
+        raise HTTPException(
+            status_code=400, detail=f"Invalid timezone: {tz_name}"
+        ) from exc
 
     messages = _fetch_todays_email_messages(
         provider=provider,
@@ -2737,7 +3413,11 @@ def summarize_todays_email(request: EmailSummaryTodayRequest, _: UserContext = D
     )
 
     if not messages:
-        return {"status": "success", "summary": "No messages found for today.", "messages_count": 0}
+        return {
+            "status": "success",
+            "summary": "No messages found for today.",
+            "messages_count": 0,
+        }
 
     digest_lines = []
     for idx, msg in enumerate(messages, 1):
@@ -2753,8 +3433,7 @@ def summarize_todays_email(request: EmailSummaryTodayRequest, _: UserContext = D
         f"Summarize my {provider.title()} email inbox for {date_label} ({tz_name}). "
         "Provide: (1) key topics, (2) urgent follow-ups, (3) calendar/time-sensitive items, "
         "(4) a concise executive digest.\n\n"
-        "Today's messages:\n"
-        + "\n\n".join(digest_lines)
+        "Today's messages:\n" + "\n\n".join(digest_lines)
     )
 
     model_type = request.model_type or get_config("default_model", "ollama")
@@ -2801,10 +3480,25 @@ async def upload_file(
 
                 with open(file_path, "rb") as pdf_file:
                     reader = PyPDF2.PdfReader(pdf_file)
-                    extracted_text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+                    extracted_text = "\n".join(
+                        [
+                            page.extract_text()
+                            for page in reader.pages
+                            if page.extract_text()
+                        ]
+                    )
             except Exception as e:
                 logger.warning("PDF parsing error: %s", e)
-        elif file_ext.lower() in [".txt", ".csv", ".json", ".md", ".py", ".js", ".html", ".css"]:
+        elif file_ext.lower() in [
+            ".txt",
+            ".csv",
+            ".json",
+            ".md",
+            ".py",
+            ".js",
+            ".html",
+            ".css",
+        ]:
             with open(file_path, "r", encoding="utf-8") as text_file:
                 extracted_text = text_file.read()
 
@@ -2839,13 +3533,19 @@ def get_media_assets(
 def _can_access_session(session_id: str, current_user: UserContext) -> bool:
     if current_user.role == "admin":
         return True
-    return session_id in get_accessible_session_ids(username=current_user.username, is_admin=False)
+    return session_id in get_accessible_session_ids(
+        username=current_user.username, is_admin=False
+    )
 
 
 def _ensure_task_suggestion_column() -> None:
     try:
         with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS task_suggestions TEXT"))
+            conn.execute(
+                text(
+                    "ALTER TABLE session_metadata ADD COLUMN IF NOT EXISTS task_suggestions TEXT"
+                )
+            )
             conn.commit()
     except Exception:
         logger.exception("Failed to ensure task_suggestions column")
@@ -2856,7 +3556,9 @@ def _load_session_suggestions(session_id: str) -> List[Dict]:
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                text("SELECT task_suggestions FROM session_metadata WHERE session_id = :session_id"),
+                text(
+                    "SELECT task_suggestions FROM session_metadata WHERE session_id = :session_id"
+                ),
                 {"session_id": session_id},
             ).first()
             raw = row[0] if row else None
@@ -2945,7 +3647,9 @@ def find_reports(
 
 
 @app.get("/api/reports/session-summary/{session_id}")
-def get_session_summary_report(session_id: str, current_user: UserContext = Depends(require_authenticated_user)):
+def get_session_summary_report(
+    session_id: str, current_user: UserContext = Depends(require_authenticated_user)
+):
     if not _can_access_session(session_id, current_user):
         raise HTTPException(status_code=403, detail="Forbidden session")
 
@@ -2957,8 +3661,6 @@ def get_session_summary_report(session_id: str, current_user: UserContext = Depe
     if not report:
         raise HTTPException(status_code=404, detail="No session data available")
     return report
-
-
 
 
 @app.get("/api/sessions")
@@ -2973,10 +3675,16 @@ def get_sessions(
     sessions = get_all_sessions(query=query, category=category, archived=archived)
     needs_migration = False
     if current_user.role != "admin":
-        fallback_open = str(get_config("auth_open_session_fallback", "true")).strip().lower() in {"1", "true", "yes", "on"}
-        accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
+        fallback_open = str(
+            get_config("auth_open_session_fallback", "true")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        accessible_ids = set(
+            get_accessible_session_ids(username=current_user.username, is_admin=False)
+        )
         if fallback_open:
-            accessible_ids = {s.get("session_id") for s in sessions if s.get("session_id")}
+            accessible_ids = {
+                s.get("session_id") for s in sessions if s.get("session_id")
+            }
         if not accessible_ids:
             # Auto-adopt legacy/unowned sessions for first-time auth migration.
             # This keeps existing local chats visible after enabling login.
@@ -2990,7 +3698,11 @@ def get_sessions(
                 if ensure_session_owner(sid, current_user.username):
                     adopted += 1
             if adopted > 0:
-                accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
+                accessible_ids = set(
+                    get_accessible_session_ids(
+                        username=current_user.username, is_admin=False
+                    )
+                )
             if not accessible_ids:
                 # Fallback for legacy single-user deployments:
                 # show existing sessions even if ownership metadata is missing.
@@ -3010,7 +3722,7 @@ def get_sessions(
         category_counts[cat] = category_counts.get(cat, 0) + 1
 
     total = len(sessions)
-    paged_sessions = sessions[offset: offset + limit]
+    paged_sessions = sessions[offset : offset + limit]
     for sess in paged_sessions:
         sess["tier"] = _classify_tier(sess.get("updated_at"))
     return {
@@ -3024,16 +3736,27 @@ def get_sessions(
     }
 
 
-def _session_matches_migration_criteria(session_id: str, session_row: Dict[str, Any]) -> bool:
+def _session_matches_migration_criteria(
+    session_id: str, session_row: Dict[str, Any]
+) -> bool:
     # Keep criteria explicit and deterministic so admins can manually run one-time migrations.
     return session_id.startswith("tg_") or bool(session_row.get("archived"))
 
 
-def _run_orphan_adoption(actor_username: str, orphan_session_ids: List[str], sessions: List[Dict[str, Any]], explicit: bool, force: bool = False, batch_size: int = 100) -> Dict[str, int]:
+def _run_orphan_adoption(
+    actor_username: str,
+    orphan_session_ids: List[str],
+    sessions: List[Dict[str, Any]],
+    explicit: bool,
+    force: bool = False,
+    batch_size: int = 100,
+) -> Dict[str, int]:
     raw_cutoff = (get_config("auth_orphan_adoption_cutoff_datetime", "") or "").strip()
     cutoff_dt = _parse_iso_dt(raw_cutoff)
     if raw_cutoff and not cutoff_dt:
-        logger.warning("Invalid auth_orphan_adoption_cutoff_datetime config value: %s", raw_cutoff)
+        logger.warning(
+            "Invalid auth_orphan_adoption_cutoff_datetime config value: %s", raw_cutoff
+        )
 
     adopted_count = 0
     skipped_processed = 0
@@ -3097,9 +3820,15 @@ def _run_orphan_adoption(actor_username: str, orphan_session_ids: List[str], ses
 
 
 @app.post("/api/admin/sessions/adopt-orphans")
-def admin_adopt_orphan_sessions(request: OrphanAdoptionRunRequest, user: UserContext = Depends(require_admin_user)):
+def admin_adopt_orphan_sessions(
+    request: OrphanAdoptionRunRequest, user: UserContext = Depends(require_admin_user)
+):
     sessions = get_all_sessions()
-    orphan_session_ids = [s.get("session_id") for s in sessions if s.get("session_id") and not get_session_owner(s.get("session_id"))]
+    orphan_session_ids = [
+        s.get("session_id")
+        for s in sessions
+        if s.get("session_id") and not get_session_owner(s.get("session_id"))
+    ]
     summary = _run_orphan_adoption(
         actor_username=user.username,
         orphan_session_ids=orphan_session_ids,
@@ -3116,15 +3845,17 @@ def admin_adopt_orphan_sessions(request: OrphanAdoptionRunRequest, user: UserCon
     }
 
 
-
-
 def _collect_known_session_ids() -> List[str]:
     known: set[str] = set()
 
     if db_engine:
         try:
             with db_engine.connect() as conn:
-                sql_rows = conn.execute(text(f"SELECT DISTINCT session_id FROM {CHAT_HISTORY_TABLE} WHERE session_id IS NOT NULL")).fetchall()
+                sql_rows = conn.execute(
+                    text(
+                        f"SELECT DISTINCT session_id FROM {CHAT_HISTORY_TABLE} WHERE session_id IS NOT NULL"
+                    )
+                ).fetchall()
                 known.update((r[0] or "").strip() for r in sql_rows if r and r[0])
         except Exception:
             logger.exception("Failed collecting session ids from SQL history")
@@ -3144,7 +3875,9 @@ def _collect_known_session_ids() -> List[str]:
         if os.path.exists(SESSION_RECALL_DB_PATH):
             conn = sqlite3.connect(SESSION_RECALL_DB_PATH)
             try:
-                rows = conn.execute("SELECT DISTINCT session_id FROM session_recall_fts WHERE session_id IS NOT NULL").fetchall()
+                rows = conn.execute(
+                    "SELECT DISTINCT session_id FROM session_recall_fts WHERE session_id IS NOT NULL"
+                ).fetchall()
                 known.update((r[0] or "").strip() for r in rows if r and r[0])
             finally:
                 conn.close()
@@ -3154,8 +3887,16 @@ def _collect_known_session_ids() -> List[str]:
     return sorted(s for s in known if s)
 
 
-def _run_session_repair(assign_unowned_to: Optional[str], fix_ownership: bool) -> Dict[str, Any]:
-    report = {"total_found": 0, "metadata_fixed": 0, "ownership_fixed": 0, "skipped": 0, "errors": 0}
+def _run_session_repair(
+    assign_unowned_to: Optional[str], fix_ownership: bool
+) -> Dict[str, Any]:
+    report = {
+        "total_found": 0,
+        "metadata_fixed": 0,
+        "ownership_fixed": 0,
+        "skipped": 0,
+        "errors": 0,
+    }
     all_ids = _collect_known_session_ids()
     report["total_found"] = len(all_ids)
 
@@ -3168,7 +3909,9 @@ def _run_session_repair(assign_unowned_to: Optional[str], fix_ownership: bool) -
 
     for sid in all_ids:
         try:
-            before = next((s for s in get_all_sessions() if s.get("session_id") == sid), None)
+            before = next(
+                (s for s in get_all_sessions() if s.get("session_id") == sid), None
+            )
             if before is None:
                 touch_session_updated_at(sid)
                 report["metadata_fixed"] += 1
@@ -3189,13 +3932,21 @@ def _run_session_repair(assign_unowned_to: Optional[str], fix_ownership: bool) -
 
 
 @app.post("/api/admin/sessions/rebuild-index")
-def admin_rebuild_sessions_index(req: SessionRepairRequest, _: UserContext = Depends(require_admin_user)):
-    return _run_session_repair(assign_unowned_to=req.assign_unowned_to, fix_ownership=False)
+def admin_rebuild_sessions_index(
+    req: SessionRepairRequest, _: UserContext = Depends(require_admin_user)
+):
+    return _run_session_repair(
+        assign_unowned_to=req.assign_unowned_to, fix_ownership=False
+    )
 
 
 @app.post("/api/admin/sessions/rebuild-ownership")
-def admin_rebuild_sessions_ownership(req: SessionRepairRequest, _: UserContext = Depends(require_admin_user)):
-    return _run_session_repair(assign_unowned_to=req.assign_unowned_to, fix_ownership=True)
+def admin_rebuild_sessions_ownership(
+    req: SessionRepairRequest, _: UserContext = Depends(require_admin_user)
+):
+    return _run_session_repair(
+        assign_unowned_to=req.assign_unowned_to, fix_ownership=True
+    )
 
 
 def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
@@ -3228,7 +3979,10 @@ def _classify_tier(updated_at_raw: Optional[str]) -> str:
 
 
 @app.post("/api/memory/explorer")
-def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = Depends(require_authenticated_user)):
+def memory_explorer(
+    request: MemoryExplorerQuery,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
     query = (request.query or "").strip()
     category = (request.category or "").strip() or None
     owner_scope = (request.owner_scope or "mine").strip().lower()
@@ -3238,13 +3992,19 @@ def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = De
     date_to = _parse_iso_dt(request.date_to)
 
     if owner_scope not in {"mine", "shared", "all"}:
-        raise HTTPException(status_code=400, detail="owner_scope must be mine, shared, or all")
+        raise HTTPException(
+            status_code=400, detail="owner_scope must be mine, shared, or all"
+        )
     if owner_scope == "all" and current_user.role != "admin":
         owner_scope = "mine"
 
     sessions = get_all_sessions(query=query, category=category, archived=False)
     shared_ids = set(list_shared_sessions_for_user(current_user.username))
-    accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=current_user.role == "admin"))
+    accessible_ids = set(
+        get_accessible_session_ids(
+            username=current_user.username, is_admin=current_user.role == "admin"
+        )
+    )
     if current_user.role != "admin" and not accessible_ids:
         adopted = 0
         for sess in sessions:
@@ -3254,11 +4014,19 @@ def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = De
             if ensure_session_owner(sid, current_user.username):
                 adopted += 1
         if adopted > 0:
-            accessible_ids = set(get_accessible_session_ids(username=current_user.username, is_admin=False))
+            accessible_ids = set(
+                get_accessible_session_ids(
+                    username=current_user.username, is_admin=False
+                )
+            )
         if not accessible_ids:
-            fallback_open = str(get_config("auth_open_session_fallback", "true")).strip().lower() in {"1", "true", "yes", "on"}
+            fallback_open = str(
+                get_config("auth_open_session_fallback", "true")
+            ).strip().lower() in {"1", "true", "yes", "on"}
             if fallback_open:
-                accessible_ids = {s.get("session_id") for s in sessions if s.get("session_id")}
+                accessible_ids = {
+                    s.get("session_id") for s in sessions if s.get("session_id")
+                }
 
     filtered = []
     for session in sessions:
@@ -3289,14 +4057,16 @@ def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = De
                 "pinned": bool(session.get("pinned")),
                 "owner": owner,
                 "shared_via_group": is_shared,
-                "visibility": "shared" if is_shared else ("mine" if is_owned else "other"),
+                "visibility": "shared"
+                if is_shared
+                else ("mine" if is_owned else "other"),
                 "tier": _classify_tier(updated_at_raw),
                 "insight": get_session_insight(session_id),
             }
         )
 
     total = len(filtered)
-    page = filtered[offset: offset + limit]
+    page = filtered[offset : offset + limit]
     category_counts: Dict[str, int] = {}
     for item in filtered:
         cat = item.get("category") or "Uncategorized"
@@ -3304,8 +4074,11 @@ def memory_explorer(request: MemoryExplorerQuery, current_user: UserContext = De
 
     memory_rows = _load_config_list("memory_inbox_candidates")
     pending_candidates = [
-        row for row in memory_rows
-        if (current_user.role == "admin" or row.get("username") == current_user.username)
+        row
+        for row in memory_rows
+        if (
+            current_user.role == "admin" or row.get("username") == current_user.username
+        )
         and (row.get("status") or "").lower() == "pending"
         and (not query or query.lower() in (row.get("candidate_text") or "").lower())
     ][:20]
@@ -3342,11 +4115,17 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
     # This mirrors the same fallback used by /api/sessions so that any session
     # visible in the sidebar is also readable here.
     if not _can_access_session(session_id, user):
-        if user.role != "admin" and session_exists(session_id) and not get_session_owner(session_id):
+        if (
+            user.role != "admin"
+            and session_exists(session_id)
+            and not get_session_owner(session_id)
+        ):
             ensure_session_owner(session_id, user.username)
         # Re-check after potential adoption
         if not _can_access_session(session_id, user):
-            fallback_open = str(get_config("auth_open_session_fallback", "true")).strip().lower() in {"1", "true", "yes", "on"}
+            fallback_open = str(
+                get_config("auth_open_session_fallback", "true")
+            ).strip().lower() in {"1", "true", "yes", "on"}
             if not (fallback_open and session_exists(session_id)):
                 raise HTTPException(status_code=403, detail="Forbidden session")
     try:
@@ -3357,10 +4136,15 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
         if not messages:
             try:
                 with db_engine.connect() as _conn:
-                    raw_row_count = _conn.execute(
-                        text(f"SELECT COUNT(*) FROM {CHAT_HISTORY_TABLE} WHERE session_id = :s"),
-                        {"s": session_id},
-                    ).scalar() or 0
+                    raw_row_count = (
+                        _conn.execute(
+                            text(
+                                f"SELECT COUNT(*) FROM {CHAT_HISTORY_TABLE} WHERE session_id = :s"
+                            ),
+                            {"s": session_id},
+                        ).scalar()
+                        or 0
+                    )
             except Exception:
                 pass
 
@@ -3369,7 +4153,10 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
                 redis_msgs = get_redis_history(session_id).messages
                 mapped = []
                 for m in redis_msgs or []:
-                    mtype = getattr(m, "type", "") or getattr(m, "__class__", type("x", (), {})).__name__.lower()
+                    mtype = (
+                        getattr(m, "type", "")
+                        or getattr(m, "__class__", type("x", (), {})).__name__.lower()
+                    )
                     role = "human" if "human" in str(mtype).lower() else "ai"
                     content = getattr(m, "content", "") or ""
                     if content:
@@ -3383,7 +4170,12 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
                 messages = get_session_recall_messages(session_id=session_id, limit=500)
             except Exception:
                 pass
-        log_audit_event(username=user.username, action="memory.read.history", session_id=session_id, details=f"count={len(messages)};raw_rows={raw_row_count}")
+        log_audit_event(
+            username=user.username,
+            action="memory.read.history",
+            session_id=session_id,
+            details=f"count={len(messages)};raw_rows={raw_row_count}",
+        )
         return {"messages": messages, "raw_row_count": raw_row_count}
     except HTTPException:
         raise
@@ -3392,9 +4184,10 @@ def get_history(session_id: str, user=Depends(require_authenticated_user)):
         return {"messages": [], "error": str(e)}
 
 
-
 @app.get("/api/sessions/{session_id}/task-suggestions")
-def get_session_task_suggestions(session_id: str, user=Depends(require_authenticated_user)):
+def get_session_task_suggestions(
+    session_id: str, user=Depends(require_authenticated_user)
+):
     if not _can_access_session(session_id, user):
         raise HTTPException(status_code=403, detail="Forbidden session")
     suggestions = _load_session_suggestions(session_id)
@@ -3408,9 +4201,11 @@ def create_task_from_suggestion(
     request: SuggestionTaskCreateRequest,
     user=Depends(require_authenticated_user),
 ):
-    search_sessions = [request.session_id] if request.session_id else [
-        s.get("session_id") for s in get_all_sessions() if s.get("session_id")
-    ]
+    search_sessions = (
+        [request.session_id]
+        if request.session_id
+        else [s.get("session_id") for s in get_all_sessions() if s.get("session_id")]
+    )
     search_sessions = [sid for sid in search_sessions if sid]
     for session_id in search_sessions:
         if not _can_access_session(session_id, user):
@@ -3420,7 +4215,9 @@ def create_task_from_suggestion(
             if str(item.get("id")) != str(suggestion_id):
                 continue
             if bool(item.get("resolved")):
-                raise HTTPException(status_code=409, detail="Suggestion already resolved")
+                raise HTTPException(
+                    status_code=409, detail="Suggestion already resolved"
+                )
             task_id = create_task(
                 title=item.get("title") or "Untitled task",
                 description=item.get("description") or "",
@@ -3445,13 +4242,20 @@ def create_task_from_suggestion(
 
 
 @app.post("/api/sessions/{session_id}/category")
-def update_category(session_id: str, request: CategoryRequest, user=Depends(require_authenticated_user)):
+def update_category(
+    session_id: str, request: CategoryRequest, user=Depends(require_authenticated_user)
+):
     if not _can_access_session(session_id, user):
         raise HTTPException(status_code=403, detail="Forbidden session")
     success = set_session_category(session_id, request.category)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to update category")
-    log_audit_event(username=user.username, action="memory.update.category", session_id=session_id, category=request.category)
+    log_audit_event(
+        username=user.username,
+        action="memory.update.category",
+        session_id=session_id,
+        category=request.category,
+    )
     return {"status": "success"}
 
 
@@ -3462,9 +4266,15 @@ def delete_session(session_id: str, user=Depends(require_authenticated_user)):
     try:
         _enforce_session_access_or_403(session_id, user)
         delete_session_metadata(session_id)
-        SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL).clear()
+        SQLChatMessageHistory(
+            session_id=session_id, connection_string=DATABASE_URL
+        ).clear()
         get_redis_history(session_id).clear()
-        log_audit_event(username=user.username, action="memory.delete.session", session_id=session_id)
+        log_audit_event(
+            username=user.username,
+            action="memory.delete.session",
+            session_id=session_id,
+        )
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -3495,7 +4305,10 @@ def import_session(request: ImportRequest, user=Depends(require_authenticated_us
     try:
         ensure_session_owner(request.session_id, user.username)
         history = get_sql_chat_history(request.session_id)
-        existing_messages = {(msg["type"], msg["content"]) for msg in list_chat_messages(request.session_id, dedupe=False)}
+        existing_messages = {
+            (msg["type"], msg["content"])
+            for msg in list_chat_messages(request.session_id, dedupe=False)
+        }
         inserted = 0
         skipped = 0
 
@@ -3541,7 +4354,9 @@ def get_admin_configs(user=Depends(require_admin_user)):
 
 
 @app.post("/api/admin/configs")
-def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admin_user)):
+def update_admin_configs(
+    request: ConfigUpdateRequest, user=Depends(require_admin_user)
+):
     saved = []
     skipped = []
     for k, v in request.configs.items():
@@ -3550,14 +4365,20 @@ def update_admin_configs(request: ConfigUpdateRequest, user=Depends(require_admi
         if k == "backup_mode":
             mode = (v or "").strip().lower()
             if mode not in {"local", "ftp", "smb"}:
-                raise HTTPException(status_code=400, detail="backup_mode must be local, ftp, or smb")
+                raise HTTPException(
+                    status_code=400, detail="backup_mode must be local, ftp, or smb"
+                )
         # Skip masked values (contain '...') — means the frontend sent back the masked placeholder
         if v and "..." in v:
             skipped.append(k)
             continue
         set_config(k, v or "")
         saved.append(k)
-    log_audit_event(username=user.username, action="admin.configs.update", details=f"saved={len(saved)};skipped={len(skipped)}")
+    log_audit_event(
+        username=user.username,
+        action="admin.configs.update",
+        details=f"saved={len(saved)};skipped={len(skipped)}",
+    )
     return {"status": "success", "saved": saved, "skipped": skipped}
 
 
@@ -3568,7 +4389,10 @@ def export_admin_settings(
     user: UserContext = Depends(require_admin_user),
 ):
     if include_secrets and not confirm_include_secrets:
-        raise HTTPException(status_code=400, detail="include_secrets=true requires confirm_include_secrets=true")
+        raise HTTPException(
+            status_code=400,
+            detail="include_secrets=true requires confirm_include_secrets=true",
+        )
     raw_configs = get_all_configs()
     exported: Dict[str, str] = {}
     redacted: List[str] = []
@@ -3595,22 +4419,36 @@ def export_admin_settings(
 
 
 @app.post("/api/admin/settings/import")
-def import_admin_settings(request: AdminSettingsImportRequest, user: UserContext = Depends(require_admin_user)):
+def import_admin_settings(
+    request: AdminSettingsImportRequest, user: UserContext = Depends(require_admin_user)
+):
     strategy = (request.conflict_strategy or "skip").strip().lower()
     if strategy not in {"skip", "overwrite"}:
-        raise HTTPException(status_code=400, detail="conflict_strategy must be skip or overwrite")
+        raise HTTPException(
+            status_code=400, detail="conflict_strategy must be skip or overwrite"
+        )
     incoming = request.configs or {}
     if not isinstance(incoming, dict):
-        raise HTTPException(status_code=400, detail="configs must be an object of key/value pairs")
+        raise HTTPException(
+            status_code=400, detail="configs must be an object of key/value pairs"
+        )
     existing = get_all_configs()
     results: List[Dict[str, Any]] = []
-    summary = {"created": 0, "updated": 0, "skipped_conflict": 0, "skipped_invalid": 0, "unchanged": 0}
+    summary = {
+        "created": 0,
+        "updated": 0,
+        "skipped_conflict": 0,
+        "skipped_invalid": 0,
+        "unchanged": 0,
+    }
     to_apply: List[tuple[str, str]] = []
     for key, raw_value in sorted(incoming.items(), key=lambda kv: kv[0]):
         normalized_key = (key or "").strip()
         if not normalized_key:
             summary["skipped_invalid"] += 1
-            results.append({"key": key, "status": "skipped_invalid", "reason": "empty key"})
+            results.append(
+                {"key": key, "status": "skipped_invalid", "reason": "empty key"}
+            )
             continue
         value = "" if raw_value is None else str(raw_value)
         current = existing.get(normalized_key)
@@ -3628,7 +4466,14 @@ def import_admin_settings(request: AdminSettingsImportRequest, user: UserContext
             status = "updated"
             summary["updated"] += 1
             to_apply.append((normalized_key, value))
-        results.append({"key": normalized_key, "status": status, "previous": current, "incoming": value})
+        results.append(
+            {
+                "key": normalized_key,
+                "status": status,
+                "previous": current,
+                "incoming": value,
+            }
+        )
     if not request.dry_run:
         for key, value in to_apply:
             set_config(key, value)
@@ -3637,7 +4482,12 @@ def import_admin_settings(request: AdminSettingsImportRequest, user: UserContext
         action="admin.settings.import",
         details=f"dry_run={request.dry_run};strategy={strategy};keys={len(incoming)};changes={len(to_apply)}",
     )
-    return {"dry_run": request.dry_run, "conflict_strategy": strategy, "summary": summary, "results": results}
+    return {
+        "dry_run": request.dry_run,
+        "conflict_strategy": strategy,
+        "summary": summary,
+        "results": results,
+    }
 
 
 @app.post("/api/admin/change-password")
@@ -3653,7 +4503,9 @@ def admin_change_password(
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
     if len(request.new_password or "") < 8:
-        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+        raise HTTPException(
+            status_code=400, detail="New password must be at least 8 characters"
+        )
 
     new_hash = pwd_context.hash(request.new_password)
     if not db_update_user(current_user.username, password_hash=new_hash):
@@ -3668,24 +4520,34 @@ def admin_list_users(_: UserContext = Depends(require_admin_user)):
 
 
 @app.post("/api/admin/users")
-def admin_create_user(request: AdminUserCreateRequest, _: UserContext = Depends(require_admin_user)):
+def admin_create_user(
+    request: AdminUserCreateRequest, _: UserContext = Depends(require_admin_user)
+):
     username = (request.username or "").strip()
     role = (request.role or "user").strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
     if len(request.password or "") < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 8 characters"
+        )
     if role not in {"admin", "user"}:
         raise HTTPException(status_code=400, detail="Role must be admin or user")
     if get_user(username):
         raise HTTPException(status_code=409, detail="User already exists")
-    if not db_create_user(username=username, role=role, password_hash=pwd_context.hash(request.password)):
+    if not db_create_user(
+        username=username, role=role, password_hash=pwd_context.hash(request.password)
+    ):
         raise HTTPException(status_code=500, detail="Failed to create user")
     return {"status": "success"}
 
 
 @app.patch("/api/admin/users/{username}")
-def admin_update_user(username: str, request: AdminUserUpdateRequest, current_user: UserContext = Depends(require_admin_user)):
+def admin_update_user(
+    username: str,
+    request: AdminUserUpdateRequest,
+    current_user: UserContext = Depends(require_admin_user),
+):
     username = username.strip()
     existing = get_user(username)
     if not existing:
@@ -3695,9 +4557,13 @@ def admin_update_user(username: str, request: AdminUserUpdateRequest, current_us
     if role is not None and role not in {"admin", "user"}:
         raise HTTPException(status_code=400, detail="Role must be admin or user")
     if request.password is not None and len(request.password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 8 characters"
+        )
     if existing["username"] == current_user.username and role == "user":
-        raise HTTPException(status_code=400, detail="You cannot remove your own admin role")
+        raise HTTPException(
+            status_code=400, detail="You cannot remove your own admin role"
+        )
 
     password_hash = pwd_context.hash(request.password) if request.password else None
     if not db_update_user(username=username, role=role, password_hash=password_hash):
@@ -3706,10 +4572,14 @@ def admin_update_user(username: str, request: AdminUserUpdateRequest, current_us
 
 
 @app.delete("/api/admin/users/{username}")
-def admin_delete_user(username: str, current_user: UserContext = Depends(require_admin_user)):
+def admin_delete_user(
+    username: str, current_user: UserContext = Depends(require_admin_user)
+):
     username = username.strip()
     if username == current_user.username:
-        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+        raise HTTPException(
+            status_code=400, detail="You cannot delete your own account"
+        )
     existing = get_user(username)
     if not existing:
         raise HTTPException(status_code=404, detail="User not found")
@@ -3719,7 +4589,10 @@ def admin_delete_user(username: str, current_user: UserContext = Depends(require
 
 
 @app.post("/api/admin/memory-groups")
-def admin_create_memory_group(request: MemoryGroupCreateRequest, current_user: UserContext = Depends(require_admin_user)):
+def admin_create_memory_group(
+    request: MemoryGroupCreateRequest,
+    current_user: UserContext = Depends(require_admin_user),
+):
     group_id = create_memory_group(
         name=request.name.strip(),
         description=(request.description or "").strip(),
@@ -3740,21 +4613,29 @@ def get_memory_groups(current_user: UserContext = Depends(require_authenticated_
 
 
 @app.post("/api/admin/memory-groups/{group_id}/members/{username}")
-def admin_add_group_member(group_id: int, username: str, _: UserContext = Depends(require_admin_user)):
+def admin_add_group_member(
+    group_id: int, username: str, _: UserContext = Depends(require_admin_user)
+):
     clean_username = username.strip()
     if not clean_username:
         raise HTTPException(status_code=400, detail="Username is required")
     if not memory_group_exists(group_id):
         raise HTTPException(status_code=404, detail="Memory group not found")
     if memory_group_membership_exists(group_id, clean_username):
-        raise HTTPException(status_code=409, detail="User is already a member of this group")
+        raise HTTPException(
+            status_code=409, detail="User is already a member of this group"
+        )
     if not add_user_to_memory_group(group_id, clean_username):
         raise HTTPException(status_code=500, detail="Failed to add member")
     return {"status": "success"}
 
 
 @app.post("/api/admin/memory-groups/{group_id}/share")
-def admin_share_session(group_id: int, request: MemoryGroupShareRequest, _: UserContext = Depends(require_admin_user)):
+def admin_share_session(
+    group_id: int,
+    request: MemoryGroupShareRequest,
+    _: UserContext = Depends(require_admin_user),
+):
     if not memory_group_exists(group_id):
         raise HTTPException(status_code=404, detail="Memory group not found")
     session_id = (request.session_id or "").strip()
@@ -3763,28 +4644,36 @@ def admin_share_session(group_id: int, request: MemoryGroupShareRequest, _: User
     if not session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     if memory_group_session_share_exists(group_id, session_id):
-        raise HTTPException(status_code=409, detail="Session is already shared to this group")
+        raise HTTPException(
+            status_code=409, detail="Session is already shared to this group"
+        )
     if not share_session_to_group(group_id, session_id):
         raise HTTPException(status_code=500, detail="Failed to share session")
     return {"status": "success"}
 
 
 @app.get("/api/admin/memory-groups/{group_id}/members")
-def admin_get_group_members(group_id: int, _: UserContext = Depends(require_admin_user)):
+def admin_get_group_members(
+    group_id: int, _: UserContext = Depends(require_admin_user)
+):
     if not memory_group_exists(group_id):
         raise HTTPException(status_code=404, detail="Memory group not found")
     return {"members": get_memory_group_members(group_id)}
 
 
 @app.get("/api/admin/memory-groups/{group_id}/sessions")
-def admin_get_group_sessions(group_id: int, _: UserContext = Depends(require_admin_user)):
+def admin_get_group_sessions(
+    group_id: int, _: UserContext = Depends(require_admin_user)
+):
     if not memory_group_exists(group_id):
         raise HTTPException(status_code=404, detail="Memory group not found")
     return {"sessions": get_memory_group_sessions(group_id)}
 
 
 @app.delete("/api/admin/memory-groups/{group_id}/members/{username}")
-def admin_remove_group_member(group_id: int, username: str, _: UserContext = Depends(require_admin_user)):
+def admin_remove_group_member(
+    group_id: int, username: str, _: UserContext = Depends(require_admin_user)
+):
     clean_username = username.strip()
     if not clean_username:
         raise HTTPException(status_code=400, detail="Username is required")
@@ -3796,7 +4685,9 @@ def admin_remove_group_member(group_id: int, username: str, _: UserContext = Dep
 
 
 @app.delete("/api/admin/memory-groups/{group_id}/sessions/{session_id}")
-def admin_unshare_group_session(group_id: int, session_id: str, _: UserContext = Depends(require_admin_user)):
+def admin_unshare_group_session(
+    group_id: int, session_id: str, _: UserContext = Depends(require_admin_user)
+):
     clean_session_id = (session_id or "").strip()
     if not clean_session_id:
         raise HTTPException(status_code=400, detail="Session ID is required")
@@ -3823,7 +4714,9 @@ def _profile_row_to_response(row: Dict[str, Any]) -> Dict[str, Any]:
             "port": row.get("destination_port"),
             "username": row.get("destination_username", ""),
             "credential_key_ref": row.get("credential_key_ref", ""),
-            "has_credential": bool(get_config(row.get("credential_key_ref", ""), "")) if row.get("credential_key_ref") else False,
+            "has_credential": bool(get_config(row.get("credential_key_ref", ""), ""))
+            if row.get("credential_key_ref")
+            else False,
         },
         "schedule": {
             "cron": row.get("schedule_cron", ""),
@@ -3836,58 +4729,142 @@ def _profile_row_to_response(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _normalize_profile_payload(request: BackupProfileCreateRequest | BackupProfileUpdateRequest, existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _normalize_profile_payload(
+    request: BackupProfileCreateRequest | BackupProfileUpdateRequest,
+    existing: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     destination = request.destination
     schedule = request.schedule
-    destination_type = (destination.type if destination else (existing or {}).get("destination_type", "local") or "local").strip().lower()
+    destination_type = (
+        (
+            destination.type
+            if destination
+            else (existing or {}).get("destination_type", "local") or "local"
+        )
+        .strip()
+        .lower()
+    )
     if destination_type not in {"local", "ftp", "smb"}:
-        raise HTTPException(status_code=400, detail="destination.type must be local, ftp, or smb")
+        raise HTTPException(
+            status_code=400, detail="destination.type must be local, ftp, or smb"
+        )
 
-    credential_key_ref = (destination.credential_key_ref if destination else "") or (existing or {}).get("credential_key_ref") or ""
+    credential_key_ref = (
+        (destination.credential_key_ref if destination else "")
+        or (existing or {}).get("credential_key_ref")
+        or ""
+    )
     if destination and destination.credential:
-        credential_key_ref = credential_key_ref or f"backup_profile_cred_{uuid.uuid4().hex}"
+        credential_key_ref = (
+            credential_key_ref or f"backup_profile_cred_{uuid.uuid4().hex}"
+        )
         set_config(credential_key_ref, destination.credential)
 
     return {
-        "name": (request.name if request.name is not None else (existing or {}).get("name") or "").strip(),
-        "enabled": bool(request.enabled if request.enabled is not None else (existing or {}).get("enabled", True)),
-        "include_database": bool(request.include_database if request.include_database is not None else (existing or {}).get("include_database", True)),
-        "include_uploads": bool(request.include_uploads if request.include_uploads is not None else (existing or {}).get("include_uploads", False)),
-        "include_configs": bool(request.include_configs if request.include_configs is not None else (existing or {}).get("include_configs", False)),
-        "include_logs": bool(request.include_logs if request.include_logs is not None else (existing or {}).get("include_logs", False)),
+        "name": (
+            request.name
+            if request.name is not None
+            else (existing or {}).get("name") or ""
+        ).strip(),
+        "enabled": bool(
+            request.enabled
+            if request.enabled is not None
+            else (existing or {}).get("enabled", True)
+        ),
+        "include_database": bool(
+            request.include_database
+            if request.include_database is not None
+            else (existing or {}).get("include_database", True)
+        ),
+        "include_uploads": bool(
+            request.include_uploads
+            if request.include_uploads is not None
+            else (existing or {}).get("include_uploads", False)
+        ),
+        "include_configs": bool(
+            request.include_configs
+            if request.include_configs is not None
+            else (existing or {}).get("include_configs", False)
+        ),
+        "include_logs": bool(
+            request.include_logs
+            if request.include_logs is not None
+            else (existing or {}).get("include_logs", False)
+        ),
         "destination_type": destination_type,
-        "destination_path": (destination.path if destination else (existing or {}).get("destination_path", "")) or "",
-        "destination_host": (destination.host if destination else (existing or {}).get("destination_host", "")) or "",
-        "destination_port": destination.port if destination else (existing or {}).get("destination_port"),
-        "destination_username": (destination.username if destination else (existing or {}).get("destination_username", "")) or "",
+        "destination_path": (
+            destination.path
+            if destination
+            else (existing or {}).get("destination_path", "")
+        )
+        or "",
+        "destination_host": (
+            destination.host
+            if destination
+            else (existing or {}).get("destination_host", "")
+        )
+        or "",
+        "destination_port": destination.port
+        if destination
+        else (existing or {}).get("destination_port"),
+        "destination_username": (
+            destination.username
+            if destination
+            else (existing or {}).get("destination_username", "")
+        )
+        or "",
         "credential_key_ref": credential_key_ref,
-        "schedule_cron": (schedule.cron if schedule else (existing or {}).get("schedule_cron", "")) or "",
-        "schedule_interval_minutes": schedule.interval_minutes if schedule else (existing or {}).get("schedule_interval_minutes"),
-        "retention_count": request.retention_count if request.retention_count is not None else (existing or {}).get("retention_count"),
-        "retention_days": request.retention_days if request.retention_days is not None else (existing or {}).get("retention_days"),
+        "schedule_cron": (
+            schedule.cron if schedule else (existing or {}).get("schedule_cron", "")
+        )
+        or "",
+        "schedule_interval_minutes": schedule.interval_minutes
+        if schedule
+        else (existing or {}).get("schedule_interval_minutes"),
+        "retention_count": request.retention_count
+        if request.retention_count is not None
+        else (existing or {}).get("retention_count"),
+        "retention_days": request.retention_days
+        if request.retention_days is not None
+        else (existing or {}).get("retention_days"),
     }
 
 
 @app.get("/api/backups/profiles")
 def get_backup_profiles(_: UserContext = Depends(require_admin_user)):
-    return {"profiles": [_profile_row_to_response(row) for row in list_backup_profiles()]}
+    return {
+        "profiles": [_profile_row_to_response(row) for row in list_backup_profiles()]
+    }
 
 
 @app.post("/api/backups/profiles")
-def create_backup_profiles_api(request: BackupProfileCreateRequest, user: UserContext = Depends(require_admin_user)):
+def create_backup_profiles_api(
+    request: BackupProfileCreateRequest, user: UserContext = Depends(require_admin_user)
+):
     payload = _normalize_profile_payload(request)
     if not payload["name"]:
         raise HTTPException(status_code=400, detail="Profile name is required")
     profile_id = create_backup_profile(payload)
     if not profile_id:
         raise HTTPException(status_code=500, detail="Failed to create backup profile")
-    log_audit_event(username=user.username, action="admin.backup_profile.create", details=f"profile_id={profile_id}")
+    log_audit_event(
+        username=user.username,
+        action="admin.backup_profile.create",
+        details=f"profile_id={profile_id}",
+    )
     profile = get_backup_profile(profile_id)
-    return {"status": "success", "profile": _profile_row_to_response(profile or {"id": profile_id, **payload})}
+    return {
+        "status": "success",
+        "profile": _profile_row_to_response(profile or {"id": profile_id, **payload}),
+    }
 
 
 @app.patch("/api/backups/profiles/{profile_id}")
-def update_backup_profiles_api(profile_id: int, request: BackupProfileUpdateRequest, user: UserContext = Depends(require_admin_user)):
+def update_backup_profiles_api(
+    profile_id: int,
+    request: BackupProfileUpdateRequest,
+    user: UserContext = Depends(require_admin_user),
+):
     existing = get_backup_profile(profile_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Backup profile not found")
@@ -3896,44 +4873,69 @@ def update_backup_profiles_api(profile_id: int, request: BackupProfileUpdateRequ
         raise HTTPException(status_code=400, detail="Profile name is required")
     if not update_backup_profile(profile_id, payload):
         raise HTTPException(status_code=500, detail="Failed to update backup profile")
-    log_audit_event(username=user.username, action="admin.backup_profile.update", details=f"profile_id={profile_id}")
+    log_audit_event(
+        username=user.username,
+        action="admin.backup_profile.update",
+        details=f"profile_id={profile_id}",
+    )
     updated = get_backup_profile(profile_id)
-    return {"status": "success", "profile": _profile_row_to_response(updated or {"id": profile_id, **payload})}
+    return {
+        "status": "success",
+        "profile": _profile_row_to_response(updated or {"id": profile_id, **payload}),
+    }
 
 
 @app.delete("/api/backups/profiles/{profile_id}")
-def delete_backup_profiles_api(profile_id: int, user: UserContext = Depends(require_admin_user)):
+def delete_backup_profiles_api(
+    profile_id: int, user: UserContext = Depends(require_admin_user)
+):
     profile = get_backup_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Backup profile not found")
     if not delete_backup_profile(profile_id):
         raise HTTPException(status_code=500, detail="Failed to delete backup profile")
-    log_audit_event(username=user.username, action="admin.backup_profile.delete", details=f"profile_id={profile_id}")
+    log_audit_event(
+        username=user.username,
+        action="admin.backup_profile.delete",
+        details=f"profile_id={profile_id}",
+    )
     return {"status": "success"}
 
 
 @app.post("/api/backups/profiles/{profile_id}/run")
-def run_backup_profile_now(profile_id: int, current_user: UserContext = Depends(require_admin_user)):
+def run_backup_profile_now(
+    profile_id: int, current_user: UserContext = Depends(require_admin_user)
+):
     profile = get_backup_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Backup profile not found")
     if not profile.get("enabled"):
         raise HTTPException(status_code=400, detail="Backup profile is disabled")
-    return _enqueue_backup_job(actor=current_user.username, trigger="manual-profile", profile=profile)
+    return _enqueue_backup_job(
+        actor=current_user.username, trigger="manual-profile", profile=profile
+    )
 
 
 @app.post("/api/backups/run/{profile_id}")
-def run_backup_profile_job(profile_id: int, current_user: UserContext = Depends(require_admin_user)):
+def run_backup_profile_job(
+    profile_id: int, current_user: UserContext = Depends(require_admin_user)
+):
     profile = get_backup_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Backup profile not found")
     if not profile.get("enabled"):
         raise HTTPException(status_code=400, detail="Backup profile is disabled")
-    return _enqueue_backup_job(actor=current_user.username, trigger="manual-profile", profile=profile)
+    return _enqueue_backup_job(
+        actor=current_user.username, trigger="manual-profile", profile=profile
+    )
 
 
 @app.get("/api/backups/jobs")
-def get_backup_jobs(limit: int = Query(default=20), offset: int = Query(default=0), _: UserContext = Depends(require_admin_user)):
+def get_backup_jobs(
+    limit: int = Query(default=20),
+    offset: int = Query(default=0),
+    _: UserContext = Depends(require_admin_user),
+):
     return {"jobs": list_backup_jobs(limit=limit, offset=offset)}
 
 
@@ -3946,14 +4948,17 @@ def get_backup_kpis(_: UserContext = Depends(require_admin_user)):
 def backup_download_instant(_: UserContext = Depends(require_admin_user)):
     try:
         from backup_helpers import build_backup_payload
+
         sessions = export_all_sessions_for_backup()
-        serialized, manifest = build_backup_payload(sessions=sessions, actor="admin_download_instant")
+        serialized, manifest = build_backup_payload(
+            sessions=sessions, actor="admin_download_instant"
+        )
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         filename = f"ampai_full_backup_{timestamp}.json"
         return Response(
             content=serialized,
             media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     except Exception as e:
         logger.error(f"Instant backup failed: {e}")
@@ -3961,10 +4966,14 @@ def backup_download_instant(_: UserContext = Depends(require_admin_user)):
 
 
 @app.get("/api/backups/download")
-def backup_download(path: str = Query(...), _: UserContext = Depends(require_admin_user)):
+def backup_download(
+    path: str = Query(...), _: UserContext = Depends(require_admin_user)
+):
     normalized = (path or "").strip()
     if not normalized or not os.path.isabs(normalized):
-        raise HTTPException(status_code=400, detail="A valid absolute local path is required")
+        raise HTTPException(
+            status_code=400, detail="A valid absolute local path is required"
+        )
     if not os.path.isfile(normalized):
         raise HTTPException(status_code=404, detail="Backup artifact not found")
     filename = os.path.basename(normalized) or "backup.json"
@@ -3973,7 +4982,9 @@ def backup_download(path: str = Query(...), _: UserContext = Depends(require_adm
 
 @app.get("/api/backups/download-all")
 def backup_download_all(_: UserContext = Depends(require_admin_user)):
-    local_root = (get_config("backup_local_path", "/tmp/ampai_backups") or "/tmp/ampai_backups").strip()
+    local_root = (
+        get_config("backup_local_path", "/tmp/ampai_backups") or "/tmp/ampai_backups"
+    ).strip()
     if not os.path.isdir(local_root):
         raise HTTPException(status_code=404, detail="Local backup directory not found")
     files = sorted(
@@ -3985,12 +4996,16 @@ def backup_download_all(_: UserContext = Depends(require_admin_user)):
     )
     if not files:
         raise HTTPException(status_code=404, detail="No local backup artifacts found")
-    archive_name = f"ampai_backups_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.zip"
+    archive_name = (
+        f"ampai_backups_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.zip"
+    )
     archive_path = os.path.join(tempfile.gettempdir(), archive_name)
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for file_path in files:
             zf.write(file_path, arcname=os.path.basename(file_path))
-    return FileResponse(archive_path, media_type="application/zip", filename=archive_name)
+    return FileResponse(
+        archive_path, media_type="application/zip", filename=archive_name
+    )
 
 
 @app.get("/api/backups/jobs/{job_id}")
@@ -4002,11 +5017,16 @@ def get_backup_job_details(job_id: int, _: UserContext = Depends(require_admin_u
 
 
 @app.post("/api/admin/backup/run")
-def run_backup(profile_id: Optional[int] = Query(default=None), current_user: UserContext = Depends(require_admin_user)):
+def run_backup(
+    profile_id: Optional[int] = Query(default=None),
+    current_user: UserContext = Depends(require_admin_user),
+):
     profile = get_backup_profile(profile_id) if profile_id else None
     if profile_id and not profile:
         raise HTTPException(status_code=404, detail="Backup profile not found")
-    return _enqueue_backup_job(actor=current_user.username, trigger="manual", profile=profile)
+    return _enqueue_backup_job(
+        actor=current_user.username, trigger="manual", profile=profile
+    )
 
 
 @app.get("/api/admin/backup/status-history")
@@ -4022,7 +5042,10 @@ def get_backup_status_history(_: UserContext = Depends(require_admin_user)):
 
 
 @app.post("/api/admin/backup")
-def run_backup_compat(profile_id: Optional[int] = Query(default=None), current_user: UserContext = Depends(require_admin_user)):
+def run_backup_compat(
+    profile_id: Optional[int] = Query(default=None),
+    current_user: UserContext = Depends(require_admin_user),
+):
     return run_backup(profile_id=profile_id, current_user=current_user)
 
 
@@ -4032,7 +5055,9 @@ def get_backup_history_compat(user: UserContext = Depends(require_admin_user)):
 
 
 @app.post("/api/admin/backup/test-connection")
-def test_backup_connection(request: BackupConnectionTestRequest, _: UserContext = Depends(require_admin_user)):
+def test_backup_connection(
+    request: BackupConnectionTestRequest, _: UserContext = Depends(require_admin_user)
+):
     mode = (request.mode or "").strip().lower()
     if mode == "ftp":
         ok, detail = test_ftp_connection(
@@ -4056,7 +5081,9 @@ def test_backup_connection(request: BackupConnectionTestRequest, _: UserContext 
     return {"status": "success", "detail": detail}
 
 
-def _timed_probe(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 8) -> Dict[str, Any]:
+def _timed_probe(
+    url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 8
+) -> Dict[str, Any]:
     started = time.perf_counter()
     req = urllib.request.Request(url, headers=headers or {})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -4069,98 +5096,199 @@ def _timed_probe(url: str, headers: Optional[Dict[str, str]] = None, timeout: in
 
 
 @app.post("/api/admin/providers/test")
-def test_provider_connection(request: ProviderTestRequest, _: UserContext = Depends(require_admin_user)):
+def test_provider_connection(
+    request: ProviderTestRequest, _: UserContext = Depends(require_admin_user)
+):
     provider = (request.provider or "").strip().lower()
     configs = get_all_configs()
     try:
         if provider == "ollama":
-            base = (configs.get("ollama_base_url") or "http://host.docker.internal:11434").rstrip("/")
+            base = (
+                configs.get("ollama_base_url") or "http://host.docker.internal:11434"
+            ).rstrip("/")
             return _timed_probe(f"{base}/api/tags")
         if provider == "generic":
             base = (configs.get("generic_base_url") or "").rstrip("/")
             if not base:
-                raise HTTPException(status_code=400, detail="generic_base_url is not configured")
-            headers = {"Authorization": f"Bearer {configs.get('generic_api_key') or ''}"} if configs.get("generic_api_key") else {}
+                raise HTTPException(
+                    status_code=400, detail="generic_base_url is not configured"
+                )
+            headers = (
+                {"Authorization": f"Bearer {configs.get('generic_api_key') or ''}"}
+                if configs.get("generic_api_key")
+                else {}
+            )
             result = _timed_probe(f"{base}/v1/models", headers=headers)
             result["model"] = (configs.get("generic_model") or "").strip() or None
             return result
         if provider == "openrouter":
             key = (configs.get("openrouter_api_key") or "").strip()
             if not key:
-                raise HTTPException(status_code=400, detail="openrouter_api_key is not configured")
-            return _timed_probe("https://openrouter.ai/api/v1/models", headers={"Authorization": f"Bearer {key}"})
+                raise HTTPException(
+                    status_code=400, detail="openrouter_api_key is not configured"
+                )
+            return _timed_probe(
+                "https://openrouter.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
         if provider in {"openai", "gemini", "anthropic"}:
-            key_name = {"openai": "openai_api_key", "gemini": "gemini_api_key", "anthropic": "anthropic_api_key"}[provider]
+            key_name = {
+                "openai": "openai_api_key",
+                "gemini": "gemini_api_key",
+                "anthropic": "anthropic_api_key",
+            }[provider]
             has_key = bool((configs.get(key_name) or "").strip())
-            return {"ok": has_key, "provider": provider, "message": "API key configured" if has_key else f"{key_name} is not configured"}
+            return {
+                "ok": has_key,
+                "provider": provider,
+                "message": "API key configured"
+                if has_key
+                else f"{key_name} is not configured",
+            }
         if provider == "anythingllm":
             base = (configs.get("anythingllm_base_url") or "").rstrip("/")
             workspace = (configs.get("anythingllm_workspace") or "").strip()
             if not base or not workspace:
-                raise HTTPException(status_code=400, detail="anythingllm base URL/workspace is not configured")
-            headers = {"Authorization": f"Bearer {configs.get('anythingllm_api_key') or ''}"} if configs.get("anythingllm_api_key") else {}
+                raise HTTPException(
+                    status_code=400,
+                    detail="anythingllm base URL/workspace is not configured",
+                )
+            headers = (
+                {"Authorization": f"Bearer {configs.get('anythingllm_api_key') or ''}"}
+                if configs.get("anythingllm_api_key")
+                else {}
+            )
             return _timed_probe(f"{base}/api/v1/workspace/{workspace}", headers=headers)
         raise HTTPException(status_code=400, detail="Unsupported provider")
     except urllib.error.HTTPError as exc:
-        return {"ok": False, "status_code": exc.code, "error": f"HTTP {exc.code}: {exc.reason}"}
+        return {
+            "ok": False,
+            "status_code": exc.code,
+            "error": f"HTTP {exc.code}: {exc.reason}",
+        }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
 
 @app.post("/api/admin/backup/restore")
-def restore_backup(request: BackupRestoreRequest, user: UserContext = Depends(require_admin_user)):
+def restore_backup(
+    request: BackupRestoreRequest, user: UserContext = Depends(require_admin_user)
+):
     report = _build_restore_preflight_report(request.backup_json)
     if request.dry_run:
-        preflight_id = _store_restore_preflight(report, report.get("payload_checksum_sha256", ""))
-        return {"status": "success", "phase": "preflight", "preflight_id": preflight_id, "report": report}
+        preflight_id = _store_restore_preflight(
+            report, report.get("payload_checksum_sha256", "")
+        )
+        return {
+            "status": "success",
+            "phase": "preflight",
+            "preflight_id": preflight_id,
+            "report": report,
+        }
     if not report.get("ok"):
-        raise HTTPException(status_code=400, detail="Preflight checks failed; run dry-run and fix issues before restore")
-    preflight_id = _store_restore_preflight(report, report.get("payload_checksum_sha256", ""))
-    job_id = create_restore_job(created_by=user.username, preflight_report=report, status="queued")
+        raise HTTPException(
+            status_code=400,
+            detail="Preflight checks failed; run dry-run and fix issues before restore",
+        )
+    preflight_id = _store_restore_preflight(
+        report, report.get("payload_checksum_sha256", "")
+    )
+    job_id = create_restore_job(
+        created_by=user.username, preflight_report=report, status="queued"
+    )
     if not job_id:
         raise HTTPException(status_code=500, detail="Failed to queue restore job")
-    RESTORE_JOB_QUEUE.put_nowait({"job_id": job_id, "actor": user.username, "backup_json": request.backup_json, "preflight_id": preflight_id})
+    RESTORE_JOB_QUEUE.put_nowait(
+        {
+            "job_id": job_id,
+            "actor": user.username,
+            "backup_json": request.backup_json,
+            "preflight_id": preflight_id,
+        }
+    )
     return {"status": "queued", "job_id": job_id, "preflight_id": preflight_id}
 
 
 @app.post("/api/restores/preflight")
-def restore_preflight(request: RestorePreflightRequest, _: UserContext = Depends(require_admin_user)):
+def restore_preflight(
+    request: RestorePreflightRequest, _: UserContext = Depends(require_admin_user)
+):
     report = _build_restore_preflight_report(request.backup_json)
-    preflight_id = _store_restore_preflight(report, report.get("payload_checksum_sha256", ""))
+    preflight_id = _store_restore_preflight(
+        report, report.get("payload_checksum_sha256", "")
+    )
     return {"status": "success", "preflight_id": preflight_id, "report": report}
 
 
 @app.post("/api/restores/start")
-def restore_start(request: RestoreStartRequest, user: UserContext = Depends(require_admin_user)):
+def restore_start(
+    request: RestoreStartRequest, user: UserContext = Depends(require_admin_user)
+):
     preflight = RESTORE_PREFLIGHT_CACHE.get(request.preflight_id)
     if not preflight:
         raise HTTPException(status_code=400, detail="Preflight ID not found or expired")
     if preflight.get("expires_at", 0) < time.time():
         RESTORE_PREFLIGHT_CACHE.pop(request.preflight_id, None)
-        raise HTTPException(status_code=400, detail="Preflight ID expired; run preflight again")
+        raise HTTPException(
+            status_code=400, detail="Preflight ID expired; run preflight again"
+        )
     if not request.confirm_restore:
         raise HTTPException(status_code=400, detail="confirm_restore must be true")
     report = preflight.get("report") or {}
     if not report.get("ok"):
-        raise HTTPException(status_code=400, detail="Preflight checks failed; restore blocked")
-    checksum = hashlib.sha256(json.dumps(_normalize_restore_archive(json.loads(request.backup_json))["payload"], sort_keys=True).encode("utf-8")).hexdigest()
+        raise HTTPException(
+            status_code=400, detail="Preflight checks failed; restore blocked"
+        )
+    checksum = hashlib.sha256(
+        json.dumps(
+            _normalize_restore_archive(json.loads(request.backup_json))["payload"],
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
     if checksum != preflight.get("payload_checksum"):
-        raise HTTPException(status_code=400, detail="Backup payload changed since preflight; re-run preflight")
+        raise HTTPException(
+            status_code=400,
+            detail="Backup payload changed since preflight; re-run preflight",
+        )
 
-    job_id = create_restore_job(created_by=user.username, preflight_report=report, status="queued")
+    job_id = create_restore_job(
+        created_by=user.username, preflight_report=report, status="queued"
+    )
     if not job_id:
         raise HTTPException(status_code=500, detail="Failed to queue restore job")
     try:
-        RESTORE_JOB_QUEUE.put_nowait({"job_id": job_id, "actor": user.username, "backup_json": request.backup_json, "preflight_id": request.preflight_id})
+        RESTORE_JOB_QUEUE.put_nowait(
+            {
+                "job_id": job_id,
+                "actor": user.username,
+                "backup_json": request.backup_json,
+                "preflight_id": request.preflight_id,
+            }
+        )
     except Exception as exc:
-        update_restore_job(job_id, status="failed", finished_at=datetime.now(timezone.utc), error_message=f"Queue full: {exc}")
-        raise HTTPException(status_code=503, detail="Restore queue is full; retry shortly") from exc
-    log_audit_event(username=user.username, action="admin.restore.run.start", details=f"job_id={job_id} preflight={request.preflight_id}")
+        update_restore_job(
+            job_id,
+            status="failed",
+            finished_at=datetime.now(timezone.utc),
+            error_message=f"Queue full: {exc}",
+        )
+        raise HTTPException(
+            status_code=503, detail="Restore queue is full; retry shortly"
+        ) from exc
+    log_audit_event(
+        username=user.username,
+        action="admin.restore.run.start",
+        details=f"job_id={job_id} preflight={request.preflight_id}",
+    )
     return {"status": "queued", "job_id": job_id}
 
 
 @app.get("/api/restores/jobs")
-def get_restore_jobs(limit: int = Query(default=20), offset: int = Query(default=0), _: UserContext = Depends(require_admin_user)):
+def get_restore_jobs(
+    limit: int = Query(default=20),
+    offset: int = Query(default=0),
+    _: UserContext = Depends(require_admin_user),
+):
     return {"jobs": list_restore_jobs(limit=limit, offset=offset)}
 
 
@@ -4171,6 +5299,7 @@ def get_restore_job_details(job_id: int, _: UserContext = Depends(require_admin_
         raise HTTPException(status_code=404, detail="Restore job not found")
     return job
 
+
 @app.post("/api/admin/configs/migrate")
 def migrate_admin_configs():
     result = migrate_app_config_encryption()
@@ -4178,8 +5307,13 @@ def migrate_admin_configs():
 
 
 @app.post("/api/admin/retention/run")
-def run_retention_now(request: RetentionRunRequest, current_user: UserContext = Depends(require_admin_user)):
-    result = apply_retention_policy(max_age_days=request.max_age_days, archive_only=bool(request.archive_only))
+def run_retention_now(
+    request: RetentionRunRequest,
+    current_user: UserContext = Depends(require_admin_user),
+):
+    result = apply_retention_policy(
+        max_age_days=request.max_age_days, archive_only=bool(request.archive_only)
+    )
     log_audit_event(
         username=current_user.username,
         action="governance.retention.run",
@@ -4189,10 +5323,14 @@ def run_retention_now(request: RetentionRunRequest, current_user: UserContext = 
 
 
 @app.post("/api/admin/retention/dry-run")
-def retention_dry_run(request: RetentionDryRunRequest, current_user: UserContext = Depends(require_admin_user)):
-    from session_recall import DB_PATH as RECALL_DB_PATH
-    from pathlib import Path
+def retention_dry_run(
+    request: RetentionDryRunRequest,
+    current_user: UserContext = Depends(require_admin_user),
+):
     import sqlite3
+    from pathlib import Path
+
+    from session_recall import DB_PATH as RECALL_DB_PATH
 
     chat_days = max(1, int(request.chat_history_days))
     recall_days = max(1, int(request.recall_index_days))
@@ -4218,9 +5356,12 @@ def retention_dry_run(request: RetentionDryRunRequest, current_user: UserContext
             if stale_session_ids:
                 chat_rows = int(
                     conn.execute(
-                        text(f"SELECT COUNT(*) FROM {CHAT_HISTORY_TABLE} WHERE session_id = ANY(:ids)"),
+                        text(
+                            f"SELECT COUNT(*) FROM {CHAT_HISTORY_TABLE} WHERE session_id = ANY(:ids)"
+                        ),
                         {"ids": stale_session_ids},
-                    ).scalar() or 0
+                    ).scalar()
+                    or 0
                 )
 
     recall_rows = 0
@@ -4230,7 +5371,8 @@ def retention_dry_run(request: RetentionDryRunRequest, current_user: UserContext
                 recall_conn.execute(
                     "SELECT COUNT(*) FROM session_recall_fts WHERE datetime(created_at) < datetime('now', ?)",
                     (f"-{recall_days} days",),
-                ).fetchone()[0] or 0
+                ).fetchone()[0]
+                or 0
             )
     except Exception:
         recall_rows = 0
@@ -4250,19 +5392,28 @@ def retention_dry_run(request: RetentionDryRunRequest, current_user: UserContext
     result = {
         "status": "success",
         "categories": {
-            "chat_history": {"days": chat_days, "would_delete_rows": chat_rows, "affected_sessions": len(stale_session_ids)},
+            "chat_history": {
+                "days": chat_days,
+                "would_delete_rows": chat_rows,
+                "affected_sessions": len(stale_session_ids),
+            },
             "recall_index": {"days": recall_days, "would_delete_rows": recall_rows},
             "logs": {"days": logs_days, "would_delete_files": logs_files},
             "backups": {"days": backups_days, "would_delete_files": backups_files},
         },
     }
-    log_audit_event(username=current_user.username, action="governance.retention.dry_run", details=json.dumps(result.get("categories", {})))
+    log_audit_event(
+        username=current_user.username,
+        action="governance.retention.dry_run",
+        details=json.dumps(result.get("categories", {})),
+    )
     return result
 
 
 @app.get("/api/admin/audit/events")
 def admin_audit_events(limit: int = 200, _: UserContext = Depends(require_admin_user)):
     return {"events": list_audit_events(limit=limit)}
+
 
 @app.get("/api/configs/status")
 def get_configs_status(user=Depends(require_authenticated_user)):
@@ -4277,42 +5428,73 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "default_model": configs.get("default_model"),
         "chat_agent_name": configs.get("chat_agent_name") or "AI Agent",
         "chat_agent_avatar_url": configs.get("chat_agent_avatar_url") or "",
-        "notification_default_browser_notify_on_away_replies": configs.get("notification_default_browser_notify_on_away_replies", "true"),
-        "notification_default_email_notify_on_away_replies": configs.get("notification_default_email_notify_on_away_replies", configs.get("chat_reply_email_notifications", "false")),
-        "notification_default_minimum_notify_interval_seconds": configs.get("notification_default_minimum_notify_interval_seconds", "300"),
-        "notification_default_digest_mode": configs.get("notification_default_digest_mode", "immediate"),
-        "notification_default_digest_interval_minutes": configs.get("notification_default_digest_interval_minutes", "30"),
+        "notification_default_browser_notify_on_away_replies": configs.get(
+            "notification_default_browser_notify_on_away_replies", "true"
+        ),
+        "notification_default_email_notify_on_away_replies": configs.get(
+            "notification_default_email_notify_on_away_replies",
+            configs.get("chat_reply_email_notifications", "false"),
+        ),
+        "notification_default_minimum_notify_interval_seconds": configs.get(
+            "notification_default_minimum_notify_interval_seconds", "300"
+        ),
+        "notification_default_digest_mode": configs.get(
+            "notification_default_digest_mode", "immediate"
+        ),
+        "notification_default_digest_interval_minutes": configs.get(
+            "notification_default_digest_interval_minutes", "30"
+        ),
         "local_only_mode": configs.get("local_only_mode", "true"),
         "curator_nudges_enabled": configs.get("curator_nudges_enabled", "true"),
         "memory_embedding_enabled": configs.get("memory_embedding_enabled", "false"),
         "memory_embedding_provider": configs.get("memory_embedding_provider", "ollama"),
-        "memory_embedding_model": configs.get("memory_embedding_model", "nomic-embed-text"),
-        "memory_hybrid_retrieval_enabled": configs.get("memory_hybrid_retrieval_enabled", "false"),
+        "memory_embedding_model": configs.get(
+            "memory_embedding_model", "nomic-embed-text"
+        ),
+        "memory_hybrid_retrieval_enabled": configs.get(
+            "memory_hybrid_retrieval_enabled", "false"
+        ),
     }
 
 
 @app.get("/api/nudges")
-def get_nudges(session_id: Optional[str] = None, user=Depends(require_authenticated_user)):
-    return {"nudges": list_curator_nudges(username=user.username, session_id=session_id, only_unacked=True, limit=50)}
+def get_nudges(
+    session_id: Optional[str] = None, user=Depends(require_authenticated_user)
+):
+    return {
+        "nudges": list_curator_nudges(
+            username=user.username, session_id=session_id, only_unacked=True, limit=50
+        )
+    }
 
 
 @app.post("/api/nudges/ack")
-def ack_nudge(request: CuratorNudgeAckRequest, user=Depends(require_authenticated_user)):
+def ack_nudge(
+    request: CuratorNudgeAckRequest, user=Depends(require_authenticated_user)
+):
     ok = acknowledge_curator_nudge(nudge_id=request.nudge_id, username=user.username)
     if not ok:
         raise HTTPException(status_code=404, detail="Nudge not found")
     return {"status": "ok"}
 
 
-def _synthesize_skill_from_session(session_id: str, username: str, min_messages: int = 4) -> Dict[str, Any]:
+def _synthesize_skill_from_session(
+    session_id: str, username: str, min_messages: int = 4
+) -> Dict[str, Any]:
     messages = list_chat_messages(session_id=session_id, dedupe=True)
     if len(messages) < max(2, min_messages):
-        raise HTTPException(status_code=400, detail="Not enough messages to synthesize skill")
+        raise HTTPException(
+            status_code=400, detail="Not enough messages to synthesize skill"
+        )
 
     suggestion_rows = _load_session_suggestions(session_id)
     selected = [s for s in suggestion_rows if (s.get("title") or "").strip()]
     title = (selected[0].get("title") if selected else "Session Workflow").strip()
-    desc = (selected[0].get("description") if selected else "Derived from successful session flow.").strip()
+    desc = (
+        selected[0].get("description")
+        if selected
+        else "Derived from successful session flow."
+    ).strip()
     trigger_patterns = [title.lower(), "follow-up", "workflow"]
     tool_requirements = ["chat", "tasks"]
     instruction_lines = [
@@ -4339,12 +5521,20 @@ def _synthesize_skill_from_session(session_id: str, username: str, min_messages:
         created_by=username,
     )
     if not skill_id:
-        raise HTTPException(status_code=500, detail="Failed to create synthesized skill")
-    return {"skill_id": skill_id, "confidence": confidence, "quality_score": quality_score}
+        raise HTTPException(
+            status_code=500, detail="Failed to create synthesized skill"
+        )
+    return {
+        "skill_id": skill_id,
+        "confidence": confidence,
+        "quality_score": quality_score,
+    }
 
 
 @app.post("/api/skills/synthesize")
-def synthesize_skill(request: SkillSynthesisRequest, user=Depends(require_authenticated_user)):
+def synthesize_skill(
+    request: SkillSynthesisRequest, user=Depends(require_authenticated_user)
+):
     _ensure_session_owner_for_user(request.session_id, user)
     outcome = _synthesize_skill_from_session(
         session_id=request.session_id,
@@ -4361,7 +5551,11 @@ def synthesize_skill(request: SkillSynthesisRequest, user=Depends(require_authen
 
 
 @app.get("/api/skills")
-def get_skills(status: Optional[str] = None, limit: int = 100, user=Depends(require_authenticated_user)):
+def get_skills(
+    status: Optional[str] = None,
+    limit: int = 100,
+    user=Depends(require_authenticated_user),
+):
     ensure_skill_registry_tables()
     return {"skills": list_agent_skills(status=status, limit=limit)}
 
@@ -4384,8 +5578,14 @@ def log_skill_run(request: SkillRunRequest, user=Depends(require_authenticated_u
 
 
 @app.post("/api/skills/{skill_id}/optimize")
-def optimize_skill(skill_id: int, request: SkillOptimizeRequest, user=Depends(require_authenticated_user)):
-    skills = [s for s in list_agent_skills(limit=500) if int(s.get("id")) == int(skill_id)]
+def optimize_skill(
+    skill_id: int,
+    request: SkillOptimizeRequest,
+    user=Depends(require_authenticated_user),
+):
+    skills = [
+        s for s in list_agent_skills(limit=500) if int(s.get("id")) == int(skill_id)
+    ]
     if not skills:
         raise HTTPException(status_code=404, detail="Skill not found")
     skill = skills[0]
@@ -4418,18 +5618,27 @@ def optimize_skill(skill_id: int, request: SkillOptimizeRequest, user=Depends(re
         "status": "canary",
     }
     set_config(f"skill_rollout_{skill_id}", json.dumps(rollout_config))
-    return {"status": "optimized", "new_version_id": version_id, "performance": perf, "rollout": rollout_config}
+    return {
+        "status": "optimized",
+        "new_version_id": version_id,
+        "performance": perf,
+        "rollout": rollout_config,
+    }
 
 
 @app.post("/api/skills/{skill_id}/rollback")
 def rollback_skill(skill_id: int, user=Depends(require_admin_user)):
     set_config(f"skill_rollout_{skill_id}", "")
-    log_audit_event(username=user.username, action="skill.rollback", details=f"skill_id={skill_id}")
+    log_audit_event(
+        username=user.username, action="skill.rollback", details=f"skill_id={skill_id}"
+    )
     return {"status": "rolled_back", "skill_id": skill_id}
 
 
 @app.post("/api/recall/search")
-def recall_search(request: RecallSearchRequest, user=Depends(require_authenticated_user)):
+def recall_search(
+    request: RecallSearchRequest, user=Depends(require_authenticated_user)
+):
     hits = search_recall(
         query=request.q,
         username=user.username,
@@ -4441,11 +5650,18 @@ def recall_search(request: RecallSearchRequest, user=Depends(require_authenticat
 
 
 @app.post("/api/recall/hybrid-search")
-def recall_hybrid_search(request: RecallHybridSearchRequest, user=Depends(require_authenticated_user)):
+def recall_hybrid_search(
+    request: RecallHybridSearchRequest, user=Depends(require_authenticated_user)
+):
     configs = get_all_configs()
-    enabled = str(configs.get("memory_hybrid_retrieval_enabled", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    enabled = str(
+        configs.get("memory_hybrid_retrieval_enabled", "false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     if not enabled:
-        raise HTTPException(status_code=400, detail="Hybrid recall is disabled. Set memory_hybrid_retrieval_enabled=true.")
+        raise HTTPException(
+            status_code=400,
+            detail="Hybrid recall is disabled. Set memory_hybrid_retrieval_enabled=true.",
+        )
     hits = search_recall_hybrid(
         query=request.q,
         username=user.username,
@@ -4470,7 +5686,12 @@ def _parse_config_list(raw_value: Optional[str], defaults: List[str]) -> List[st
 @app.get("/api/models/options")
 def get_model_options(_: UserContext = Depends(require_authenticated_user)):
     configs = get_all_configs()
-    local_only_mode = str(configs.get("local_only_mode", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    local_only_mode = str(configs.get("local_only_mode", "true")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     providers = [
         {"value": "ollama", "label": "Ollama (Local)"},
         {"value": "generic", "label": "LM Studio / OpenAI-Compatible (Local)"},
@@ -4481,7 +5702,9 @@ def get_model_options(_: UserContext = Depends(require_authenticated_user)):
         {"value": "anthropic", "label": "Anthropic"},
     ]
     if local_only_mode:
-        providers = [p for p in providers if p["value"] in {"ollama", "generic", "anythingllm"}]
+        providers = [
+            p for p in providers if p["value"] in {"ollama", "generic", "anythingllm"}
+        ]
     return {
         "providers": providers,
         "models": {
@@ -4513,6 +5736,7 @@ def get_model_options(_: UserContext = Depends(require_authenticated_user)):
 def api_get_core_memories(user=Depends(require_admin_user)):
     return {"core_memories": get_core_memories()}
 
+
 @app.get("/api/core-memories")
 def api_get_core_memories_self(user=Depends(require_authenticated_user)):
     return {"core_memories": get_core_memories()}
@@ -4526,31 +5750,43 @@ def api_add_core_memory(request: dict, user=Depends(require_authenticated_user))
     success = add_core_memory(fact)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save core memory")
-    log_audit_event(username=user.username, action="memory.write.core", details=f"fact_len={len(fact)}")
+    log_audit_event(
+        username=user.username,
+        action="memory.write.core",
+        details=f"fact_len={len(fact)}",
+    )
     return {"status": "success"}
 
 
 @app.patch("/api/core-memories/{mem_id}")
-def api_edit_core_memory(mem_id: int, request: dict, user=Depends(require_authenticated_user)):
+def api_edit_core_memory(
+    mem_id: int, request: dict, user=Depends(require_authenticated_user)
+):
     fact = (request.get("fact") or "").strip()
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
     success = update_core_memory(mem_id, fact)
     if not success:
         raise HTTPException(status_code=404, detail="Memory not found or unchanged")
-    log_audit_event(username=user.username, action="memory.edit.core", details=f"id={mem_id}")
+    log_audit_event(
+        username=user.username, action="memory.edit.core", details=f"id={mem_id}"
+    )
     return {"status": "success"}
 
 
 @app.patch("/api/admin/core-memories/{mem_id}")
-def api_admin_edit_core_memory(mem_id: int, request: dict, user=Depends(require_admin_user)):
+def api_admin_edit_core_memory(
+    mem_id: int, request: dict, user=Depends(require_admin_user)
+):
     fact = (request.get("fact") or "").strip()
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
     success = update_core_memory(mem_id, fact)
     if not success:
         raise HTTPException(status_code=404, detail="Memory not found or unchanged")
-    log_audit_event(username=user.username, action="memory.edit.core.admin", details=f"id={mem_id}")
+    log_audit_event(
+        username=user.username, action="memory.edit.core.admin", details=f"id={mem_id}"
+    )
     return {"status": "success"}
 
 
@@ -4562,13 +5798,15 @@ def _decode_pb_strings(data: bytes) -> list:
     Returns a list of (field_number, text) tuples.
     """
     import struct
+
     results = []
     pos = 0
 
     def read_varint(d, p):
         result, shift = 0, 0
         while p < len(d):
-            b = d[p]; p += 1
+            b = d[p]
+            p += 1
             result |= (b & 0x7F) << shift
             if not (b & 0x80):
                 break
@@ -4580,15 +5818,15 @@ def _decode_pb_strings(data: bytes) -> list:
             tag_wire, pos = read_varint(data, pos)
             field_num = tag_wire >> 3
             wire_type = tag_wire & 0x7
-            if wire_type == 0:           # varint
+            if wire_type == 0:  # varint
                 _, pos = read_varint(data, pos)
-            elif wire_type == 1:         # 64-bit
+            elif wire_type == 1:  # 64-bit
                 pos += 8
-            elif wire_type == 5:         # 32-bit
+            elif wire_type == 5:  # 32-bit
                 pos += 4
-            elif wire_type == 2:         # length-delimited
+            elif wire_type == 2:  # length-delimited
                 length, pos = read_varint(data, pos)
-                raw = data[pos:pos + length]
+                raw = data[pos : pos + length]
                 pos += length
                 try:
                     text = raw.decode("utf-8")
@@ -4637,12 +5875,12 @@ def get_agent_memories(current_user: UserContext = Depends(require_authenticated
     for candidate in candidate_dirs:
         try:
             if os.path.isdir(candidate):
-                os.listdir(candidate)   # test access
+                os.listdir(candidate)  # test access
                 pb_dir = candidate
                 pb_dir_accessible = True
                 break
         except PermissionError:
-            pb_dir = candidate          # store for error reporting
+            pb_dir = candidate  # store for error reporting
         except Exception:
             pass
 
@@ -4669,31 +5907,49 @@ def get_agent_memories(current_user: UserContext = Depends(require_authenticated
                             texts.append({"field": item["field"], "text": t})
                     if texts:
                         pb_readable_count += 1
-                    pb_memories.append({
-                        "file": fname,
-                        "size_bytes": len(raw),
-                        "strings": texts,
-                    })
+                    pb_memories.append(
+                        {
+                            "file": fname,
+                            "size_bytes": len(raw),
+                            "strings": texts,
+                        }
+                    )
                 except PermissionError:
-                    pb_memories.append({"file": fname, "size_bytes": 0, "strings": [], "error": "permission_denied"})
+                    pb_memories.append(
+                        {
+                            "file": fname,
+                            "size_bytes": 0,
+                            "strings": [],
+                            "error": "permission_denied",
+                        }
+                    )
                 except Exception as exc:
-                    pb_memories.append({"file": fname, "size_bytes": 0, "strings": [], "error": str(exc)[:120]})
+                    pb_memories.append(
+                        {
+                            "file": fname,
+                            "size_bytes": 0,
+                            "strings": [],
+                            "error": str(exc)[:120],
+                        }
+                    )
         except Exception as exc:
             logger.warning("agent-memories: error reading pb dir: %s", exc)
     elif pb_dir:
         # Directory exists but TCC denies access
-        pb_memories = [{
-            "file": "~/.gemini/antigravity/implicit/",
-            "size_bytes": 0,
-            "strings": [],
-            "error": "permission_denied",
-            "fix": (
-                "macOS TCC denies access to ~/.gemini/antigravity/implicit/. "
-                "Grant Full Disk Access to Terminal (or your Python/uvicorn process) "
-                "in System Preferences → Privacy & Security → Full Disk Access. "
-                "Or set the ANTIGRAVITY_MEMORY_DIR env var to a readable copy."
-            ),
-        }]
+        pb_memories = [
+            {
+                "file": "~/.gemini/antigravity/implicit/",
+                "size_bytes": 0,
+                "strings": [],
+                "error": "permission_denied",
+                "fix": (
+                    "macOS TCC denies access to ~/.gemini/antigravity/implicit/. "
+                    "Grant Full Disk Access to Terminal (or your Python/uvicorn process) "
+                    "in System Preferences → Privacy & Security → Full Disk Access. "
+                    "Or set the ANTIGRAVITY_MEMORY_DIR env var to a readable copy."
+                ),
+            }
+        ]
 
     log_audit_event(
         username=current_user.username,
@@ -4746,20 +6002,32 @@ def run_sweep_now(user=Depends(require_admin_user)):
 
 
 @app.post("/api/tasks")
-def api_create_task(request: TaskCreateRequest, user=Depends(require_authenticated_user)):
-    task_id = create_task(request.title, request.description, request.priority, request.due_at, request.session_id)
+def api_create_task(
+    request: TaskCreateRequest, user=Depends(require_authenticated_user)
+):
+    task_id = create_task(
+        request.title,
+        request.description,
+        request.priority,
+        request.due_at,
+        request.session_id,
+    )
     if not task_id:
         raise HTTPException(status_code=500, detail="Failed to create task")
     return {"status": "success", "id": task_id}
 
 
 @app.get("/api/tasks")
-def api_list_tasks(status: Optional[str] = None, user=Depends(require_authenticated_user)):
+def api_list_tasks(
+    status: Optional[str] = None, user=Depends(require_authenticated_user)
+):
     return {"tasks": list_tasks(status=status)}
 
 
 @app.patch("/api/tasks/{task_id}")
-def api_update_task(task_id: int, request: TaskUpdateRequest, user=Depends(require_authenticated_user)):
+def api_update_task(
+    task_id: int, request: TaskUpdateRequest, user=Depends(require_authenticated_user)
+):
     if not update_task(task_id, request.dict()):
         raise HTTPException(status_code=500, detail="Failed to update task")
     return {"status": "success"}
@@ -4786,13 +6054,18 @@ def _decode_subject(raw_subject) -> str:
 
 
 @app.post("/api/email/summary/today")
-def summarize_today_email(request: EmailSummaryRequest, user=Depends(require_authenticated_user)):
+def summarize_today_email(
+    request: EmailSummaryRequest, user=Depends(require_authenticated_user)
+):
     configs = get_all_configs()
     host = configs.get("imap_host")
     username = configs.get("imap_username")
     password = configs.get("imap_password")
     if not host or not username or not password:
-        raise HTTPException(status_code=400, detail="Set imap_host, imap_username, imap_password in admin configs")
+        raise HTTPException(
+            status_code=400,
+            detail="Set imap_host, imap_username, imap_password in admin configs",
+        )
 
     today = datetime.now().strftime("%d-%b-%Y")
     items = []
@@ -4817,8 +6090,8 @@ def summarize_today_email(request: EmailSummaryRequest, user=Depends(require_aut
         return {"summary": "No emails found for today.", "email_count": 0}
 
     prompt = (
-        "Summarize today's emails into: key updates, urgent actions, follow-ups, and decisions.\n\n" +
-        "\n\n---\n\n".join(items)
+        "Summarize today's emails into: key updates, urgent actions, follow-ups, and decisions.\n\n"
+        + "\n\n---\n\n".join(items)
     )
     result = chat_with_agent(
         session_id="system_email_reports",
@@ -4827,11 +6100,12 @@ def summarize_today_email(request: EmailSummaryRequest, user=Depends(require_aut
         api_key=request.api_key,
         memory_mode="indexed",
         use_web_search=False,
-        attachments=[]
+        attachments=[],
     )
-    return {"summary": result.get("response") if isinstance(result, dict) else result, "email_count": len(items)}
-
-
+    return {
+        "summary": result.get("response") if isinstance(result, dict) else result,
+        "email_count": len(items),
+    }
 
 
 @app.get("/", include_in_schema=False)
@@ -4848,12 +6122,21 @@ def root_page():
 def favicon():
     return Response(status_code=204)
 
+
 def _to_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _add_setting_check(checks: List[Dict[str, str]], key: str, status: str, message: str, fix_hint: str = "") -> None:
-    checks.append({"key": key, "status": status, "message": message, "fix_hint": fix_hint})
+def _add_setting_check(
+    checks: List[Dict[str, str]],
+    key: str,
+    status: str,
+    message: str,
+    fix_hint: str = "",
+) -> None:
+    checks.append(
+        {"key": key, "status": status, "message": message, "fix_hint": fix_hint}
+    )
 
 
 def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
@@ -4861,7 +6144,15 @@ def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
     checks: List[Dict[str, str]] = []
 
     local_only_mode = _to_bool(configs.get("local_only_mode", "true"))
-    default_provider = (configs.get("default_model_provider") or configs.get("model_provider") or "ollama").strip().lower()
+    default_provider = (
+        (
+            configs.get("default_model_provider")
+            or configs.get("model_provider")
+            or "ollama"
+        )
+        .strip()
+        .lower()
+    )
     provider_key_map = {
         "openai": "openai_api_key",
         "gemini": "gemini_api_key",
@@ -4872,7 +6163,9 @@ def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
         "ollama": "ollama_base_url",
     }
     required_key = provider_key_map.get(default_provider)
-    provider_ready = local_only_mode or (required_key and bool((configs.get(required_key) or "").strip()))
+    provider_ready = local_only_mode or (
+        required_key and bool((configs.get(required_key) or "").strip())
+    )
     _add_setting_check(
         checks,
         key="model_provider_readiness",
@@ -4886,10 +6179,21 @@ def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
     )
 
     hybrid_enabled = _to_bool(configs.get("memory_hybrid_retrieval_enabled", "false"))
-    embedding_provider = (configs.get("memory_embedding_provider") or "").strip().lower()
+    embedding_provider = (
+        (configs.get("memory_embedding_provider") or "").strip().lower()
+    )
     embedding_model = (configs.get("memory_embedding_model") or "").strip()
-    embedding_provider_ok = embedding_provider in {"ollama", "openai", "gemini", "openrouter", "anythingllm", "generic"}
-    memory_ready = (not hybrid_enabled) or (embedding_provider_ok and bool(embedding_model))
+    embedding_provider_ok = embedding_provider in {
+        "ollama",
+        "openai",
+        "gemini",
+        "openrouter",
+        "anythingllm",
+        "generic",
+    }
+    memory_ready = (not hybrid_enabled) or (
+        embedding_provider_ok and bool(embedding_model)
+    )
     memory_status = "ok" if memory_ready else ("warn" if hybrid_enabled else "ok")
     _add_setting_check(
         checks,
@@ -4908,12 +6212,24 @@ def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
     if mode == "local":
         backup_ok = bool((configs.get("backup_local_path") or "").strip())
     elif mode in {"ftp", "smb"}:
-        backup_ok = all(bool((configs.get(k) or "").strip()) for k in ([f"backup_{mode}_host", f"backup_{mode}_user", f"backup_{mode}_path", f"backup_{mode}_password"]))
+        backup_ok = all(
+            bool((configs.get(k) or "").strip())
+            for k in (
+                [
+                    f"backup_{mode}_host",
+                    f"backup_{mode}_user",
+                    f"backup_{mode}_path",
+                    f"backup_{mode}_password",
+                ]
+            )
+        )
     _add_setting_check(
         checks,
         key="backup_readiness",
         status="ok" if backup_ok else "warn",
-        message="Backup destination/profile looks complete" if backup_ok else f"Backup mode '{mode}' has missing destination credentials/paths",
+        message="Backup destination/profile looks complete"
+        if backup_ok
+        else f"Backup mode '{mode}' has missing destination credentials/paths",
         fix_hint="Go fix: Admin → Backup" if not backup_ok else "",
     )
 
@@ -4924,7 +6240,9 @@ def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
         checks,
         key="notification_readiness",
         status="ok" if notif_ok else "warn",
-        message="Email notifications ready" if notif_ok else "Resend notification config is incomplete",
+        message="Email notifications ready"
+        if notif_ok
+        else "Resend notification config is incomplete",
         fix_hint="Go fix: Settings → Email (Resend)" if not notif_ok else "",
     )
 
@@ -4933,7 +6251,9 @@ def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
         checks,
         key="auth_session_sanity",
         status="ok" if jwt_ok else "error",
-        message="JWT/session ranges are sane" if jwt_ok else f"JWT ranges out of bounds (expiry={JWT_EXPIRY_MINUTES}, remember_days={JWT_REMEMBER_ME_DAYS})",
+        message="JWT/session ranges are sane"
+        if jwt_ok
+        else f"JWT ranges out of bounds (expiry={JWT_EXPIRY_MINUTES}, remember_days={JWT_REMEMBER_ME_DAYS})",
         fix_hint="Set JWT_EXPIRY_MINUTES (5-1440) and JWT_REMEMBER_ME_DAYS (1-365) environment variables",
     )
 
@@ -4952,11 +6272,12 @@ def admin_settings_health(_: UserContext = Depends(require_admin_user)):
 
 @app.get("/api/health")
 def health(user=Depends(require_admin_user)):
-    db_check    = _check_db_health()
+    db_check = _check_db_health()
     redis_check = _check_redis_health()
     model_check = _check_model_provider_health()
-    search_check= _check_search_provider_health()
+    search_check = _check_search_provider_health()
     from scheduler import get_scheduler_diagnostics
+
     try:
         sched_check = get_scheduler_diagnostics()
     except Exception:
@@ -4965,11 +6286,11 @@ def health(user=Depends(require_admin_user)):
         "status": "ok",
         "time": datetime.now(timezone.utc).isoformat(),
         "checks": {
-            "db":             db_check,
-            "redis":          redis_check,
+            "db": db_check,
+            "redis": redis_check,
             "model_provider": model_check,
-            "search_provider":search_check,
-            "scheduler":      sched_check,
+            "search_provider": search_check,
+            "scheduler": sched_check,
         },
     }
 
@@ -4981,7 +6302,12 @@ def get_latest_mtime(directories):
             continue
         for root, _, files in os.walk(directory):
             for file in files:
-                if file.endswith(".pyc") or "__pycache__" in root or file.endswith(".db") or file.endswith(".db-journal"):
+                if (
+                    file.endswith(".pyc")
+                    or "__pycache__" in root
+                    or file.endswith(".db")
+                    or file.endswith(".db-journal")
+                ):
                     continue
                 filepath = os.path.join(root, file)
                 try:
@@ -5005,13 +6331,18 @@ def get_status(user=Depends(require_authenticated_user)):
 # TASKS — extra endpoints (create/list already exist)
 # ─────────────────────────────────────────────────────
 @app.get("/api/tasks")
-def list_tasks_api(status: Optional[str] = Query(default=None), user=Depends(require_authenticated_user)):
+def list_tasks_api(
+    status: Optional[str] = Query(default=None),
+    user=Depends(require_authenticated_user),
+):
     tasks = list_tasks(status=status)
     return {"tasks": tasks}
 
 
 @app.post("/api/tasks")
-def create_task_api(request: TaskCreateRequest, user=Depends(require_authenticated_user)):
+def create_task_api(
+    request: TaskCreateRequest, user=Depends(require_authenticated_user)
+):
     task_id = create_task(
         title=request.title,
         description=request.description,
@@ -5021,12 +6352,18 @@ def create_task_api(request: TaskCreateRequest, user=Depends(require_authenticat
     )
     if not task_id:
         raise HTTPException(status_code=500, detail="Failed to create task")
-    log_audit_event(username=user.username, action="task.create", details=f"id={task_id};title={request.title}")
+    log_audit_event(
+        username=user.username,
+        action="task.create",
+        details=f"id={task_id};title={request.title}",
+    )
     return {"status": "success", "id": task_id}
 
 
 @app.patch("/api/tasks/{task_id}")
-def update_task_api(task_id: int, request: TaskUpdateRequest, user=Depends(require_authenticated_user)):
+def update_task_api(
+    task_id: int, request: TaskUpdateRequest, user=Depends(require_authenticated_user)
+):
     updates = {k: v for k, v in request.dict().items() if v is not None}
     ok = update_task(task_id, updates)
     if not ok:
@@ -5061,6 +6398,7 @@ def _notes_table_ready() -> bool:
     try:
         with engine.connect() as conn:
             from sqlalchemy import inspect as sq_inspect
+
             return sq_inspect(engine).has_table("notes")
     except Exception:
         return False
@@ -5069,7 +6407,8 @@ def _notes_table_ready() -> bool:
 def _ensure_notes_table():
     try:
         with engine.connect() as conn:
-            conn.execute(text("""
+            conn.execute(
+                text("""
                 CREATE TABLE IF NOT EXISTS notes (
                     id SERIAL PRIMARY KEY,
                     owner_username VARCHAR(255) NOT NULL,
@@ -5080,29 +6419,44 @@ def _ensure_notes_table():
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
-            """))
+            """)
+            )
             conn.commit()
     except Exception as exc:
         logger.warning("Could not create notes table: %s", exc)
 
 
 @app.get("/api/notes")
-def list_notes(q: Optional[str] = Query(default=None), user=Depends(require_authenticated_user)):
+def list_notes(
+    q: Optional[str] = Query(default=None), user=Depends(require_authenticated_user)
+):
     _ensure_notes_table()
     try:
         with engine.connect() as conn:
             if q:
-                rows = conn.execute(
-                    text("SELECT id,title,body,tag,pinned,created_at,updated_at FROM notes "
-                         "WHERE owner_username=:u AND (title ILIKE :q OR body ILIKE :q) ORDER BY pinned DESC,updated_at DESC LIMIT 100"),
-                    {"u": user.username, "q": f"%{q}%"}
-                ).mappings().all()
+                rows = (
+                    conn.execute(
+                        text(
+                            "SELECT id,title,body,tag,pinned,created_at,updated_at FROM notes "
+                            "WHERE owner_username=:u AND (title ILIKE :q OR body ILIKE :q) ORDER BY pinned DESC,updated_at DESC LIMIT 100"
+                        ),
+                        {"u": user.username, "q": f"%{q}%"},
+                    )
+                    .mappings()
+                    .all()
+                )
             else:
-                rows = conn.execute(
-                    text("SELECT id,title,body,tag,pinned,created_at,updated_at FROM notes "
-                         "WHERE owner_username=:u ORDER BY pinned DESC,updated_at DESC LIMIT 100"),
-                    {"u": user.username}
-                ).mappings().all()
+                rows = (
+                    conn.execute(
+                        text(
+                            "SELECT id,title,body,tag,pinned,created_at,updated_at FROM notes "
+                            "WHERE owner_username=:u ORDER BY pinned DESC,updated_at DESC LIMIT 100"
+                        ),
+                        {"u": user.username},
+                    )
+                    .mappings()
+                    .all()
+                )
         return {"notes": [dict(r) for r in rows]}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -5114,8 +6468,15 @@ def create_note(request: NoteCreateRequest, user=Depends(require_authenticated_u
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                text("INSERT INTO notes (owner_username,title,body,tag) VALUES (:u,:t,:b,:g) RETURNING id"),
-                {"u": user.username, "t": request.title or "Untitled", "b": request.body, "g": request.tag or ""}
+                text(
+                    "INSERT INTO notes (owner_username,title,body,tag) VALUES (:u,:t,:b,:g) RETURNING id"
+                ),
+                {
+                    "u": user.username,
+                    "t": request.title or "Untitled",
+                    "b": request.body,
+                    "g": request.tag or "",
+                },
             ).first()
             conn.commit()
         return {"status": "success", "id": row[0]}
@@ -5128,10 +6489,16 @@ def get_note(note_id: int, user=Depends(require_authenticated_user)):
     _ensure_notes_table()
     try:
         with engine.connect() as conn:
-            row = conn.execute(
-                text("SELECT id,title,body,tag,pinned,created_at,updated_at FROM notes WHERE id=:id AND owner_username=:u"),
-                {"id": note_id, "u": user.username}
-            ).mappings().first()
+            row = (
+                conn.execute(
+                    text(
+                        "SELECT id,title,body,tag,pinned,created_at,updated_at FROM notes WHERE id=:id AND owner_username=:u"
+                    ),
+                    {"id": note_id, "u": user.username},
+                )
+                .mappings()
+                .first()
+            )
         if not row:
             raise HTTPException(status_code=404, detail="Note not found")
         return dict(row)
@@ -5142,7 +6509,9 @@ def get_note(note_id: int, user=Depends(require_authenticated_user)):
 
 
 @app.put("/api/notes/{note_id}")
-def update_note(note_id: int, request: NoteUpdateRequest, user=Depends(require_authenticated_user)):
+def update_note(
+    note_id: int, request: NoteUpdateRequest, user=Depends(require_authenticated_user)
+):
     _ensure_notes_table()
     updates = {k: v for k, v in request.dict().items() if v is not None}
     if not updates:
@@ -5154,8 +6523,10 @@ def update_note(note_id: int, request: NoteUpdateRequest, user=Depends(require_a
     try:
         with engine.connect() as conn:
             conn.execute(
-                text(f"UPDATE notes SET {','.join(parts)},updated_at=:now WHERE id=:id AND owner_username=:u"),
-                updates
+                text(
+                    f"UPDATE notes SET {','.join(parts)},updated_at=:now WHERE id=:id AND owner_username=:u"
+                ),
+                updates,
             )
             conn.commit()
         return {"status": "success"}
@@ -5168,7 +6539,10 @@ def delete_note(note_id: int, user=Depends(require_authenticated_user)):
     _ensure_notes_table()
     try:
         with engine.connect() as conn:
-            conn.execute(text("DELETE FROM notes WHERE id=:id AND owner_username=:u"), {"id": note_id, "u": user.username})
+            conn.execute(
+                text("DELETE FROM notes WHERE id=:id AND owner_username=:u"),
+                {"id": note_id, "u": user.username},
+            )
             conn.commit()
         return {"status": "success"}
     except Exception as exc:
@@ -5181,8 +6555,10 @@ def pin_note(note_id: int, user=Depends(require_authenticated_user)):
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                text("UPDATE notes SET pinned=NOT pinned,updated_at=NOW() WHERE id=:id AND owner_username=:u RETURNING pinned"),
-                {"id": note_id, "u": user.username}
+                text(
+                    "UPDATE notes SET pinned=NOT pinned,updated_at=NOW() WHERE id=:id AND owner_username=:u RETURNING pinned"
+                ),
+                {"id": note_id, "u": user.username},
             ).first()
             conn.commit()
         return {"status": "success", "pinned": bool(row[0]) if row else False}
@@ -5217,6 +6593,7 @@ def net_delete_target(target_id: int, user=Depends(require_admin_user)):
 @app.get("/api/network/ping/{target_id}")
 def net_ping(target_id: int, user=Depends(require_authenticated_user)):
     from scheduler import ping_target
+
     targets = get_network_targets()
     t = next((x for x in targets if x["id"] == target_id), None)
     if not t:
@@ -5242,28 +6619,43 @@ def analytics_summary(user=Depends(require_authenticated_user)):
     try:
         sessions = get_all_sessions()
         if user.role != "admin":
-            accessible = set(get_accessible_session_ids(username=user.username, is_admin=False))
+            accessible = set(
+                get_accessible_session_ids(username=user.username, is_admin=False)
+            )
             sessions = [s for s in sessions if s.get("session_id") in accessible]
         total_messages = 0
         try:
             with engine.connect() as conn:
                 q = text("SELECT COUNT(*) FROM message_store")
                 if user.role != "admin":
-                    q = text("SELECT COUNT(*) FROM message_store WHERE session_id = ANY(:ids)")
-                    total_messages = conn.execute(q, {"ids": [s["session_id"] for s in sessions]}).scalar() or 0
+                    q = text(
+                        "SELECT COUNT(*) FROM message_store WHERE session_id = ANY(:ids)"
+                    )
+                    total_messages = (
+                        conn.execute(
+                            q, {"ids": [s["session_id"] for s in sessions]}
+                        ).scalar()
+                        or 0
+                    )
                 else:
                     total_messages = conn.execute(q).scalar() or 0
         except Exception:
             total_messages = len(sessions) * 5
-        rollup_metrics = get_memory_rollup_metrics(None if user.role == "admin" else user.username)
+        rollup_metrics = get_memory_rollup_metrics(
+            None if user.role == "admin" else user.username
+        )
         return {
             "total_sessions": len(sessions),
             "total_messages": total_messages,
             "total_memories": len(get_core_memories()),
             "raw_memory_count": int(rollup_metrics.get("raw_memory_count", 0)),
             "summary_node_count": int(rollup_metrics.get("summary_node_count", 0)),
-            "avg_injected_memory_chars": float(rollup_metrics.get("avg_injected_memory_chars", 0)),
-            "avg_injected_memory_tokens": float(rollup_metrics.get("avg_injected_memory_tokens", 0)),
+            "avg_injected_memory_chars": float(
+                rollup_metrics.get("avg_injected_memory_chars", 0)
+            ),
+            "avg_injected_memory_tokens": float(
+                rollup_metrics.get("avg_injected_memory_tokens", 0)
+            ),
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -5279,26 +6671,32 @@ def _memory_analytics_to_csv(payload: Dict[str, Any]) -> str:
     lines.append("")
     lines.append("memory_writes_per_day,day,count")
     for row in payload.get("memory_writes_per_day") or []:
-        lines.append(f"memory_writes_per_day,{row.get('day','')},{row.get('count',0)}")
+        lines.append(
+            f"memory_writes_per_day,{row.get('day', '')},{row.get('count', 0)}"
+        )
 
     lines.append("")
     lines.append("retrieval_hits_per_day,day,count")
     for row in payload.get("retrieval_hits_per_day") or []:
-        lines.append(f"retrieval_hits_per_day,{row.get('day','')},{row.get('count',0)}")
+        lines.append(
+            f"retrieval_hits_per_day,{row.get('day', '')},{row.get('count', 0)}"
+        )
 
     lines.append("")
     lines.append("top_categories,category,count")
     for row in payload.get("top_categories") or []:
         category = str(row.get("category", "")).replace('"', '""')
-        lines.append(f'top_categories,"{category}",{row.get("count",0)}')
+        lines.append(f'top_categories,"{category}",{row.get("count", 0)}')
 
     lines.append("")
-    lines.append("stale_memories,session_id,category,owner,updated_at,last_retrieval_at")
+    lines.append(
+        "stale_memories,session_id,category,owner,updated_at,last_retrieval_at"
+    )
     for row in payload.get("stale_memories") or []:
         category = str(row.get("category", "")).replace('"', '""')
         owner = str(row.get("owner", "")).replace('"', '""')
         lines.append(
-            f'stale_memories,{row.get("session_id","")},"{category}","{owner}",{row.get("updated_at","")},{row.get("last_retrieval_at","") or ""}'
+            f'stale_memories,{row.get("session_id", "")},"{category}","{owner}",{row.get("updated_at", "")},{row.get("last_retrieval_at", "") or ""}'
         )
     return "\n".join(lines) + "\n"
 
@@ -5315,7 +6713,9 @@ def memory_analytics(
 ):
     normalized_scope = (owner_scope or "mine").strip().lower()
     if normalized_scope not in {"mine", "shared", "all"}:
-        raise HTTPException(status_code=400, detail="owner_scope must be mine, shared, or all")
+        raise HTTPException(
+            status_code=400, detail="owner_scope must be mine, shared, or all"
+        )
     if current_user.role != "admin" and normalized_scope == "all":
         normalized_scope = "mine"
 
@@ -5334,7 +6734,9 @@ def memory_analytics(
         return Response(
             content=csv_body,
             media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=memory-analytics.csv"},
+            headers={
+                "Content-Disposition": "attachment; filename=memory-analytics.csv"
+            },
         )
     return payload
 
@@ -5342,15 +6744,17 @@ def memory_analytics(
 # ═══════════════════════════════════════════════════════════
 # FULL BACKUP / RESTORE ENDPOINTS
 # ═══════════════════════════════════════════════════════════
+import threading as _fb_threading
+
 from full_backup import (
-    build_full_backup,
-    save_full_backup_to_disk,
-    list_full_backups,
-    restore_full_backup,
     FULL_BACKUP_DIR,
     SLOT_SIZE_BYTES,
+    build_full_backup,
+    list_full_backups,
+    restore_full_backup,
+    save_full_backup_to_disk,
 )
-import threading as _fb_threading
+
 _fb_lock = _fb_threading.Lock()
 
 
@@ -5374,8 +6778,11 @@ def api_fullbackup_create(user: UserContext = Depends(require_admin_user)):
         bundle = build_full_backup(actor=user.username)
         zip_path = save_full_backup_to_disk(bundle)
         manifest = bundle["manifest"]
-        log_audit_event(username=user.username, action="admin.fullbackup.create",
-                        details=f"file={os.path.basename(zip_path)}")
+        log_audit_event(
+            username=user.username,
+            action="admin.fullbackup.create",
+            details=f"file={os.path.basename(zip_path)}",
+        )
         return {
             "ok": True,
             "filename": os.path.basename(zip_path),
@@ -5396,7 +6803,9 @@ def api_fullbackup_list(user: UserContext = Depends(require_admin_user)):
 
 
 @app.get("/api/admin/fullbackup/download/{filename}")
-def api_fullbackup_download(filename: str, user: UserContext = Depends(require_admin_user)):
+def api_fullbackup_download(
+    filename: str, user: UserContext = Depends(require_admin_user)
+):
     """Download a saved full-backup zip file."""
     if "/" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
@@ -5412,7 +6821,9 @@ def api_fullbackup_download(filename: str, user: UserContext = Depends(require_a
 
 
 @app.delete("/api/admin/fullbackup/{filename}")
-def api_fullbackup_delete(filename: str, user: UserContext = Depends(require_admin_user)):
+def api_fullbackup_delete(
+    filename: str, user: UserContext = Depends(require_admin_user)
+):
     """Delete a saved full-backup zip file."""
     if "/" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
@@ -5420,12 +6831,18 @@ def api_fullbackup_delete(filename: str, user: UserContext = Depends(require_adm
     if not os.path.isfile(zip_path):
         raise HTTPException(status_code=404, detail="Backup not found")
     os.remove(zip_path)
-    log_audit_event(username=user.username, action="admin.fullbackup.delete", details=f"file={filename}")
+    log_audit_event(
+        username=user.username,
+        action="admin.fullbackup.delete",
+        details=f"file={filename}",
+    )
     return {"deleted": filename}
 
 
 @app.post("/api/admin/fullbackup/restore")
-def api_fullbackup_restore(request: FullRestoreRequest, user: UserContext = Depends(require_admin_user)):
+def api_fullbackup_restore(
+    request: FullRestoreRequest, user: UserContext = Depends(require_admin_user)
+):
     """Restore from a saved full-backup zip. Selective restore via boolean flags."""
     if "/" in request.filename or ".." in request.filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
@@ -5442,13 +6859,16 @@ def api_fullbackup_restore(request: FullRestoreRequest, user: UserContext = Depe
         "restore_tasks": request.restore_tasks,
     }
     result = restore_full_backup(zip_path, opts)
-    log_audit_event(username=user.username, action="admin.fullbackup.restore",
-                    details=f"file={request.filename} ok={result['ok']}")
+    log_audit_event(
+        username=user.username,
+        action="admin.fullbackup.restore",
+        details=f"file={request.filename} ok={result['ok']}",
+    )
     if not result["ok"] and not result.get("summary"):
-        raise HTTPException(status_code=500, detail="; ".join(result.get("errors", ["Unknown error"])))
+        raise HTTPException(
+            status_code=500, detail="; ".join(result.get("errors", ["Unknown error"]))
+        )
     return result
-
-
 
 
 @app.post("/api/admin/fullbackup/restore-upload")
@@ -5467,16 +6887,19 @@ async def api_fullbackup_restore_upload(
 ):
     """Restore from an uploaded full-backup zip file (no server-side pre-save required)."""
     filename = (backup_file.filename or "").strip()
-    if not filename.lower().endswith('.zip'):
-        raise HTTPException(status_code=400, detail="Please upload a .zip full backup file")
+    if not filename.lower().endswith(".zip"):
+        raise HTTPException(
+            status_code=400, detail="Please upload a .zip full backup file"
+        )
 
     tmp_dir = tempfile.mkdtemp(prefix="ampai_restore_")
     tmp_zip = os.path.join(tmp_dir, "uploaded_full_backup.zip")
     try:
         with open(tmp_zip, "wb") as f:
             import shutil
+
             shutil.copyfileobj(backup_file.file, f)
-        
+
         if os.path.getsize(tmp_zip) == 0:
             raise HTTPException(status_code=400, detail="Uploaded backup file is empty")
 
@@ -5488,10 +6911,14 @@ async def api_fullbackup_restore_upload(
             names = zf.namelist()
             non_mem = {}
             if "full_data.json.gz" in names:
-                non_mem = json.loads(gzip.decompress(zf.read("full_data.json.gz")).decode("utf-8"))
+                non_mem = json.loads(
+                    gzip.decompress(zf.read("full_data.json.gz")).decode("utf-8")
+                )
             sessions_count = 0
             memories_count = 0
-            for sf in (n for n in names if n.startswith("slot_") and n.endswith(".json.gz")):
+            for sf in (
+                n for n in names if n.startswith("slot_") and n.endswith(".json.gz")
+            ):
                 slot_payload = json.loads(gzip.decompress(zf.read(sf)).decode("utf-8"))
                 for _, cat_data in (slot_payload.get("categories") or {}).items():
                     sessions_count += len(cat_data.get("sessions", []))
@@ -5517,10 +6944,16 @@ async def api_fullbackup_restore_upload(
         if dry_run:
             return {"ok": True, "dry_run": True, "summary": preview, "errors": []}
         result = restore_full_backup(tmp_zip, opts)
-        log_audit_event(username=user.username, action="admin.fullbackup.restore.upload",
-                        details=f"file={filename} ok={result.get('ok')}")
+        log_audit_event(
+            username=user.username,
+            action="admin.fullbackup.restore.upload",
+            details=f"file={filename} ok={result.get('ok')}",
+        )
         if not result.get("ok") and not result.get("summary"):
-            raise HTTPException(status_code=500, detail="; ".join(result.get("errors", ["Unknown restore error"])))
+            raise HTTPException(
+                status_code=500,
+                detail="; ".join(result.get("errors", ["Unknown restore error"])),
+            )
         return result
     finally:
         try:
@@ -5532,7 +6965,8 @@ async def api_fullbackup_restore_upload(
 @app.get("/api/admin/fullbackup/memory-categories")
 def api_fullbackup_memory_categories(user: UserContext = Depends(require_admin_user)):
     """Return memory category stats (count of sessions and candidates per category)."""
-    from full_backup import _fetch_sessions_by_category, _fetch_memories_by_category
+    from full_backup import _fetch_memories_by_category, _fetch_sessions_by_category
+
     sessions_by_cat = _fetch_sessions_by_category()
     memories_by_cat = _fetch_memories_by_category()
     all_cats = sorted(set(list(sessions_by_cat.keys()) + list(memories_by_cat.keys())))
@@ -5541,12 +6975,14 @@ def api_fullbackup_memory_categories(user: UserContext = Depends(require_admin_u
         sessions = sessions_by_cat.get(cat, [])
         mems = memories_by_cat.get(cat, [])
         total_msgs = sum(len(s.get("messages", [])) for s in sessions)
-        rows.append({
-            "category": cat,
-            "session_count": len(sessions),
-            "message_count": total_msgs,
-            "memory_count": len(mems),
-        })
+        rows.append(
+            {
+                "category": cat,
+                "session_count": len(sessions),
+                "message_count": total_msgs,
+                "memory_count": len(mems),
+            }
+        )
     return {"categories": rows}
 
 
@@ -5560,7 +6996,12 @@ CODE_BACKUP_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "code_ba
 REPO_URL = os.getenv("AMPAI_REPO_URL", "https://github.com/pranto48/ampai.git")
 _update_lock = threading.Lock()
 _update_log_lines: List[str] = []
-_update_status: Dict[str, Any] = {"state": "idle", "started_at": None, "finished_at": None, "error": None}
+_update_status: Dict[str, Any] = {
+    "state": "idle",
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+}
 
 
 def _update_log(msg: str) -> None:
@@ -5596,8 +7037,6 @@ def _get_current_git_commit() -> str:
     return "unknown"
 
 
-
-
 def _extract_github_slug(repo_url: str) -> Optional[str]:
     url = (repo_url or "").strip()
     if not url:
@@ -5616,6 +7055,7 @@ def _extract_github_slug(repo_url: str) -> Optional[str]:
         return None
     return f"{parts[0]}/{parts[1]}"
 
+
 def _fetch_remote_commit() -> str:
     """Fetch the latest commit hash from GitHub without cloning."""
     slug = _extract_github_slug(REPO_URL)
@@ -5625,7 +7065,10 @@ def _fetch_remote_commit() -> str:
         try:
             req = urllib.request.Request(
                 f"https://api.github.com/repos/{slug}/commits/{branch}",
-                headers={"Accept": "application/vnd.github.sha", "User-Agent": "ampai-updater/1.0"},
+                headers={
+                    "Accept": "application/vnd.github.sha",
+                    "User-Agent": "ampai-updater/1.0",
+                },
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.read().decode().strip()[:12]
@@ -5654,24 +7097,32 @@ def _list_code_backups() -> List[Dict[str, Any]]:
         if os.path.exists(commit_file):
             with open(commit_file) as f:
                 commit = f.read().strip()[:12]
-        backups.append({
-            "name": name,
-            "path": full,
-            "created_at": name,  # name is the timestamp
-            "size_bytes": size,
-            "commit": commit,
-        })
+        backups.append(
+            {
+                "name": name,
+                "path": full,
+                "created_at": name,  # name is the timestamp
+                "size_bytes": size,
+                "commit": commit,
+            }
+        )
     return backups
 
 
 def _do_update_in_thread(actor: str) -> None:
     """Run the update process in a background thread."""
     global _update_status
-    _update_status = {"state": "running", "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": None, "error": None}
+    _update_status = {
+        "state": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "error": None,
+    }
     _update_log_lines.clear()
 
     try:
         import subprocess
+
         _update_log("Starting AmpAI code update…")
         _update_log(f"Triggered by: {actor}")
         _update_log(f"Repo: {REPO_URL}")
@@ -5687,10 +7138,14 @@ def _do_update_in_thread(actor: str) -> None:
         frontend_src = os.path.join(os.path.dirname(__file__), "..", "frontend")
 
         if os.path.isdir(backend_src):
-            shutil.copytree(backend_src, os.path.join(backup_path, "backend"), dirs_exist_ok=True)
+            shutil.copytree(
+                backend_src, os.path.join(backup_path, "backend"), dirs_exist_ok=True
+            )
             _update_log("Backed up: backend/")
         if os.path.isdir(frontend_src):
-            shutil.copytree(frontend_src, os.path.join(backup_path, "frontend"), dirs_exist_ok=True)
+            shutil.copytree(
+                frontend_src, os.path.join(backup_path, "frontend"), dirs_exist_ok=True
+            )
             _update_log("Backed up: frontend/")
 
         # Save current commit
@@ -5704,7 +7159,9 @@ def _do_update_in_thread(actor: str) -> None:
 
         # Candidate paths for the host-mounted git repo
         host_git_candidates = [
-            os.path.join(os.path.dirname(__file__), "..", ".."),  # /app/../ → host mount
+            os.path.join(
+                os.path.dirname(__file__), "..", ".."
+            ),  # /app/../ → host mount
             "/app_host",
         ]
         repo_root = None
@@ -5717,14 +7174,20 @@ def _do_update_in_thread(actor: str) -> None:
             _update_log(f"Found git repo at {repo_root}")
             result = subprocess.run(
                 ["git", "-C", repo_root, "fetch", "origin"],
-                capture_output=True, text=True, timeout=120
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
-            _update_log(f"git fetch: {result.stdout.strip() or result.stderr.strip() or 'ok'}")
+            _update_log(
+                f"git fetch: {result.stdout.strip() or result.stderr.strip() or 'ok'}"
+            )
 
             for branch in ["main", "master"]:
                 r = subprocess.run(
                     ["git", "-C", repo_root, "reset", "--hard", f"origin/{branch}"],
-                    capture_output=True, text=True, timeout=60
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
                 )
                 if r.returncode == 0:
                     _update_log(f"Reset to origin/{branch}: {r.stdout.strip()}")
@@ -5733,15 +7196,22 @@ def _do_update_in_thread(actor: str) -> None:
 
             new_commit = subprocess.run(
                 ["git", "-C", repo_root, "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, timeout=10
+                capture_output=True,
+                text=True,
+                timeout=10,
             ).stdout.strip()
             _update_log(f"Updated to commit: {new_commit}")
         else:
             # Fallback: download code via GitHub archive API
-            _update_log("No git repo found on mounted volume. Downloading via GitHub archive…")
+            _update_log(
+                "No git repo found on mounted volume. Downloading via GitHub archive…"
+            )
             import tempfile
 
-            archive_url = REPO_URL.rstrip("/").replace(".git", "") + "/archive/refs/heads/main.zip"
+            archive_url = (
+                REPO_URL.rstrip("/").replace(".git", "")
+                + "/archive/refs/heads/main.zip"
+            )
             _update_log(f"Downloading: {archive_url}")
             temp_zip = tempfile.mktemp(suffix=".zip")
             urllib.request.urlretrieve(archive_url, temp_zip)
@@ -5753,7 +7223,11 @@ def _do_update_in_thread(actor: str) -> None:
             os.remove(temp_zip)
 
             # Find extracted root (ampai-main/ or similar)
-            extracted_dirs = [d for d in os.listdir(temp_dir) if os.path.isdir(os.path.join(temp_dir, d))]
+            extracted_dirs = [
+                d
+                for d in os.listdir(temp_dir)
+                if os.path.isdir(os.path.join(temp_dir, d))
+            ]
             if not extracted_dirs:
                 raise RuntimeError("Archive extraction yielded no directory")
             extracted_root = os.path.join(temp_dir, extracted_dirs[0])
@@ -5779,7 +7253,9 @@ def _do_update_in_thread(actor: str) -> None:
         if os.path.exists(req_file):
             result = subprocess.run(
                 ["pip", "install", "--no-cache-dir", "-q", "-r", req_file],
-                capture_output=True, text=True, timeout=300
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
             if result.returncode == 0:
                 _update_log("Dependencies installed successfully.")
@@ -5795,16 +7271,22 @@ def _do_update_in_thread(actor: str) -> None:
         _update_status["state"] = "success"
         _update_status["finished_at"] = datetime.now(timezone.utc).isoformat()
         _update_status["error"] = None
-        log_audit_event(username=actor, action="admin.docker.update.success", details=f"backup={backup_path}")
+        log_audit_event(
+            username=actor,
+            action="admin.docker.update.success",
+            details=f"backup={backup_path}",
+        )
 
         # Delay then restart uvicorn via os.execv to reload all modules
         def _restart_server():
             import time as _t
+
             _t.sleep(3)
             _update_log("Restarting server now…")
-            os.execv("/usr/local/bin/uvicorn", [
-                "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"
-            ])
+            os.execv(
+                "/usr/local/bin/uvicorn",
+                ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"],
+            )
 
         threading.Thread(target=_restart_server, daemon=True).start()
 
@@ -5813,7 +7295,9 @@ def _do_update_in_thread(actor: str) -> None:
         _update_status["state"] = "error"
         _update_status["finished_at"] = datetime.now(timezone.utc).isoformat()
         _update_status["error"] = str(exc)
-        log_audit_event(username=actor, action="admin.docker.update.failure", details=str(exc))
+        log_audit_event(
+            username=actor, action="admin.docker.update.failure", details=str(exc)
+        )
 
 
 @app.get("/api/admin/update/version")
@@ -5822,7 +7306,7 @@ def update_check_version(user: UserContext = Depends(require_admin_user)):
     current = _get_current_git_commit()
     latest = _fetch_remote_commit()
     check_ok = current != "unknown" and latest != "unknown"
-    up_to_date = (check_ok and current == latest[:len(current)])
+    up_to_date = check_ok and current == latest[: len(current)]
     return {
         "current_commit": current,
         "latest_commit": latest,
@@ -5838,14 +7322,21 @@ def update_trigger(user: UserContext = Depends(require_admin_user)):
     if not _update_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="An update is already in progress")
     try:
-        t = threading.Thread(target=_do_update_in_thread, args=(user.username,), daemon=True)
+        t = threading.Thread(
+            target=_do_update_in_thread, args=(user.username,), daemon=True
+        )
         t.start()
         # release lock after thread is done
-        threading.Thread(target=lambda: (t.join(), _update_lock.release()), daemon=True).start()
+        threading.Thread(
+            target=lambda: (t.join(), _update_lock.release()), daemon=True
+        ).start()
     except Exception as e:
         _update_lock.release()
         raise HTTPException(status_code=500, detail=str(e))
-    return {"status": "started", "message": "Update started. Poll /api/admin/update/status for progress."}
+    return {
+        "status": "started",
+        "message": "Update started. Poll /api/admin/update/status for progress.",
+    }
 
 
 @app.get("/api/admin/update/status")
@@ -5865,7 +7356,9 @@ def update_list_backups(user: UserContext = Depends(require_admin_user)):
 
 
 @app.delete("/api/admin/update/backups/{backup_name}")
-def update_delete_backup(backup_name: str, user: UserContext = Depends(require_admin_user)):
+def update_delete_backup(
+    backup_name: str, user: UserContext = Depends(require_admin_user)
+):
     """Delete a specific code backup by name (timestamp folder)."""
     # Security: only allow simple timestamp names, no path traversal
     if "/" in backup_name or ".." in backup_name:
@@ -5874,12 +7367,18 @@ def update_delete_backup(backup_name: str, user: UserContext = Depends(require_a
     if not os.path.isdir(full_path):
         raise HTTPException(status_code=404, detail="Backup not found")
     shutil.rmtree(full_path)
-    log_audit_event(username=user.username, action="admin.docker.backup.delete", details=f"backup={backup_name}")
+    log_audit_event(
+        username=user.username,
+        action="admin.docker.backup.delete",
+        details=f"backup={backup_name}",
+    )
     return {"deleted": backup_name}
 
 
 @app.post("/api/admin/update/backups/{backup_name}/restore")
-def update_restore_backup(backup_name: str, user: UserContext = Depends(require_admin_user)):
+def update_restore_backup(
+    backup_name: str, user: UserContext = Depends(require_admin_user)
+):
     """Restore backend/frontend code from a stored code backup."""
     if "/" in backup_name or ".." in backup_name:
         raise HTTPException(status_code=400, detail="Invalid backup name")
@@ -5892,22 +7391,34 @@ def update_restore_backup(backup_name: str, user: UserContext = Depends(require_
     backend_dst = os.path.join(os.path.dirname(__file__))
     frontend_dst = os.path.join(os.path.dirname(__file__), "..", "frontend")
     if not os.path.isdir(backend_backup) and not os.path.isdir(frontend_backup):
-        raise HTTPException(status_code=400, detail="Backup does not contain backend/frontend folders")
+        raise HTTPException(
+            status_code=400, detail="Backup does not contain backend/frontend folders"
+        )
 
     if os.path.isdir(backend_backup):
         shutil.copytree(backend_backup, backend_dst, dirs_exist_ok=True)
     if os.path.isdir(frontend_backup):
         shutil.copytree(frontend_backup, frontend_dst, dirs_exist_ok=True)
 
-    log_audit_event(username=user.username, action="admin.docker.backup.restore", details=f"backup={backup_name}")
+    log_audit_event(
+        username=user.username,
+        action="admin.docker.backup.restore",
+        details=f"backup={backup_name}",
+    )
 
     def _restart_server_after_restore():
         time.sleep(2)
-        os.execv("/usr/local/bin/uvicorn", ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"])
+        os.execv(
+            "/usr/local/bin/uvicorn",
+            ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"],
+        )
 
     threading.Thread(target=_restart_server_after_restore, daemon=True).start()
-    return {"restored": backup_name, "status": "restoring", "message": "Backup restored. Server restarting..."}
-
+    return {
+        "restored": backup_name,
+        "status": "restoring",
+        "message": "Backup restored. Server restarting...",
+    }
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -5916,17 +7427,24 @@ def update_restore_backup(backup_name: str, user: UserContext = Depends(require_
 
 # ── Identity / Health ────────────────────────────────────────────────────────
 
+
 @app.get("/api/ampai/identity")
 def get_ampai_identity():
     """Return AmpAI identity info including local Ollama status and capabilities."""
     from ampai_identity import get_identity_info
+
     return get_identity_info()
 
 
 @app.get("/api/ampai/health/ollama")
 def check_ollama_health():
     """Ping the local Ollama instance and return available models."""
-    from ampai_identity import check_ollama_alive, get_available_local_models, get_recommended_local_model
+    from ampai_identity import (
+        check_ollama_alive,
+        get_available_local_models,
+        get_recommended_local_model,
+    )
+
     alive = check_ollama_alive()
     models = get_available_local_models() if alive else []
     return {
@@ -5937,6 +7455,7 @@ def check_ollama_health():
 
 
 # ── Skills ───────────────────────────────────────────────────────────────────
+
 
 class SkillCreateRequest(BaseModel):
     name: str
@@ -5978,6 +7497,7 @@ def api_list_skills(
 ):
     """List all agent skills."""
     from skill_engine import list_skills
+
     return list_skills(status=status)
 
 
@@ -5988,6 +7508,7 @@ def api_create_skill(
 ):
     """Create a new agent skill manually."""
     from skill_engine import create_skill
+
     skill = create_skill(
         name=req.name,
         description=req.description,
@@ -5998,14 +7519,19 @@ def api_create_skill(
         created_by=user.username,
     )
     if not skill:
-        raise HTTPException(status_code=400, detail="Failed to create skill (name may already exist)")
+        raise HTTPException(
+            status_code=400, detail="Failed to create skill (name may already exist)"
+        )
     return skill
 
 
 @app.get("/api/skills/{skill_id}")
-def api_get_skill(skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)):
+def api_get_skill(
+    skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)
+):
     """Get a single skill by ID."""
     from skill_engine import get_skill
+
     skill = get_skill(skill_id)
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
@@ -6020,6 +7546,7 @@ def api_update_skill(
 ):
     """Update a skill's fields."""
     from skill_engine import update_skill
+
     updates = {k: v for k, v in req.dict().items() if v is not None}
     ok = update_skill(skill_id, **updates)
     if not ok:
@@ -6028,9 +7555,12 @@ def api_update_skill(
 
 
 @app.delete("/api/skills/{skill_id}")
-def api_delete_skill(skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)):
+def api_delete_skill(
+    skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)
+):
     """Soft-delete a skill."""
     from skill_engine import delete_skill
+
     ok = delete_skill(skill_id)
     return {"ok": ok}
 
@@ -6042,8 +7572,9 @@ def api_run_skill(
     user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """Execute a skill against a user message."""
-    from skill_engine import run_skill
     from database import get_core_memories
+    from skill_engine import run_skill
+
     core_mems = get_core_memories()
     core_facts = "\n".join(f"- {m['fact']}" for m in core_mems) if core_mems else ""
     result = run_skill(
@@ -6064,7 +7595,8 @@ def api_improve_skill(
     user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """Manually trigger self-improvement for a specific skill."""
-    from skill_engine import run_improvement_pass, get_skill
+    from skill_engine import get_skill, run_improvement_pass
+
     skill = get_skill(skill_id)
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
@@ -6080,13 +7612,17 @@ def api_skill_runs(
 ):
     """Get execution history for a skill."""
     from skill_engine import get_skill_runs
+
     return get_skill_runs(skill_id, limit=limit)
 
 
 @app.get("/api/skills/{skill_id}/versions")
-def api_skill_versions(skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)):
+def api_skill_versions(
+    skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)
+):
     """Get version history of a skill's system prompt."""
     from skill_engine import get_skill_versions
+
     return get_skill_versions(skill_id)
 
 
@@ -6098,6 +7634,7 @@ def api_skill_performance(
 ):
     """Get performance stats for a skill."""
     from skill_engine import get_skill_performance as _perf
+
     return _perf(skill_id, lookback_days=lookback_days)
 
 
@@ -6108,6 +7645,7 @@ def api_auto_create_skill(
 ):
     """Auto-synthesize a skill from a session using the local LLM."""
     from skill_engine import auto_create_skill_from_session
+
     skill = auto_create_skill_from_session(
         session_id=req.session_id,
         skill_name=req.skill_name,
@@ -6122,6 +7660,7 @@ def api_auto_create_skill(
 
 # ── Memory Nudges (Curator) ───────────────────────────────────────────────────
 
+
 class NudgeCurateTriggerRequest(BaseModel):
     session_id: Optional[str] = None
     model_type: str = "ollama"
@@ -6135,23 +7674,32 @@ def api_list_nudges(
 ):
     """List pending memory nudges for the current user."""
     from memory_curator import list_pending_nudges
+
     return list_pending_nudges(user.username, limit=limit)
 
 
 @app.post("/api/nudges/{nudge_id}/accept")
-def api_accept_nudge(nudge_id: int, user: UserContext = Depends(get_current_user_from_cookie)):
+def api_accept_nudge(
+    nudge_id: int, user: UserContext = Depends(get_current_user_from_cookie)
+):
     """Accept a nudge — saves the fact to core memory."""
     from memory_curator import accept_nudge
+
     fact = accept_nudge(nudge_id, user.username)
     if fact is None:
-        raise HTTPException(status_code=404, detail="Nudge not found or already reviewed")
+        raise HTTPException(
+            status_code=404, detail="Nudge not found or already reviewed"
+        )
     return {"ok": True, "saved_fact": fact}
 
 
 @app.post("/api/nudges/{nudge_id}/dismiss")
-def api_dismiss_nudge(nudge_id: int, user: UserContext = Depends(get_current_user_from_cookie)):
+def api_dismiss_nudge(
+    nudge_id: int, user: UserContext = Depends(get_current_user_from_cookie)
+):
     """Dismiss a nudge — it won't be saved to memory."""
     from memory_curator import dismiss_nudge
+
     ok = dismiss_nudge(nudge_id, user.username)
     return {"ok": ok}
 
@@ -6163,6 +7711,7 @@ def api_trigger_curation(
 ):
     """Manually trigger memory curation for a session or all recent sessions."""
     from memory_curator import curate_session, run_scheduled_curation
+
     if req.session_id:
         facts = curate_session(
             session_id=req.session_id,
@@ -6177,6 +7726,7 @@ def api_trigger_curation(
 
 
 # ── Cross-Session Recall ──────────────────────────────────────────────────────
+
 
 class RecallQueryRequest(BaseModel):
     query: str
@@ -6196,9 +7746,11 @@ def api_recall_search(
     if req.use_llm and hits:
         try:
             from session_recall import llm_summarize_hits
+
             summary = llm_summarize_hits(hits, req.query, model_type=req.model_type)
         except Exception:
             from session_recall import summarize_hits
+
             summary = summarize_hits(hits)
     return {"hits": hits, "summary": summary, "count": len(hits)}
 
@@ -6228,6 +7780,7 @@ frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.exists(frontend_path):
     app.mount("/static", StaticFiles(directory=frontend_path), name="static-assets")
 
+
 # SPA catch-all: serve index.html for any unmatched route so
 # client-side hash-router works on direct navigation / reload.
 @app.get("/{full_path:path}", include_in_schema=False)
@@ -6238,6 +7791,7 @@ def spa_fallback(full_path: str):
     fp = os.path.join(os.path.dirname(__file__), "..", "frontend", full_path)
     if os.path.exists(fp) and os.path.isfile(fp):
         import mimetypes
+
         mt, _ = mimetypes.guess_type(fp)
         with open(fp, "rb") as f:
             return Response(f.read(), media_type=mt or "application/octet-stream")

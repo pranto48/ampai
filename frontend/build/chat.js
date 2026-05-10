@@ -27,7 +27,7 @@ export default function ChatPage() {
     const [recencyBias, setRecencyBias] = useState(0.35);
     const [categoryFilter, setCategoryFilter] = useState("");
     // Options
-    const [modelOptions] = useState([
+    const [modelOptions, setModelOptions] = useState([
         { value: "ollama", label: "🦙 Ollama" },
         { value: "openai", label: "✨ OpenAI" },
         { value: "gemini", label: "🌟 Gemini" },
@@ -36,6 +36,10 @@ export default function ChatPage() {
         { value: "openrouter", label: "🔀 OpenRouter" },
     ]);
     const [personas, setPersonas] = useState([]);
+    const [nudges, setNudges] = useState([]);
+    const [localOnlyMode, setLocalOnlyMode] = useState(true);
+    const [recallQuery, setRecallQuery] = useState("");
+    const [recallSummary, setRecallSummary] = useState("");
     // Refs
     const messagesEndRef = useRef(null);
     const fileInputRef = useRef(null);
@@ -100,12 +104,81 @@ export default function ChatPage() {
             console.error("Failed to load personas:", error);
         }
     }, [token]);
+    const loadNudges = useCallback(async () => {
+        try {
+            const response = await fetch(`/api/nudges?session_id=${encodeURIComponent(sessionId)}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            const data = await response.json();
+            if (response.ok)
+                setNudges(data.nudges || []);
+        }
+        catch (error) {
+            console.error("Failed to load nudges:", error);
+        }
+    }, [sessionId, token]);
+    const loadConfigStatus = useCallback(async () => {
+        try {
+            const response = await fetch(`/api/configs/status`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            const data = await response.json();
+            if (response.ok) {
+                setLocalOnlyMode(String(data.local_only_mode ?? "true").toLowerCase() !== "false");
+            }
+        }
+        catch (error) {
+            console.error("Failed to load config status:", error);
+        }
+    }, [token]);
+    const loadModelOptions = useCallback(async () => {
+        try {
+            const response = await fetch(`/api/models/options`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            const data = await response.json();
+            if (response.ok && Array.isArray(data.providers)) {
+                setModelOptions(data.providers);
+            }
+        }
+        catch (error) {
+            console.error("Failed to load model options:", error);
+        }
+    }, [token]);
     // Initialize
     useEffect(() => {
         loadSessions();
         loadSessionHistory(sessionId);
         loadPersonas();
-    }, [loadSessions, loadSessionHistory, loadPersonas, sessionId]);
+        loadNudges();
+        loadConfigStatus();
+        loadModelOptions();
+    }, [loadSessions, loadSessionHistory, loadPersonas, loadNudges, loadConfigStatus, loadModelOptions, sessionId]);
+    const ackNudge = useCallback(async (nudgeId) => {
+        await fetch("/api/nudges/ack", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ nudge_id: nudgeId }),
+        });
+        loadNudges();
+    }, [loadNudges, token]);
+    const runRecallSearch = useCallback(async () => {
+        if (!recallQuery.trim())
+            return;
+        try {
+            const response = await fetch("/api/recall/search", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ q: recallQuery.trim(), session_id: "", limit: 12 }),
+            });
+            const data = await response.json();
+            if (response.ok)
+                setRecallSummary(data.summary || "");
+        }
+        catch (error) {
+            console.error("Recall search failed:", error);
+        }
+    }, [recallQuery, token]);
     // Handle sending a message
     const handleSend = async () => {
         if ((!inputValue.trim() && attachments.length === 0) || isLoading)
@@ -457,7 +530,7 @@ export default function ChatPage() {
                             gap: "12px",
                             background: "var(--glass)",
                             backdropFilter: "blur(12px)"
-                        }, children: [_jsxs("div", { style: { flex: 1 }, children: [_jsx("div", { style: { fontWeight: "600", fontSize: ".95rem" }, children: sessions.find(s => s.session_id === sessionId)?.category || "New Chat" }), _jsx("div", { style: { fontSize: ".72rem", color: "var(--muted)" }, children: sessionId })] }), _jsx("select", { value: modelType, onChange: (e) => setModelType(e.target.value), style: {
+                        }, children: [_jsxs("div", { style: { flex: 1 }, children: [_jsx("div", { style: { fontWeight: "600", fontSize: ".95rem" }, children: sessions.find(s => s.session_id === sessionId)?.category || "New Chat" }), _jsx("div", { style: { fontSize: ".72rem", color: "var(--muted)" }, children: sessionId }), _jsxs("div", { style: { display: "flex", gap: "8px", marginTop: "6px", flexWrap: "wrap" }, children: [localOnlyMode && _jsx("span", { style: { fontSize: ".7rem" }, children: "Local Mode Active" }), nudges.length > 0 && _jsxs("span", { style: { fontSize: ".7rem" }, children: [nudges.length, " Curator Nudges"] })] })] }), _jsx("select", { value: modelType, onChange: (e) => setModelType(e.target.value), style: {
                                     padding: "6px 10px",
                                     borderRadius: "8px",
                                     background: "rgba(0,0,0,.25)",
@@ -482,7 +555,7 @@ export default function ChatPage() {
                                     fontSize: ".8rem",
                                     color: "var(--muted)",
                                     cursor: "pointer"
-                                }, children: [_jsx("input", { type: "checkbox", checked: useWebSearch, onChange: (e) => setUseWebSearch(e.target.checked), style: { accentColor: "var(--accent)" } }), " \uD83C\uDF10"] })] }), _jsx("div", { style: {
+                                }, children: [_jsx("input", { type: "checkbox", checked: useWebSearch, onChange: (e) => setUseWebSearch(e.target.checked), style: { accentColor: "var(--accent)" } }), " \uD83C\uDF10"] })] }), _jsxs("div", { style: {
                             flex: 1,
                             overflowY: "auto",
                             padding: "24px 20px",
@@ -490,7 +563,7 @@ export default function ChatPage() {
                             flexDirection: "column",
                             gap: "20px",
                             scrollBehavior: "smooth"
-                        }, children: renderMessages() }), _jsxs("div", { style: {
+                        }, children: [_jsxs("div", { style: { border: "1px solid var(--border)", borderRadius: "10px", padding: "8px", marginBottom: "10px" }, children: [_jsx("div", { style: { fontSize: ".78rem", marginBottom: "6px" }, children: "Cross-session recall" }), _jsxs("div", { style: { display: "flex", gap: "6px" }, children: [_jsx("input", { value: recallQuery, onChange: (e) => setRecallQuery(e.target.value), placeholder: "Search prior sessions...", style: { flex: 1 } }), _jsx("button", { onClick: runRecallSearch, children: "Search" })] }), recallSummary && _jsx("pre", { style: { whiteSpace: "pre-wrap", marginTop: "8px", fontSize: ".76rem" }, children: recallSummary })] }), nudges.slice(0, 2).map((nudge) => (_jsxs("div", { style: { border: "1px solid var(--border)", borderRadius: "10px", padding: "10px" }, children: [_jsx("div", { style: { fontSize: ".78rem", fontWeight: 600 }, children: "Curator nudge" }), _jsx("div", { style: { fontSize: ".82rem", color: "var(--muted)", marginTop: "4px" }, children: nudge.payload?.message || nudge.payload?.title || "You have a pending follow-up." }), _jsx("button", { onClick: () => ackNudge(nudge.id), style: { marginTop: "8px" }, children: "Acknowledge" })] }, `nudge-${nudge.id}`))), renderMessages()] }), _jsxs("div", { style: {
                             padding: "14px 18px",
                             borderTop: "1px solid var(--border)",
                             background: "linear-gradient(to top,var(--bg) 70%,transparent)"

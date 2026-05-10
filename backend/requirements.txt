@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 sqlalchemy
 pydantic
 langchain
@@ -7,9 +7,11 @@ langchain-community
 langchain-openai
 langchain-google-genai
 langchain-anthropic
+langchain-ollama
+langchain-postgres
 python-dotenv
 psycopg2-binary
-langchain-postgres
+pgvector
 redis
 python-multipart
 PyPDF2
@@ -17,5 +19,8 @@ duckduckgo-search
 ddgs
 APScheduler
 cryptography
-python-jose
+python-jose[cryptography]
 passlib[bcrypt]
+bcrypt
+httpx
+aiofiles
