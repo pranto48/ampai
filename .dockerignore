@@ -1,23 +1,16 @@
-# Runtime/state data should never be part of Docker build context
-agent_data/
-
-# Python caches and virtual envs
-**/__pycache__/
-**/*.py[cod]
+__pycache__/
+*.pyc
+.pytest_cache/
 .venv/
 venv/
-
-# VCS and local editor files
+env/
+node_modules/
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+agent_data/
+data/
+*.db
+*.db-journal
 .git/
-.gitignore
 .DS_Store
-.vscode/
-.idea/
-
-# Environment and secrets
-.env
-.env.*
-
-# Logs and temp artifacts
-*.log
-tmp/

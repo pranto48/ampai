@@ -1,26 +1,22 @@
 FROM python:3.11-slim
 
-# Set working directory
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV SESSION_RECALL_DB_PATH=/data/agent_data/session_recall.db
+
 WORKDIR /app
 
-# Install backend dependencies
-COPY backend/requirements.txt /app/backend/requirements.txt
-RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping git \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential curl git \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
-# Copy source code
-COPY backend/ /app/backend/
-COPY frontend/ /app/frontend/
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Runtime data dir used by the app
-RUN mkdir -p /app/data
+COPY . .
 
-# Run from backend directory so legacy absolute imports like `from auth import ...` work
-WORKDIR /app/backend
+RUN mkdir -p /data/agent_data /data/uploads /data/backups
 
-# Application listens on 8000 inside container
 EXPOSE 8000
 
-# Run FastAPI app (module path style from repo root)
-CMD ["sh", "-c", "PYTHONPATH=/app:/app/backend uvicorn backend.main:app --host 0.0.0.0 --port 8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
