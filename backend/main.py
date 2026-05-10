@@ -1,4 +1,5 @@
 import base64
+import gzip
 import hashlib
 import json
 import logging
@@ -6903,34 +6904,36 @@ async def api_fullbackup_restore_upload(
         if os.path.getsize(tmp_zip) == 0:
             raise HTTPException(status_code=400, detail="Uploaded backup file is empty")
 
+        preview = {"sessions": 0, "memories": 0, "users": 0, "configs": 0}
         try:
-            zf_ctx = zipfile.ZipFile(tmp_zip)
+            with zipfile.ZipFile(tmp_zip) as zf:
+                names = zf.namelist()
+                non_mem = {}
+                if "full_data.json.gz" in names:
+                    non_mem = json.loads(
+                        gzip.decompress(zf.read("full_data.json.gz")).decode("utf-8")
+                    )
+                sessions_count = 0
+                memories_count = 0
+                for sf in (
+                    n for n in names if n.startswith("slot_") and n.endswith(".json.gz")
+                ):
+                    slot_payload = json.loads(gzip.decompress(zf.read(sf)).decode("utf-8"))
+                    for _, cat_data in (slot_payload.get("categories") or {}).items():
+                        sessions_count += len(cat_data.get("sessions", []))
+                        memories_count += len(cat_data.get("memories", []))
+                preview = {
+                    "sessions": sessions_count,
+                    "memories": memories_count,
+                    "users": len(non_mem.get("users") or []),
+                    "configs": len((non_mem.get("configs") or {}).keys()),
+                }
         except zipfile.BadZipFile:
-            raise HTTPException(status_code=400, detail="Invalid backup zip file")
-        with zf_ctx as zf:
-            names = zf.namelist()
-            non_mem = {}
-            if "full_data.json.gz" in names:
-                non_mem = json.loads(
-                    gzip.decompress(zf.read("full_data.json.gz")).decode("utf-8")
-                )
-            sessions_count = 0
-            memories_count = 0
-            for sf in (
-                n for n in names if n.startswith("slot_") and n.endswith(".json.gz")
-            ):
-                slot_payload = json.loads(gzip.decompress(zf.read(sf)).decode("utf-8"))
-                for _, cat_data in (slot_payload.get("categories") or {}).items():
-                    sessions_count += len(cat_data.get("sessions", []))
-                    memories_count += len(cat_data.get("memories", []))
-            preview = {
-                "sessions": sessions_count,
-                "memories": memories_count,
-                "users": len(non_mem.get("users") or []),
-                "configs": len((non_mem.get("configs") or {}).keys()),
-            }
             if preflight_only:
-                return {"ok": True, "preflight": preview}
+                raise HTTPException(status_code=400, detail="Invalid backup zip file")
+
+        if preflight_only:
+            return {"ok": True, "preflight": preview}
 
         opts = {
             "restore_chats": restore_chats,
