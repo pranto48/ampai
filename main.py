@@ -7008,6 +7008,60 @@ _update_status: Dict[str, Any] = {
 }
 
 
+def _runnable_app_dir(repo_root: str) -> Optional[str]:
+    """Return the directory that contains a runnable AmpAI main.py."""
+    if os.path.isfile(os.path.join(repo_root, "main.py")):
+        return repo_root
+    backend_dir = os.path.join(repo_root, "backend")
+    if os.path.isfile(os.path.join(backend_dir, "main.py")):
+        return backend_dir
+    return None
+
+
+def _copy_updated_backend(source_dir: str, target_dir: str) -> None:
+    source_dir = os.path.abspath(source_dir)
+    target_dir = os.path.abspath(target_dir)
+    if source_dir == target_dir:
+        return
+
+    def _ignore(_: str, names: List[str]) -> set:
+        ignored = {
+            ".git",
+            ".vs",
+            "__pycache__",
+            ".pytest_cache",
+            "node_modules",
+            "target",
+            "dist",
+            "data",
+            "agent_data",
+        }
+        return {name for name in names if name in ignored or name.endswith(".pyc")}
+
+    shutil.copytree(source_dir, target_dir, dirs_exist_ok=True, ignore=_ignore)
+
+
+def _restart_uvicorn() -> None:
+    candidates = [
+        (os.path.abspath(os.path.dirname(__file__)), "main:app", "main.py"),
+        (
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+            "backend.main:app",
+            os.path.join("backend", "main.py"),
+        ),
+        ("/app", "main:app", "main.py"),
+        ("/app", "backend.main:app", os.path.join("backend", "main.py")),
+    ]
+    for workdir, module, marker in candidates:
+        if os.path.isfile(os.path.join(workdir, marker)):
+            os.chdir(workdir)
+            os.execv(
+                "/usr/local/bin/uvicorn",
+                ["uvicorn", module, "--host", "0.0.0.0", "--port", "8000"],
+            )
+    raise RuntimeError("No runnable AmpAI entrypoint found after update")
+
+
 def _update_log(msg: str) -> None:
     line = f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}"
     _update_log_lines.append(line)
@@ -7205,6 +7259,14 @@ def _do_update_in_thread(actor: str) -> None:
                 timeout=10,
             ).stdout.strip()
             _update_log(f"Updated to commit: {new_commit}")
+            updated_app_dir = _runnable_app_dir(repo_root)
+            if not updated_app_dir:
+                raise RuntimeError(
+                    "Updated repository does not contain main.py or backend/main.py"
+                )
+            _copy_updated_backend(updated_app_dir, backend_src)
+            if os.path.abspath(updated_app_dir) != os.path.abspath(backend_src):
+                _update_log(f"Copied runnable backend from {updated_app_dir}")
         else:
             # Fallback: download code via GitHub archive API
             _update_log(
@@ -7243,6 +7305,13 @@ def _do_update_in_thread(actor: str) -> None:
             if os.path.isdir(new_backend):
                 shutil.copytree(new_backend, backend_src, dirs_exist_ok=True)
                 _update_log("Copied new backend/")
+            elif os.path.isfile(os.path.join(extracted_root, "main.py")):
+                _copy_updated_backend(extracted_root, backend_src)
+                _update_log("Copied flat backend from archive root")
+            else:
+                raise RuntimeError(
+                    "Downloaded repository does not contain backend/main.py or main.py"
+                )
             if os.path.isdir(new_frontend):
                 shutil.copytree(new_frontend, frontend_src, dirs_exist_ok=True)
                 _update_log("Copied new frontend/")
@@ -7253,7 +7322,11 @@ def _do_update_in_thread(actor: str) -> None:
 
         # ── Step 3: Install dependencies ──────────────────
         _update_log("--- Step 3: Installing Python dependencies ---")
-        req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
+        req_candidates = [
+            os.path.join(os.path.dirname(__file__), "requirements.txt"),
+            os.path.join(os.path.dirname(__file__), "..", "requirements.txt"),
+        ]
+        req_file = next((p for p in req_candidates if os.path.exists(p)), "")
         if os.path.exists(req_file):
             result = subprocess.run(
                 ["pip", "install", "--no-cache-dir", "-q", "-r", req_file],
@@ -7287,10 +7360,7 @@ def _do_update_in_thread(actor: str) -> None:
 
             _t.sleep(3)
             _update_log("Restarting server now…")
-            os.execv(
-                "/usr/local/bin/uvicorn",
-                ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"],
-            )
+            _restart_uvicorn()
 
         threading.Thread(target=_restart_server, daemon=True).start()
 
@@ -7412,10 +7482,7 @@ def update_restore_backup(
 
     def _restart_server_after_restore():
         time.sleep(2)
-        os.execv(
-            "/usr/local/bin/uvicorn",
-            ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"],
-        )
+        _restart_uvicorn()
 
     threading.Thread(target=_restart_server_after_restore, daemon=True).start()
     return {

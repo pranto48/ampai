@@ -1,0 +1,72 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: agent_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ampai
+      POSTGRES_USER: ampai
+      POSTGRES_PASSWORD: ampai
+    ports:
+      - "5433:5432"
+    volumes:
+      - ampai_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ampai -d ampai"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:alpine
+    container_name: agent_redis
+    restart: unless-stopped
+    command: redis-server --requirepass ampairedis
+    ports:
+      - "6380:6379"
+    volumes:
+      - ampai_redisdata:/data
+
+  agent-web-app:
+    build:
+      context: .
+    image: ampai-agent-web-app
+    container_name: ai_agent_web
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8001:8000"
+    environment:
+      DATABASE_URL: postgresql://ampai:ampai@db:5432/ampai
+      REDIS_URL: redis://:ampairedis@redis:6379/0
+      JWT_SECRET: change-this-in-production
+      JWT_EXPIRY_MINUTES: 60
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: P@ssw0rd
+      USER_USERNAME: user
+      USER_PASSWORD: user123
+      AMPAI_REPO_URL: https://github.com/pranto48/ampai.git
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      ALLOWED_ORIGINS: http://localhost:1420,http://127.0.0.1:1420,tauri://localhost,http://tauri.localhost,https://tauri.localhost,http://192.168.20.5:8001
+    volumes:
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+      - .:/app_host
+      - ./agent_data/app:/app/data
+    working_dir: /app/backend
+    command: ["/app_host/docker-entrypoint.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  ampai_pgdata:
+    name: ampai_pgdata
+  ampai_redisdata:
+    name: ampai_redisdata

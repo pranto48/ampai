@@ -19,7 +19,20 @@ type ChatMessage = {
   time: string;
 };
 
-const DEFAULT_SERVER_URL = "http://127.0.0.1:8000";
+type UpdateState = {
+  status: "idle" | "checking" | "ok" | "error";
+  detail: string;
+  url?: string;
+};
+
+const DEFAULT_SERVER_URL =
+  window.location.protocol.startsWith("http") &&
+  !["tauri.localhost", "localhost"].includes(window.location.hostname) &&
+  window.location.hostname !== "127.0.0.1"
+    ? window.location.origin
+    : "http://127.0.0.1:8000";
+const GITHUB_REPO = "pranto48/ampai";
+const GITHUB_REPO_URL = `https://github.com/${GITHUB_REPO}`;
 const SERVER_KEY = "ampai.serverUrl";
 const AUTH_KEY = "ampai.auth";
 const SESSION_KEY = "ampai.sessionId";
@@ -34,12 +47,52 @@ const state = {
   auth: readAuth(),
   sessionId: localStorage.getItem(SESSION_KEY) || createSessionId(),
   messages: [] as ChatMessage[],
+  update: {
+    status: "idle",
+    detail: "Check GitHub for newer AMP AI builds.",
+  } as UpdateState,
   busy: false,
 };
 
 function normalizeServerUrl(value: string): string {
-  const trimmed = value.trim().replace(/\/+$/, "");
-  return trimmed || DEFAULT_SERVER_URL;
+  const trimmed = value.trim();
+  if (!trimmed) return DEFAULT_SERVER_URL;
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  try {
+    const parsed = new URL(withProtocol);
+    return parsed.origin.replace(/\/+$/, "");
+  } catch {
+    return DEFAULT_SERVER_URL;
+  }
+}
+
+function serverUrlCandidates(value: string): string[] {
+  const base = normalizeServerUrl(value);
+  const candidates = new Set([base]);
+  try {
+    const parsed = new URL(base);
+    const commonPorts = ["8000", "8001"];
+    for (const port of commonPorts) {
+      if (parsed.port !== port) {
+        const next = new URL(parsed.toString());
+        next.port = port;
+        candidates.add(next.origin);
+      }
+    }
+  } catch {
+    candidates.add(DEFAULT_SERVER_URL);
+  }
+  return [...candidates];
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 function escapeAttribute(value: string): string {
@@ -88,10 +141,10 @@ function apiHeaders(extra?: HeadersInit): Headers {
 }
 
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${state.serverUrl}${path}`, {
+  const response = await fetchWithTimeout(`${state.serverUrl}${path}`, {
     ...init,
     headers: apiHeaders(init.headers),
-  });
+  }, 20000);
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
   if (!response.ok) {
@@ -107,20 +160,37 @@ function setBusy(nextBusy: boolean) {
 }
 
 async function checkServer() {
+  const originalUrl = state.serverUrl;
   const started = performance.now();
+  const errors: string[] = [];
   try {
-    const response = await fetch(`${state.serverUrl}/healthz`, {
-      headers: { Accept: "application/json" },
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = (await response.json()) as { status?: string; time?: string };
-    const latency = Math.round(performance.now() - started);
-    state.health = {
-      ok: data.status === "ok",
-      status: data.status || "unknown",
-      detail: `Connected in ${latency} ms`,
-      checkedAt: data.time,
-    };
+    for (const candidate of serverUrlCandidates(originalUrl)) {
+      try {
+        const response = await fetchWithTimeout(`${candidate}/healthz`, {
+          headers: { Accept: "application/json" },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = (await response.json()) as { status?: string; time?: string };
+        const latency = Math.round(performance.now() - started);
+        state.serverUrl = candidate;
+        localStorage.setItem(SERVER_KEY, candidate);
+        state.health = {
+          ok: data.status === "ok",
+          status: data.status || "unknown",
+          detail:
+            candidate === originalUrl
+              ? `Connected in ${latency} ms`
+              : `Connected at ${candidate} in ${latency} ms`,
+          checkedAt: data.time,
+        };
+        render();
+        return;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "failed";
+        errors.push(`${candidate}: ${detail}`);
+      }
+    }
+    throw new Error(errors.join(" | "));
   } catch (error) {
     state.health = {
       ok: false,
@@ -138,6 +208,57 @@ async function saveServerUrl(form: HTMLFormElement) {
   state.health = { ok: false, status: "pending", detail: "Server URL saved" };
   render();
   await checkServer();
+}
+
+async function checkForUpdates() {
+  state.update = { status: "checking", detail: "Checking GitHub..." };
+  render();
+  try {
+    const releaseResponse = await fetchWithTimeout(
+      `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
+      { headers: { Accept: "application/vnd.github+json" } },
+      10000,
+    );
+
+    if (releaseResponse.ok) {
+      const release = (await releaseResponse.json()) as {
+        tag_name?: string;
+        html_url?: string;
+        published_at?: string;
+      };
+      state.update = {
+        status: "ok",
+        detail: `Latest release: ${release.tag_name || "available"}`,
+        url: release.html_url || `${GITHUB_REPO_URL}/releases`,
+      };
+      render();
+      return;
+    }
+
+    const commitResponse = await fetchWithTimeout(
+      `https://api.github.com/repos/${GITHUB_REPO}/commits/main`,
+      { headers: { Accept: "application/vnd.github+json" } },
+      10000,
+    );
+    if (!commitResponse.ok) throw new Error(`GitHub HTTP ${commitResponse.status}`);
+    const commit = (await commitResponse.json()) as {
+      sha?: string;
+      html_url?: string;
+      commit?: { message?: string; committer?: { date?: string } };
+    };
+    state.update = {
+      status: "ok",
+      detail: `Latest main commit: ${(commit.sha || "").slice(0, 7)} ${commit.commit?.message?.split("\n")[0] || ""}`,
+      url: commit.html_url || GITHUB_REPO_URL,
+    };
+  } catch (error) {
+    state.update = {
+      status: "error",
+      detail: error instanceof Error ? error.message : "Update check failed",
+      url: GITHUB_REPO_URL,
+    };
+  }
+  render();
 }
 
 async function login(form: HTMLFormElement) {
@@ -267,6 +388,26 @@ function serverPanel(): HTMLElement {
   return panel;
 }
 
+function updatePanel(): HTMLElement {
+  const panel = el("section", { className: "panel" });
+  panel.append(el("div", { className: "panel-title", text: "Updates" }));
+  const status = el("div", { className: "update-status" });
+  status.append(
+    el("strong", { text: state.update.status === "checking" ? "Checking" : "GitHub" }),
+    el("span", { text: state.update.detail }),
+  );
+  const buttons = el("div", { className: "button-row" });
+  buttons.append(
+    el("button", {
+      text: state.update.status === "checking" ? "Checking" : "Check",
+      attrs: { id: "check-updates", type: "button" },
+    }),
+    el("button", { text: "Open Repo", attrs: { id: "open-repo", type: "button" } }),
+  );
+  panel.append(status, buttons);
+  return panel;
+}
+
 function statusRow(): HTMLElement {
   const row = el("div", { className: "status-row" });
   const badge = el("span", {
@@ -355,7 +496,7 @@ function render() {
 
   const shell = el("main", { className: "layout" });
   const sidebar = el("aside", { className: "sidebar" });
-  sidebar.append(serverPanel(), authPanel());
+  sidebar.append(serverPanel(), authPanel(), updatePanel());
   shell.append(sidebar, chatPanel());
   app.append(shell);
 
@@ -378,6 +519,12 @@ function render() {
     void sendChat(event.currentTarget as HTMLFormElement);
   });
   document.querySelector<HTMLButtonElement>("#reset-session")?.addEventListener("click", resetSession);
+  document.querySelector<HTMLButtonElement>("#check-updates")?.addEventListener("click", () => {
+    void checkForUpdates();
+  });
+  document.querySelector<HTMLButtonElement>("#open-repo")?.addEventListener("click", () => {
+    window.open(state.update.url || GITHUB_REPO_URL, "_blank", "noopener,noreferrer");
+  });
 }
 
 render();

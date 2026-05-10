@@ -39,6 +39,7 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+      - "8001:8000"
     environment:
       DATABASE_URL: postgresql://ampai:ampai@db:5432/ampai
       REDIS_URL: redis://redis:6379/0

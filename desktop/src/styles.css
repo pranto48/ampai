@@ -201,6 +201,20 @@ code {
   font-size: 0.9rem;
 }
 
+.update-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.update-status span {
+  color: #637783;
+  font-size: 0.86rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .chat-shell {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
