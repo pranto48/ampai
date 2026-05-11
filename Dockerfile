@@ -16,8 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 RUN mkdir -p /data/agent_data /data/uploads /data/backups
-RUN chmod +x /app/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
 EXPOSE 8000
 
-CMD ["/app/docker-entrypoint.sh"]
+CMD ["sh", "/app/docker-entrypoint.sh"]

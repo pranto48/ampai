@@ -12,5 +12,4 @@ agent_data/
 data/
 *.db
 *.db-journal
-.git/
 .DS_Store

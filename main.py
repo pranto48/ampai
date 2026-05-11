@@ -202,21 +202,25 @@ app.include_router(github_router)
 # Add CORS middleware
 # CORS — allow the Tauri desktop client plus any localhost port.
 # Set ALLOWED_ORIGINS env var to a comma-separated list to override.
+_default_cors_origins = [
+    "http://localhost:8000",
+    "http://localhost:8001",
+    "http://localhost:18000",
+    "http://127.0.0.1:8000",
+    "http://127.0.0.1:8001",
+    "http://127.0.0.1:18000",
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+]
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
 if _raw_origins:
-    _cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+    _cors_origins = []
+    for origin in [o.strip() for o in _raw_origins.split(",") if o.strip()] + _default_cors_origins:
+        if origin not in _cors_origins:
+            _cors_origins.append(origin)
 else:
-    _cors_origins = [
-        "http://localhost:8000",
-        "http://localhost:8001",
-        "http://localhost:18000",
-        "http://127.0.0.1:8000",
-        "http://127.0.0.1:8001",
-        "http://127.0.0.1:18000",
-        "tauri://localhost",
-        "http://tauri.localhost",
-        "https://tauri.localhost",
-    ]
+    _cors_origins = list(_default_cors_origins)
 
 app.add_middleware(
     CORSMiddleware,
@@ -6149,6 +6153,29 @@ def _resolve_frontend_dir() -> Optional[str]:
     return None
 
 
+def _deployed_repo_candidates() -> List[str]:
+    root = os.path.abspath(os.path.dirname(__file__))
+    return [
+        root,
+        os.path.abspath(os.path.join(root, "..")),
+        os.path.abspath(os.path.join(root, "..", "..")),
+        "/app",
+        "/app_host",
+    ]
+
+
+def _find_git_repo_root() -> Optional[str]:
+    seen = set()
+    for candidate in _deployed_repo_candidates():
+        resolved = os.path.abspath(candidate)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if os.path.isdir(os.path.join(resolved, ".git")):
+            return resolved
+    return None
+
+
 def _add_setting_check(
     checks: List[Dict[str, str]],
     key: str,
@@ -7093,23 +7120,19 @@ def _update_log(msg: str) -> None:
 def _get_current_git_commit() -> str:
     """Return the HEAD commit hash of the deployed code, or 'unknown'."""
     try:
-        # The host directory is mounted into /app_host inside the container
-        for candidate in [
-            os.path.join(os.path.dirname(__file__), "..", "..", ".git"),
-            os.path.join(os.path.dirname(__file__), "..", ".git"),
-            "/app_host/.git",
-        ]:
-            if os.path.isdir(candidate):
-                git_head = os.path.join(candidate, "HEAD")
-                if os.path.exists(git_head):
-                    with open(git_head) as f:
-                        ref = f.read().strip()
-                    if ref.startswith("ref: "):
-                        ref_file = os.path.join(candidate, ref[5:])
-                        if os.path.exists(ref_file):
-                            with open(ref_file) as f:
-                                return f.read().strip()[:12]
-                    return ref[:12]
+        repo_root = _find_git_repo_root()
+        if repo_root:
+            git_dir = os.path.join(repo_root, ".git")
+            git_head = os.path.join(git_dir, "HEAD")
+            if os.path.exists(git_head):
+                with open(git_head) as f:
+                    ref = f.read().strip()
+                if ref.startswith("ref: "):
+                    ref_file = os.path.join(git_dir, ref[5:])
+                    if os.path.exists(ref_file):
+                        with open(ref_file) as f:
+                            return f.read().strip()[:12]
+                return ref[:12]
     except Exception:
         pass
     return "unknown"
@@ -7212,8 +7235,8 @@ def _do_update_in_thread(actor: str) -> None:
         backup_path = os.path.join(CODE_BACKUP_DIR, ts)
         os.makedirs(backup_path, exist_ok=True)
 
-        backend_src = os.path.join(os.path.dirname(__file__))
-        frontend_src = os.path.join(os.path.dirname(__file__), "..", "frontend")
+        backend_src = os.path.abspath(os.path.dirname(__file__))
+        frontend_src = _resolve_frontend_dir() or os.path.join(backend_src, "frontend")
 
         if os.path.isdir(backend_src):
             shutil.copytree(
@@ -7235,18 +7258,7 @@ def _do_update_in_thread(actor: str) -> None:
         # ── Step 2: Pull latest code ───────────────────────
         _update_log("--- Step 2: Pulling latest code from GitHub ---")
 
-        # Candidate paths for the host-mounted git repo
-        host_git_candidates = [
-            os.path.join(
-                os.path.dirname(__file__), "..", ".."
-            ),  # /app/../ → host mount
-            "/app_host",
-        ]
-        repo_root = None
-        for c in host_git_candidates:
-            if os.path.isdir(os.path.join(c, ".git")):
-                repo_root = os.path.abspath(c)
-                break
+        repo_root = _find_git_repo_root()
 
         if repo_root:
             _update_log(f"Found git repo at {repo_root}")
@@ -7287,6 +7299,14 @@ def _do_update_in_thread(actor: str) -> None:
             _copy_updated_backend(updated_app_dir, backend_src)
             if os.path.abspath(updated_app_dir) != os.path.abspath(backend_src):
                 _update_log(f"Copied runnable backend from {updated_app_dir}")
+            repo_frontend = _resolve_frontend_dir() or os.path.join(repo_root, "frontend")
+            if os.path.isdir(os.path.join(repo_root, "frontend")) and os.path.abspath(repo_frontend) != os.path.abspath(os.path.join(repo_root, "frontend")):
+                shutil.copytree(
+                    os.path.join(repo_root, "frontend"),
+                    repo_frontend,
+                    dirs_exist_ok=True,
+                )
+                _update_log("Copied frontend assets from updated repository")
         else:
             # Fallback: download code via GitHub archive API
             _update_log(
@@ -7318,20 +7338,18 @@ def _do_update_in_thread(actor: str) -> None:
                 raise RuntimeError("Archive extraction yielded no directory")
             extracted_root = os.path.join(temp_dir, extracted_dirs[0])
 
-            # Copy backend and frontend
-            new_backend = os.path.join(extracted_root, "backend")
+            # Copy runnable app layout and frontend
             new_frontend = os.path.join(extracted_root, "frontend")
-
-            if os.path.isdir(new_backend):
-                shutil.copytree(new_backend, backend_src, dirs_exist_ok=True)
-                _update_log("Copied new backend/")
-            elif os.path.isfile(os.path.join(extracted_root, "main.py")):
-                _copy_updated_backend(extracted_root, backend_src)
-                _update_log("Copied flat backend from archive root")
-            else:
+            updated_app_dir = _runnable_app_dir(extracted_root)
+            if not updated_app_dir:
                 raise RuntimeError(
                     "Downloaded repository does not contain backend/main.py or main.py"
                 )
+            _copy_updated_backend(updated_app_dir, backend_src)
+            if os.path.abspath(updated_app_dir) == os.path.abspath(extracted_root):
+                _update_log("Copied runnable app from archive root")
+            else:
+                _update_log(f"Copied runnable backend from {updated_app_dir}")
             if os.path.isdir(new_frontend):
                 shutil.copytree(new_frontend, frontend_src, dirs_exist_ok=True)
                 _update_log("Copied new frontend/")
@@ -7362,8 +7380,12 @@ def _do_update_in_thread(actor: str) -> None:
             _update_log("No requirements.txt found, skipping.")
 
         # ── Step 4: Signal server to reload ───────────────
-        _update_log("--- Step 4: Signaling server reload ---")
-        _update_log("Update complete! Restarting uvicorn in 3 seconds…")
+        _update_log("--- Step 4: Validating updated app ---")
+        _validate_runnable_app()
+        _update_log("Updated app import validation passed.")
+
+        _update_log("--- Step 5: Signaling server reload ---")
+        _update_log("Update complete! Restarting uvicorn in 3 seconds...")
 
         _update_status["state"] = "success"
         _update_status["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -7482,8 +7504,8 @@ def update_restore_backup(
 
     backend_backup = os.path.join(full_path, "backend")
     frontend_backup = os.path.join(full_path, "frontend")
-    backend_dst = os.path.join(os.path.dirname(__file__))
-    frontend_dst = os.path.join(os.path.dirname(__file__), "..", "frontend")
+    backend_dst = os.path.abspath(os.path.dirname(__file__))
+    frontend_dst = _resolve_frontend_dir() or os.path.join(backend_dst, "frontend")
     if not os.path.isdir(backend_backup) and not os.path.isdir(frontend_backup):
         raise HTTPException(
             status_code=400, detail="Backup does not contain backend/frontend folders"
