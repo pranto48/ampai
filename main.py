@@ -6112,11 +6112,12 @@ def summarize_today_email(
 
 @app.get("/", include_in_schema=False)
 def root_page():
-    frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
-    index_path = os.path.join(frontend_dir, "index.html")
-    if os.path.exists(index_path):
-        with open(index_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(f.read())
+    frontend_dir = _resolve_frontend_dir()
+    if frontend_dir:
+        index_path = os.path.join(frontend_dir, "index.html")
+        if os.path.exists(index_path):
+            with open(index_path, "r", encoding="utf-8") as f:
+                return HTMLResponse(f.read())
     return HTMLResponse("<h1>AmpAI</h1><p>Frontend not found.</p>")
 
 
@@ -6127,6 +6128,23 @@ def favicon():
 
 def _to_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _frontend_dir_candidates() -> List[str]:
+    root = os.path.dirname(__file__)
+    return [
+        os.path.join(root, "..", "frontend"),
+        os.path.join(root, "desktop", "dist"),
+        os.path.join(root, "..", "desktop", "dist"),
+    ]
+
+
+def _resolve_frontend_dir() -> Optional[str]:
+    for candidate in _frontend_dir_candidates():
+        index_path = os.path.join(candidate, "index.html")
+        if os.path.exists(index_path):
+            return candidate
+    return None
 
 
 def _add_setting_check(
@@ -7847,8 +7865,8 @@ def api_recall_reindex(
 if os.path.exists(UPLOAD_DIR):
     app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
-frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
-if os.path.exists(frontend_path):
+frontend_path = _resolve_frontend_dir()
+if frontend_path:
     app.mount("/static", StaticFiles(directory=frontend_path), name="static-assets")
 
 
@@ -7859,15 +7877,17 @@ def spa_fallback(full_path: str):
     # Let /api/* and /uploads/* pass through (already handled above)
     if full_path.startswith("api/") or full_path.startswith("uploads/"):
         raise HTTPException(status_code=404)
-    fp = os.path.join(os.path.dirname(__file__), "..", "frontend", full_path)
-    if os.path.exists(fp) and os.path.isfile(fp):
-        import mimetypes
+    frontend_dir = _resolve_frontend_dir()
+    if frontend_dir:
+        fp = os.path.join(frontend_dir, full_path)
+        if os.path.exists(fp) and os.path.isfile(fp):
+            import mimetypes
 
-        mt, _ = mimetypes.guess_type(fp)
-        with open(fp, "rb") as f:
-            return Response(f.read(), media_type=mt or "application/octet-stream")
-    index_path = os.path.join(os.path.dirname(__file__), "..", "frontend", "index.html")
-    if os.path.exists(index_path):
-        with open(index_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(f.read())
+            mt, _ = mimetypes.guess_type(fp)
+            with open(fp, "rb") as f:
+                return Response(f.read(), media_type=mt or "application/octet-stream")
+        index_path = os.path.join(frontend_dir, "index.html")
+        if os.path.exists(index_path):
+            with open(index_path, "r", encoding="utf-8") as f:
+                return HTMLResponse(f.read())
     raise HTTPException(status_code=404)
