@@ -7109,6 +7109,44 @@ def _restart_uvicorn() -> None:
     raise RuntimeError("No runnable AmpAI entrypoint found after update")
 
 
+def _validate_runnable_app() -> None:
+    import subprocess
+
+    checks = [
+        (
+            os.path.abspath(os.path.dirname(__file__)),
+            "import importlib; importlib.import_module('main')",
+        ),
+        (
+            "/app",
+            "import importlib; importlib.import_module('main')",
+        ),
+        (
+            "/app",
+            "import importlib; importlib.import_module('backend.main')",
+        ),
+    ]
+    last_error = "No runnable validation target found"
+    for workdir, code in checks:
+        if not os.path.isdir(workdir):
+            continue
+        try:
+            result = subprocess.run(
+                ["/usr/local/bin/python", "-c", code],
+                cwd=workdir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+        if result.returncode == 0:
+            return
+        last_error = (result.stderr or result.stdout or "unknown error").strip()[:500]
+    raise RuntimeError(f"Updated app validation failed: {last_error}")
+
+
 def _update_log(msg: str) -> None:
     line = f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}"
     _update_log_lines.append(line)
