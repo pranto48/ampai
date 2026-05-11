@@ -6133,8 +6133,10 @@ def _to_bool(value: Any) -> bool:
 def _frontend_dir_candidates() -> List[str]:
     root = os.path.dirname(__file__)
     return [
-        os.path.join(root, "..", "frontend"),
+        os.path.join(root, "frontend"),
+        os.path.join(root, "dist"),
         os.path.join(root, "desktop", "dist"),
+        os.path.join(root, "..", "frontend"),
         os.path.join(root, "..", "desktop", "dist"),
     ]
 
