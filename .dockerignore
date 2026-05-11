@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+env/
+node_modules/
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+agent_data/
+data/
+*.db
+*.db-journal
+.git/
+.DS_Store

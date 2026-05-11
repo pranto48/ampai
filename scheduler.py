@@ -1,0 +1,428 @@
+import json
+import logging
+import re
+import shutil
+import subprocess
+import time
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from agent import chat_with_agent
+from apscheduler.schedulers.background import BackgroundScheduler
+from database import (
+    apply_retention_policy,
+    auto_complete_due_tasks,
+    create_curator_nudge,
+    get_config,
+    get_network_targets,
+    get_skill_performance,
+    get_sql_chat_history,
+    list_agent_skills,
+    list_pending_reply_notifications_for_digest,
+    list_tasks,
+    mark_pending_reply_notifications_delivered,
+    set_config,
+    set_session_category,
+    summarize_approved_memories,
+)
+from integrations.gmail_api import (
+    fetch_todays_messages as fetch_gmail_todays_messages,
+)
+from integrations.gmail_api import (
+    refresh_access_token as refresh_gmail_access_token,
+)
+from integrations.outlook_graph import (
+    fetch_todays_messages as fetch_outlook_todays_messages,
+)
+from integrations.outlook_graph import (
+    refresh_access_token as refresh_outlook_access_token,
+)
+from logging_utils import get_logger
+
+scheduler = BackgroundScheduler()
+logger = logging.getLogger("ampai.scheduler")
+
+
+def _send_resend_email(subject: str, body_text: str) -> bool:
+    api_key = (get_config("resend_api_key") or "").strip()
+    from_email = (get_config("resend_from_email") or "").strip()
+    to_email = (get_config("notification_email_to") or "").strip()
+    if not api_key or not from_email or not to_email:
+        return False
+    payload = json.dumps(
+        {"from": from_email, "to": [to_email], "subject": subject, "text": body_text}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception:
+        return False
+
+
+def ping_target(ip_address: str) -> dict:
+    ping_binary = shutil.which("ping")
+    if not ping_binary:
+        return {
+            "status": "Error",
+            "avg_ping": "N/A",
+            "details": "Ping utility is not installed in this runtime",
+        }
+
+    try:
+        result = subprocess.run(
+            [ping_binary, "-c", "3", "-W", "2", ip_address],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        output = result.stdout
+        if result.returncode == 0:
+            avg_ping_match = re.search(
+                r"(?:rtt|round-trip) min/avg/max/(?:mdev|stddev) = [0-9.]+?/([0-9.]+)",
+                output,
+            )
+            avg_ping = avg_ping_match.group(1) if avg_ping_match else "unknown"
+            try:
+                latency = float(avg_ping)
+                status = "Good" if latency < 20 else "Fair" if latency < 100 else "Poor"
+            except Exception:
+                status = "Good"
+            return {"status": status, "avg_ping": avg_ping, "details": "stable"}
+        return {"status": "Offline", "avg_ping": "N/A", "details": "unreachable"}
+    except Exception as e:
+        return {"status": "Error", "avg_ping": "N/A", "details": str(e)}
+
+
+def run_network_sweep():
+    logger.info("Running scheduled network sweep")
+    targets = get_network_targets()
+    if not targets:
+        logger.info("No network targets configured")
+        return
+
+    report_lines = ["Link Status Overview:"]
+    for t in targets:
+        ping_result = ping_target(t["ip_address"])
+        if ping_result["status"] == "Offline":
+            line = f"{t['name']} Connectivity: Offline (Host unreachable)"
+        else:
+            line = f"{t['name']} Connectivity: {ping_result['status']} (Average Ping Time: {ping_result['avg_ping']}ms)"
+        report_lines.append(line)
+
+    final_report = "\n".join(report_lines)
+    logger.info("Network Sweep Complete: %s", final_report)
+
+    session_id = "system_reports"
+    try:
+        with engine.connect() as conn:
+            upsert_meta = text(
+                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, FALSE, FALSE, :u) "
+                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category, updated_at = EXCLUDED.updated_at"
+            )
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                upsert_meta, {"s": session_id, "c": "System Reports", "u": now}
+            )
+
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ai_message = (
+                f"**Automated Network Report ({timestamp})**\n```\n{final_report}\n```"
+            )
+            conn.execute(
+                text("INSERT INTO message_store (session_id, message) VALUES (:s, :m)"),
+                {"s": session_id, "m": f"Run daily network sweep for {timestamp}"},
+            )
+            conn.execute(
+                text("INSERT INTO message_store (session_id, message) VALUES (:s, :m)"),
+                {"s": session_id, "m": ai_message},
+            )
+            conn.commit()
+    except Exception as e:
+        logger.exception("Error saving report to DB: %s", e)
+
+
+def run_task_digest():
+    tasks = list_tasks(status="todo")
+    overdue = []
+    reminder_lines = []
+    now = datetime.now(timezone.utc)
+    for t in tasks:
+        due_at = t.get("due_at")
+        if not due_at:
+            continue
+        try:
+            due_dt = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+            if due_dt < now:
+                overdue.append(t)
+        except Exception:
+            continue
+
+        if due_dt < now:
+            reminder_lines.append(
+                f"⚠️ Overdue: #{task['id']} {task['title']} (due {due_dt.isoformat()})"
+            )
+        else:
+            reminder_lines.append(
+                f"⏰ Due soon: #{task['id']} {task['title']} (due {due_dt.isoformat()})"
+            )
+
+    auto_completed = auto_complete_due_tasks()
+
+    if not reminder_lines and auto_completed == 0:
+        logger.info("No task reminders needed")
+        return
+
+    session_id = "system_tasks"
+    timestamp = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+    summary = "\n".join(reminder_lines)
+    if auto_completed:
+        summary = (
+            summary + "\n" if summary else ""
+        ) + f"✅ Auto-completed tasks at/after due time: {auto_completed}"
+    try:
+        set_session_category(session_id, "System Tasks")
+        history = get_sql_chat_history(session_id)
+        history.add_user_message(f"Run task reminder check at {timestamp}")
+        history.add_ai_message(f"**Task Reminder Report ({timestamp})**\n{summary}")
+        _send_resend_email(
+            subject=f"AmpAI Task Reminder Report ({timestamp})",
+            body_text=summary,
+        )
+        logger.info(
+            "Task reminders recorded", extra={"reminder_count": len(reminder_lines)}
+        )
+    except Exception as e:
+        logger.exception("Error writing task digest: %s", e)
+
+
+def run_chat_reply_digest():
+    default_window = max(
+        1, int(get_config("notification_default_digest_interval_minutes", "30") or "30")
+    )
+    pending = list_pending_reply_notifications_for_digest(
+        max_age_minutes=default_window
+    )
+    if not pending:
+        return
+
+    grouped = {}
+    delivered_ids = []
+    for row in pending:
+        username = row.get("username") or "unknown"
+        grouped.setdefault(username, []).append(row)
+        delivered_ids.append(int(row["id"]))
+
+
+def run_retention_cleanup():
+    max_age_days = max(
+        1, int(get_config("retention_chat_history_days", "365") or "365")
+    )
+    archive_only = str(
+        get_config("retention_archive_only", "true")
+    ).strip().lower() not in {"0", "false", "no"}
+    result = apply_retention_policy(
+        max_age_days=max_age_days, archive_only=archive_only
+    )
+    logger.info("Retention cleanup complete: %s", result)
+
+    lines = []
+    for username, entries in grouped.items():
+        lines.append(f"User: {username} ({len(entries)} replies)")
+        for entry in entries[:20]:
+            created_at = entry.get("created_at")
+            lines.append(
+                f"- [{created_at}] Session {entry.get('session_id')}: {(entry.get('reply_preview') or '')[:140]}"
+            )
+        lines.append("")
+
+    body = "AmpAI periodic chat reply digest\n\n" + "\n".join(lines).strip()
+    sent = _send_resend_email(subject="AmpAI Chat Reply Digest", body_text=body)
+    if sent:
+        mark_pending_reply_notifications_delivered(delivered_ids)
+    else:
+        logger.warning("Reply digest email not sent; pending items retained")
+
+
+def run_memory_summarizer():
+    min_age_days = max(
+        7, int(get_config("memory_summarizer_min_age_days", "14") or "14")
+    )
+    min_group_size = max(
+        2, int(get_config("memory_summarizer_min_group_size", "3") or "3")
+    )
+    result = summarize_approved_memories(
+        min_age_days=min_age_days, min_group_size=min_group_size, max_groups=200
+    )
+    logger.info(
+        "Memory summarizer run complete",
+        extra={
+            "groups_created": int(result.get("groups_created", 0)),
+            "sources_marked": int(result.get("sources_marked", 0)),
+        },
+    )
+
+
+def run_curator_nudges():
+    due_tasks = list_tasks(status="todo")
+    now = datetime.now(timezone.utc)
+    enable = str(
+        get_config("curator_nudges_enabled", "true") or "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not enable:
+        return
+    for task in due_tasks[:100]:
+        due_at = task.get("due_at")
+        if not due_at:
+            continue
+        try:
+            due_dt = datetime.fromisoformat(str(due_at).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if due_dt > now:
+            continue
+        create_curator_nudge(
+            username=task.get("username") or "admin",
+            session_id=task.get("session_id"),
+            nudge_type="overdue_task",
+            payload={
+                "task_id": task.get("id"),
+                "title": task.get("title"),
+                "due_at": due_dt.isoformat(),
+                "message": f"Task '{task.get('title')}' is overdue. Do you want me to create a follow-up plan?",
+            },
+        )
+
+
+def run_skill_rollout_guard():
+    for skill in list_agent_skills(limit=300):
+        skill_id = int(skill.get("id"))
+        raw = (get_config(f"skill_rollout_{skill_id}", "") or "").strip()
+        if not raw:
+            continue
+        try:
+            rollout = json.loads(raw)
+        except Exception:
+            continue
+        if rollout.get("status") != "canary":
+            continue
+        perf = get_skill_performance(skill_id=skill_id, lookback_days=7)
+        if perf.get("runs", 0) < 5:
+            continue
+        if perf.get("success_rate", 0.0) < 0.6:
+            rollout["status"] = "rolled_back_auto"
+            rollout["ended_at"] = datetime.now(timezone.utc).isoformat()
+            set_config(f"skill_rollout_{skill_id}", json.dumps(rollout))
+        elif perf.get("success_rate", 0.0) >= 0.75:
+            rollout["status"] = "promoted"
+            rollout["ended_at"] = datetime.now(timezone.utc).isoformat()
+            set_config(f"skill_rollout_{skill_id}", json.dumps(rollout))
+
+
+def run_session_fts_indexer():
+    """Nightly job: index unindexed chat sessions into FTS5 for cross-session recall."""
+    try:
+        from session_recall import bulk_index_unindexed_sessions
+
+        stats = bulk_index_unindexed_sessions(batch_size=100)
+        logger.info(
+            "FTS5 indexer complete: sessions=%d turns=%d errors=%d",
+            stats.get("sessions_indexed", 0),
+            stats.get("turns_indexed", 0),
+            stats.get("errors", 0),
+        )
+    except Exception as exc:
+        logger.warning("run_session_fts_indexer failed: %s", exc)
+
+
+def run_memory_curation():
+    """Every 6h: use local LLM to curate recent sessions into memory nudges."""
+    try:
+        from memory_curator import run_scheduled_curation
+
+        model_type = (get_config("default_model_type") or "ollama").strip()
+        stats = run_scheduled_curation(model_type=model_type)
+        logger.info(
+            "Memory curation complete: users=%d sessions=%d nudges=%d",
+            stats.get("users_processed", 0),
+            stats.get("sessions_reviewed", 0),
+            stats.get("nudges_created", 0),
+        )
+    except Exception as exc:
+        logger.warning("run_memory_curation failed: %s", exc)
+
+
+def run_skill_improvement_pass():
+    """Every 1h: review underperforming skills and self-improve their prompts."""
+    try:
+        from skill_engine import run_improvement_pass
+
+        model_type = (get_config("default_model_type") or "ollama").strip()
+        stats = run_improvement_pass(model_type=model_type)
+        if stats.get("skills_improved", 0) > 0:
+            logger.info(
+                "Skill improvement pass: reviewed=%d improved=%d",
+                stats.get("skills_reviewed", 0),
+                stats.get("skills_improved", 0),
+            )
+    except Exception as exc:
+        logger.warning("run_skill_improvement_pass failed: %s", exc)
+
+
+def start_scheduler():
+    if not scheduler.running:
+        retention_interval_hours = max(
+            1, int(get_config("retention_cleanup_interval_hours", "24") or "24")
+        )
+        scheduler.add_job(run_network_sweep, "cron", hour=9, minute=0)
+        scheduler.add_job(run_task_digest, "interval", minutes=30)
+        scheduler.add_job(run_chat_reply_digest, "interval", minutes=5)
+        scheduler.add_job(
+            run_memory_summarizer, "cron", day_of_week="sun", hour=3, minute=0
+        )
+        scheduler.add_job(run_memory_summarizer, "cron", hour=3, minute=30)
+        scheduler.add_job(run_curator_nudges, "interval", minutes=20)
+        scheduler.add_job(run_skill_rollout_guard, "interval", minutes=30)
+        # AmpAI autonomous agent jobs
+        scheduler.add_job(
+            run_memory_curation, "interval", hours=6, id="ampai_memory_curation"
+        )
+        scheduler.add_job(
+            run_skill_improvement_pass,
+            "interval",
+            hours=1,
+            id="ampai_skill_improvement",
+        )
+        scheduler.add_job(
+            run_session_fts_indexer, "cron", hour=2, minute=0, id="ampai_fts_indexer"
+        )
+        scheduler.add_job(
+            run_retention_cleanup,
+            "interval",
+            hours=retention_interval_hours,
+            id="ampai_retention_cleanup",
+        )
+        scheduler.start()
+        logger.info("Background scheduler started")
+
+
+def get_scheduler_diagnostics() -> dict:
+    """Return a dict compatible with the admin health dashboard."""
+    try:
+        jobs = [str(j.id) for j in scheduler.get_jobs()] if scheduler.running else []
+        return {
+            "running": scheduler.running,
+            "jobs": jobs,
+            "last_run": {},
+        }
+    except Exception as exc:
+        return {"running": False, "jobs": [], "last_run": {}, "error": str(exc)}
