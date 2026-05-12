@@ -1,6 +1,6 @@
 [package]
 name = "ampai-desktop"
-version = "0.1.4"
+version = "0.1.5"
 description = "AmpAI desktop client"
 authors = ["AmpAI"]
 edition = "2021"

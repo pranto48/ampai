@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 import gzip
 import hashlib
 import json
@@ -20,7 +20,6 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from agent import (
-    _extract_explicit_memory_request,
     chat_with_agent,
     get_llm,
     get_redis_history,
@@ -200,7 +199,7 @@ app = FastAPI()
 app.include_router(github_router)
 
 # Add CORS middleware
-# CORS — allow the Tauri desktop client plus any localhost port.
+# CORS â€” allow the Tauri desktop client plus any localhost port.
 # Set ALLOWED_ORIGINS env var to a comma-separated list to override.
 _default_cors_origins = [
     "http://localhost:8000",
@@ -1684,7 +1683,7 @@ def login(payload: UserLoginRequest):
             detail="Invalid username or password",
         )
 
-    # If admin_override is True, skip further verification — credentials already confirmed above
+    # If admin_override is True, skip further verification â€” credentials already confirmed above
     if not admin_override:
         stored_hash = user.get("password_hash") or ""
         password_ok = False
@@ -2244,7 +2243,7 @@ def admin_telegram_save(
     set_config("telegram_webhook_url", (request.webhook_url or "").strip())
     set_config("telegram_webhook_secret", (request.secret_token or "").strip())
     set_config("telegram_enabled", "true" if request.enabled else "false")
-    # Preserve polling_enabled — it is managed separately via /enable-polling endpoint
+    # Preserve polling_enabled â€” it is managed separately via /enable-polling endpoint
     log_audit_event(
         username=current_user.username, action="integration.telegram.admin_save"
     )
@@ -2560,7 +2559,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                         # In local-only mode, fall back to built-in AmpAI engine instead of 503
                         effective_model_type = "ampai_default"
                         logger.info(
-                            "Ollama unreachable in local-only mode — switching to ampai_default engine"
+                            "Ollama unreachable in local-only mode â€” switching to ampai_default engine"
                         )
                     else:
                         # Try known providers in priority order
@@ -2582,14 +2581,14 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
                                 resolved = True
                                 break
                         if not resolved:
-                            # No API keys either — use built-in AmpAI engine
+                            # No API keys either â€” use built-in AmpAI engine
                             effective_model_type = "ampai_default"
                             logger.info(
-                                "No AI provider available — using built-in ampai_default engine"
+                                "No AI provider available â€” using built-in ampai_default engine"
                             )
         request.model_type = effective_model_type
 
-        # ── AmpAI Default Mode: built-in engine, no model needed ──────────────
+        # â”€â”€ AmpAI Default Mode: built-in engine, no model needed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if effective_model_type == "ampai_default":
             from ampai_default_engine import ampai_default_chat
             from database import get_core_memories
@@ -2675,7 +2674,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             request.category_filter or request.memory_category_filter or ""
         ).strip()
         policy = _get_memory_policy(user.username)
-        # Detect whether the user is explicitly asking to save — bypass approval gate
+        # Detect whether the user is explicitly asking to save â€” bypass approval gate
         explicit_save_fact = _extract_explicit_memory_request(request.message)
         result = chat_with_agent(
             session_id=request.session_id,
@@ -4374,7 +4373,7 @@ def update_admin_configs(
                 raise HTTPException(
                     status_code=400, detail="backup_mode must be local, ftp, or smb"
                 )
-        # Skip masked values (contain '...') — means the frontend sent back the masked placeholder
+        # Skip masked values (contain '...') â€” means the frontend sent back the masked placeholder
         if v and "..." in v:
             skipped.append(k)
             continue
@@ -5796,7 +5795,7 @@ def api_admin_edit_core_memory(
     return {"status": "success"}
 
 
-# ── Agent Memory Viewer ────────────────────────────────────────────────────────
+# â”€â”€ Agent Memory Viewer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def _decode_pb_strings(data: bytes) -> list:
     """
     Best-effort Protocol Buffer decoder that extracts all length-delimited
@@ -5951,7 +5950,7 @@ def get_agent_memories(current_user: UserContext = Depends(require_authenticated
                 "fix": (
                     "macOS TCC denies access to ~/.gemini/antigravity/implicit/. "
                     "Grant Full Disk Access to Terminal (or your Python/uvicorn process) "
-                    "in System Preferences → Privacy & Security → Full Disk Access. "
+                    "in System Preferences â†’ Privacy & Security â†’ Full Disk Access. "
                     "Or set the ANTIGRAVITY_MEMORY_DIR env var to a readable copy."
                 ),
             }
@@ -6134,6 +6133,43 @@ def _to_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+_EXPLICIT_MEMORY_PATTERNS = [
+    re.compile(
+        r'^\s*(?:please\s+)?save\s+(?:this\s+)?to\s+(?:my\s+)?memory\s*[:\-]?\s*[\"\u201c\u2018]?(.+?)[\"\u201d\u2019]?\s*$',
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r'^\s*(?:please\s+)?add\s+(?:this\s+)?to\s+(?:my\s+)?memory\s*[:\-]?\s*[\"\u201c\u2018]?(.+?)[\"\u201d\u2019]?\s*$',
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r'^\s*(?:please\s+)?remember\s*[:\-]?\s*[\"\u201c\u2018]?(.+?)[\"\u201d\u2019]?\s*$',
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r'^\s*(?:please\s+)?store\s+(?:this\s+)?in\s+(?:my\s+)?memory\s*[:\-]?\s*[\"\u201c\u2018]?(.+?)[\"\u201d\u2019]?\s*$',
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r'^\s*(?:please\s+)?memorize\s*[:\-]?\s*[\"\u201c\u2018]?(.+?)[\"\u201d\u2019]?\s*$',
+        re.IGNORECASE | re.DOTALL,
+    ),
+]
+
+
+def _extract_explicit_memory_request(message: str) -> str:
+    text = (message or "").strip()
+    if not text:
+        return ""
+    for pattern in _EXPLICIT_MEMORY_PATTERNS:
+        match = pattern.match(text)
+        if match:
+            extracted = match.group(1).strip().strip('"\u201c\u201d\u2018\u2019')
+            if extracted:
+                return extracted
+    return ""
+
+
 def _frontend_dir_candidates() -> List[str]:
     root = os.path.dirname(__file__)
     return [
@@ -6155,24 +6191,24 @@ def _resolve_frontend_dir() -> Optional[str]:
 
 def _deployed_repo_candidates() -> List[str]:
     root = os.path.abspath(os.path.dirname(__file__))
-    return [
+    candidates = [
         root,
         os.path.abspath(os.path.join(root, "..")),
         os.path.abspath(os.path.join(root, "..", "..")),
         "/app",
         "/app_host",
     ]
+    seen: List[str] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.append(candidate)
+    return seen
 
 
 def _find_git_repo_root() -> Optional[str]:
-    seen = set()
     for candidate in _deployed_repo_candidates():
-        resolved = os.path.abspath(candidate)
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        if os.path.isdir(os.path.join(resolved, ".git")):
-            return resolved
+        if os.path.isdir(os.path.join(candidate, ".git")):
+            return os.path.abspath(candidate)
     return None
 
 
@@ -6253,7 +6289,7 @@ def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
             if memory_ready
             else "Hybrid memory retrieval is enabled but embedding provider/model is incomplete"
         ),
-        fix_hint="Go fix: Settings → Memory policy" if not memory_ready else "",
+        fix_hint="Go fix: Settings â†’ Memory policy" if not memory_ready else "",
     )
 
     mode = (configs.get("backup_mode", "local") or "local").strip().lower()
@@ -6279,7 +6315,7 @@ def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
         message="Backup destination/profile looks complete"
         if backup_ok
         else f"Backup mode '{mode}' has missing destination credentials/paths",
-        fix_hint="Go fix: Admin → Backup" if not backup_ok else "",
+        fix_hint="Go fix: Admin â†’ Backup" if not backup_ok else "",
     )
 
     resend_key = bool((configs.get("resend_api_key") or "").strip())
@@ -6292,7 +6328,7 @@ def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
         message="Email notifications ready"
         if notif_ok
         else "Resend notification config is incomplete",
-        fix_hint="Go fix: Settings → Email (Resend)" if not notif_ok else "",
+        fix_hint="Go fix: Settings â†’ Email (Resend)" if not notif_ok else "",
     )
 
     jwt_ok = 5 <= JWT_EXPIRY_MINUTES <= 1440 and 1 <= JWT_REMEMBER_ME_DAYS <= 365
@@ -6376,9 +6412,9 @@ def get_status(user=Depends(require_authenticated_user)):
     return {"latest_mtime": latest_mtime}
 
 
-# ─────────────────────────────────────────────────────
-# TASKS — extra endpoints (create/list already exist)
-# ─────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# TASKS â€” extra endpoints (create/list already exist)
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @app.get("/api/tasks")
 def list_tasks_api(
     status: Optional[str] = Query(default=None),
@@ -6428,9 +6464,9 @@ def delete_task_api(task_id: int, user=Depends(require_authenticated_user)):
     return {"status": "success"}
 
 
-# ─────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # NOTES
-# ─────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class NoteCreateRequest(BaseModel):
     title: str = "Untitled"
     body: str = ""
@@ -6615,9 +6651,9 @@ def pin_note(note_id: int, user=Depends(require_authenticated_user)):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-# ─────────────────────────────────────────────────────
-# NETWORK MONITOR — extra endpoints
-# ─────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# NETWORK MONITOR â€” extra endpoints
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @app.get("/api/network/targets")
 def net_list_targets(user=Depends(require_authenticated_user)):
     return {"targets": get_network_targets()}
@@ -6660,9 +6696,9 @@ def net_sweep(user=Depends(require_admin_user)):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-# ─────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # ANALYTICS
-# ─────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @app.get("/api/analytics/summary")
 def analytics_summary(user=Depends(require_authenticated_user)):
     try:
@@ -6790,9 +6826,9 @@ def memory_analytics(
     return payload
 
 
-# ═══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # FULL BACKUP / RESTORE ENDPOINTS
-# ═══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 import threading as _fb_threading
 
 from full_backup import (
@@ -7037,11 +7073,11 @@ def api_fullbackup_memory_categories(user: UserContext = Depends(require_admin_u
     return {"categories": rows}
 
 
-# ═══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # DOCKER / CODE UPDATE ENDPOINTS
 
 # Admin-only: check version, trigger update, manage backups
-# ═══════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 CODE_BACKUP_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "code_backups")
 REPO_URL = os.getenv("AMPAI_REPO_URL", "https://github.com/pranto48/ampai.git")
@@ -7262,11 +7298,11 @@ def _do_update_in_thread(actor: str) -> None:
     try:
         import subprocess
 
-        _update_log("Starting AmpAI code update…")
+        _update_log("Starting AmpAI code updateâ€¦")
         _update_log(f"Triggered by: {actor}")
         _update_log(f"Repo: {REPO_URL}")
 
-        # ── Step 1: Create code backup ────────────────────
+        # â”€â”€ Step 1: Create code backup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _update_log("--- Step 1: Creating code backup ---")
         os.makedirs(CODE_BACKUP_DIR, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -7293,9 +7329,10 @@ def _do_update_in_thread(actor: str) -> None:
             f.write(current_commit)
         _update_log(f"Backup created at: {backup_path} (commit: {current_commit})")
 
-        # ── Step 2: Pull latest code ───────────────────────
+        # â”€â”€ Step 2: Pull latest code â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _update_log("--- Step 2: Pulling latest code from GitHub ---")
 
+        # Candidate paths for the host-mounted git repo
         repo_root = _find_git_repo_root()
 
         if repo_root:
@@ -7320,7 +7357,7 @@ def _do_update_in_thread(actor: str) -> None:
                 if r.returncode == 0:
                     _update_log(f"Reset to origin/{branch}: {r.stdout.strip()}")
                     break
-                _update_log(f"Branch {branch} not found, trying next…")
+                _update_log(f"Branch {branch} not found, trying nextâ€¦")
 
             new_commit = subprocess.run(
                 ["git", "-C", repo_root, "rev-parse", "--short", "HEAD"],
@@ -7348,7 +7385,7 @@ def _do_update_in_thread(actor: str) -> None:
         else:
             # Fallback: download code via GitHub archive API
             _update_log(
-                "No git repo found on mounted volume. Downloading via GitHub archive…"
+                "No git repo found on mounted volume. Downloading via GitHub archiveâ€¦"
             )
             import tempfile
 
@@ -7359,7 +7396,7 @@ def _do_update_in_thread(actor: str) -> None:
             _update_log(f"Downloading: {archive_url}")
             temp_zip = tempfile.mktemp(suffix=".zip")
             urllib.request.urlretrieve(archive_url, temp_zip)
-            _update_log("Download complete. Extracting…")
+            _update_log("Download complete. Extractingâ€¦")
 
             temp_dir = tempfile.mkdtemp()
             with zipfile.ZipFile(temp_zip, "r") as zf:
@@ -7396,7 +7433,7 @@ def _do_update_in_thread(actor: str) -> None:
             _update_log("Archive update complete.")
             new_commit = "downloaded"
 
-        # ── Step 3: Install dependencies ──────────────────
+        # â”€â”€ Step 3: Install dependencies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _update_log("--- Step 3: Installing Python dependencies ---")
         req_candidates = [
             os.path.join(os.path.dirname(__file__), "requirements.txt"),
@@ -7417,7 +7454,6 @@ def _do_update_in_thread(actor: str) -> None:
         else:
             _update_log("No requirements.txt found, skipping.")
 
-        # ── Step 4: Signal server to reload ───────────────
         _update_log("--- Step 4: Validating updated app ---")
         _validate_runnable_app()
         _update_log("Updated app import validation passed.")
@@ -7439,7 +7475,7 @@ def _do_update_in_thread(actor: str) -> None:
             import time as _t
 
             _t.sleep(3)
-            _update_log("Restarting server now…")
+            _update_log("Restarting server nowâ€¦")
             _restart_uvicorn()
 
         threading.Thread(target=_restart_server, daemon=True).start()
@@ -7572,11 +7608,11 @@ def update_restore_backup(
     }
 
 
-# ════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  AmpAI AUTONOMOUS AGENT ENDPOINTS
-# ════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-# ── Identity / Health ────────────────────────────────────────────────────────
+# â”€â”€ Identity / Health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @app.get("/api/ampai/identity")
@@ -7605,7 +7641,7 @@ def check_ollama_health():
     }
 
 
-# ── Skills ───────────────────────────────────────────────────────────────────
+# â”€â”€ Skills â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class SkillCreateRequest(BaseModel):
@@ -7809,7 +7845,7 @@ def api_auto_create_skill(
     return skill
 
 
-# ── Memory Nudges (Curator) ───────────────────────────────────────────────────
+# â”€â”€ Memory Nudges (Curator) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class NudgeCurateTriggerRequest(BaseModel):
@@ -7833,7 +7869,7 @@ def api_list_nudges(
 def api_accept_nudge(
     nudge_id: int, user: UserContext = Depends(get_current_user_from_cookie)
 ):
-    """Accept a nudge — saves the fact to core memory."""
+    """Accept a nudge â€” saves the fact to core memory."""
     from memory_curator import accept_nudge
 
     fact = accept_nudge(nudge_id, user.username)
@@ -7848,7 +7884,7 @@ def api_accept_nudge(
 def api_dismiss_nudge(
     nudge_id: int, user: UserContext = Depends(get_current_user_from_cookie)
 ):
-    """Dismiss a nudge — it won't be saved to memory."""
+    """Dismiss a nudge â€” it won't be saved to memory."""
     from memory_curator import dismiss_nudge
 
     ok = dismiss_nudge(nudge_id, user.username)
@@ -7876,7 +7912,7 @@ def api_trigger_curation(
         return {"ok": True, "stats": stats}
 
 
-# ── Cross-Session Recall ──────────────────────────────────────────────────────
+# â”€â”€ Cross-Session Recall â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class RecallQueryRequest(BaseModel):
@@ -7953,3 +7989,4 @@ def spa_fallback(full_path: str):
             with open(index_path, "r", encoding="utf-8") as f:
                 return HTMLResponse(f.read())
     raise HTTPException(status_code=404)
+

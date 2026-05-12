@@ -11,7 +11,7 @@ export type MemInbox = { id:string; candidate_text:string; edited_text:string|nu
 
 // ── Constants ──────────────────────────────────────────────────────────────
 export const GITHUB      = "pranto48/ampai";
-export const APP_VERSION = "0.1.4";
+export const APP_VERSION = "0.1.5";
 export const SK          = "ampai.serverUrl";
 export const AK          = "ampai.auth";
 export const SESSK       = "ampai.sessionId";
