@@ -66,6 +66,7 @@ def get_short_redis_history(session_id: str):
 TASK_CUE_PATTERNS = [
     r"\b(todo|to-do|task|tasks)\b",
     r"\bremind me\b",
+    r"\bi need to\b",
     r"\bfollow up\b",
     r"\bdeadline\b",
     r"\baction item\b",
@@ -231,15 +232,30 @@ def _determine_memory_action(
 def _build_fallback_suggestion(message: str, response: str) -> List[Dict[str, Any]]:
     if not (_looks_like_task_intent(message) or _looks_like_task_intent(response)):
         return []
-    title = (message or "").strip().split("\n")[0][:120]
-    if not title:
-        title = "Follow up on recent conversation"
+    # Use the task intent service for richer suggestion generation
+    try:
+        from services.task_intent_service import (
+            extract_due_date,
+            generate_task_title,
+            infer_priority,
+        )
+
+        title = generate_task_title(message)
+        priority = infer_priority(message)
+        due_at = extract_due_date(message)
+    except ImportError:
+        title = (message or "").strip().split("\n")[0][:120]
+        if not title:
+            title = "Follow up on recent conversation"
+        priority = "medium"
+        due_at = None
+
     return [{
         "id": str(uuid.uuid4()),
         "title": title,
         "description": (response or message or "").strip()[:500],
-        "priority": "medium",
-        "due_at": None,
+        "priority": priority,
+        "due_at": due_at,
         "source": "intent_heuristic",
     }]
 

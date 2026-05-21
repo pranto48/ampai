@@ -152,7 +152,7 @@ def run_network_sweep():
 
 
 def run_task_digest():
-    tasks = list_tasks(status="todo")
+    tasks, _ = list_tasks(status="todo")
     overdue = []
     reminder_lines = []
     now = datetime.now(timezone.utc)
@@ -273,7 +273,7 @@ def run_memory_summarizer():
 
 
 def run_curator_nudges():
-    due_tasks = list_tasks(status="todo")
+    due_tasks, _ = list_tasks(status="todo")
     now = datetime.now(timezone.utc)
     enable = str(
         get_config("curator_nudges_enabled", "true") or "true"

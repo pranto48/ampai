@@ -289,3 +289,26 @@ def get_session_recall_messages(session_id: str, limit: int = 500) -> List[Dict[
         return out
     finally:
         conn.close()
+
+
+def delete_session_recall_entries(session_id: str) -> int:
+    """Delete all session recall index entries for a given session_id.
+
+    Returns the number of rows deleted (approximate for FTS5 tables).
+    """
+    if not session_id:
+        return 0
+    ensure_session_recall_tables()
+    conn = _conn()
+    try:
+        # FTS5 tables support DELETE via rowid matching
+        cursor = conn.execute(
+            "DELETE FROM session_recall_fts WHERE session_id = ?",
+            (session_id,),
+        )
+        conn.commit()
+        return cursor.rowcount
+    except Exception:
+        return 0
+    finally:
+        conn.close()

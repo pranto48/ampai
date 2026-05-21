@@ -9,6 +9,10 @@ Key concepts:
   - Skills are auto-detected after complex multi-step tasks
   - Skills self-improve: each run is scored; failing skills get their prompts rewritten
   - Skills track version history
+  - Safety levels: read-only, write, privileged
+  - Approval workflow: skills require user/admin approval before activation
+  - Pattern detection: repeated patterns (3+ sessions in 30 days) trigger suggestions
+  - Rejection tracking: rejected patterns are not re-suggested
 """
 import json
 import logging
@@ -21,6 +25,14 @@ from sqlalchemy import text
 from database import engine, get_config
 
 logger = logging.getLogger("ampai.skill_engine")
+
+# Valid safety levels for skills
+SAFETY_LEVELS = ("read-only", "write", "privileged")
+
+# Approval statuses
+APPROVAL_PENDING = "pending_approval"
+APPROVAL_APPROVED = "approved"
+APPROVAL_REJECTED = "rejected"
 
 # Complexity signals that suggest a skill opportunity
 _SKILL_TRIGGER_SIGNALS = [
@@ -44,7 +56,7 @@ MIN_RUNS_BEFORE_IMPROVEMENT = 5
 
 
 def _ensure_skill_tables() -> None:
-    """Create agent_skills, skill_runs, and skill_versions tables."""
+    """Create agent_skills, skill_runs, skill_versions, and skill_rejections tables."""
     if not engine:
         return
     try:
@@ -64,6 +76,11 @@ def _ensure_skill_tables() -> None:
                     created_by VARCHAR,
                     is_auto_created BOOLEAN DEFAULT FALSE,
                     status VARCHAR DEFAULT 'active',
+                    safety_level VARCHAR DEFAULT 'read-only',
+                    approval_status VARCHAR DEFAULT 'pending_approval',
+                    approved_by VARCHAR,
+                    approved_at TIMESTAMPTZ,
+                    source_pattern_hash VARCHAR,
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     updated_at TIMESTAMPTZ DEFAULT NOW(),
                     last_improved_at TIMESTAMPTZ,
@@ -82,6 +99,7 @@ def _ensure_skill_tables() -> None:
                     improvement_applied TEXT,
                     notes TEXT,
                     latency_ms INTEGER,
+                    error_reason TEXT,
                     started_at TIMESTAMPTZ DEFAULT NOW(),
                     finished_at TIMESTAMPTZ
                 )
@@ -96,11 +114,43 @@ def _ensure_skill_tables() -> None:
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS skill_rejections (
+                    id SERIAL PRIMARY KEY,
+                    pattern_hash VARCHAR NOT NULL,
+                    pattern_description TEXT,
+                    rejected_by VARCHAR NOT NULL,
+                    reason TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS idx_skill_runs_skill_id ON skill_runs (skill_id)"
             ))
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS idx_skill_runs_outcome ON skill_runs (outcome)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_skill_rejections_hash ON skill_rejections (pattern_hash)"
+            ))
+            # Add new columns to existing tables if they don't exist
+            conn.execute(text(
+                "ALTER TABLE agent_skills ADD COLUMN IF NOT EXISTS safety_level VARCHAR DEFAULT 'read-only'"
+            ))
+            conn.execute(text(
+                "ALTER TABLE agent_skills ADD COLUMN IF NOT EXISTS approval_status VARCHAR DEFAULT 'pending_approval'"
+            ))
+            conn.execute(text(
+                "ALTER TABLE agent_skills ADD COLUMN IF NOT EXISTS approved_by VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE agent_skills ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ"
+            ))
+            conn.execute(text(
+                "ALTER TABLE agent_skills ADD COLUMN IF NOT EXISTS source_pattern_hash VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE skill_runs ADD COLUMN IF NOT EXISTS error_reason TEXT"
             ))
     except Exception as exc:
         logger.warning("Could not ensure skill tables: %s", exc)
@@ -120,20 +170,28 @@ def create_skill(
     tags: str = "",
     created_by: str = "system",
     is_auto_created: bool = False,
+    safety_level: str = "read-only",
+    approval_status: str = APPROVAL_PENDING,
+    source_pattern_hash: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Create a new agent skill. Returns the created skill dict, or None on failure."""
     if not engine or not name.strip() or not system_prompt.strip():
         return None
+    # Validate safety level
+    if safety_level not in SAFETY_LEVELS:
+        safety_level = "read-only"
     try:
         with engine.begin() as conn:
             result = conn.execute(
                 text("""
                     INSERT INTO agent_skills
                         (name, description, trigger_pattern, system_prompt, parameters, tags,
-                         created_by, is_auto_created, status, created_at, updated_at)
+                         created_by, is_auto_created, status, safety_level, approval_status,
+                         source_pattern_hash, created_at, updated_at)
                     VALUES
                         (:name, :desc, :trigger, :prompt, :params, :tags,
-                         :created_by, :auto, 'active', NOW(), NOW())
+                         :created_by, :auto, 'active', :safety_level, :approval_status,
+                         :pattern_hash, NOW(), NOW())
                     ON CONFLICT (name) DO UPDATE
                         SET description = EXCLUDED.description,
                             system_prompt = EXCLUDED.system_prompt,
@@ -149,6 +207,9 @@ def create_skill(
                     "tags": (tags or "").strip()[:500],
                     "created_by": (created_by or "system")[:100],
                     "auto": is_auto_created,
+                    "safety_level": safety_level,
+                    "approval_status": approval_status,
+                    "pattern_hash": source_pattern_hash,
                 },
             )
             row = result.fetchone()
@@ -217,9 +278,13 @@ def update_skill(skill_id: int, **kwargs) -> bool:
     """Update skill fields. Returns True on success."""
     if not engine:
         return False
-    allowed = {"name", "description", "trigger_pattern", "system_prompt", "parameters", "tags", "status"}
+    allowed = {"name", "description", "trigger_pattern", "system_prompt", "parameters",
+               "tags", "status", "safety_level", "approval_status", "approved_by", "approved_at"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
+        return False
+    # Validate safety_level if provided
+    if "safety_level" in updates and updates["safety_level"] not in SAFETY_LEVELS:
         return False
     try:
         with engine.begin() as conn:
@@ -251,6 +316,7 @@ def record_skill_run(
     latency_ms: Optional[int] = None,
     notes: Optional[str] = None,
     improvement_applied: Optional[str] = None,
+    error_reason: Optional[str] = None,
 ) -> Optional[int]:
     """Log a skill execution. Returns run ID."""
     if not engine:
@@ -261,10 +327,10 @@ def record_skill_run(
                 text("""
                     INSERT INTO skill_runs
                         (skill_id, session_id, username, parameters, outcome, user_rating,
-                         latency_ms, notes, improvement_applied, started_at, finished_at)
+                         latency_ms, notes, improvement_applied, error_reason, started_at, finished_at)
                     VALUES
                         (:sid, :sess, :uname, :params, :outcome, :rating,
-                         :latency, :notes, :improvement, NOW(), NOW())
+                         :latency, :notes, :improvement, :error_reason, NOW(), NOW())
                     RETURNING id
                 """),
                 {
@@ -277,6 +343,7 @@ def record_skill_run(
                     "latency": latency_ms,
                     "notes": notes,
                     "improvement": improvement_applied,
+                    "error_reason": error_reason,
                 },
             )
             run_id = result.fetchone()
@@ -348,15 +415,39 @@ def run_skill(
     parameters: Optional[Dict] = None,
     model_type: str = "ollama",
     core_facts: str = "",
+    confirmed: bool = False,
 ) -> Dict[str, Any]:
     """
     Execute a skill against a user message.
+    Enforces approval status and safety level checks.
+    On failure: halts skill, preserves pre-execution state, returns error.
     Returns dict with 'response', 'outcome', 'run_id', 'skill_improvement'.
     """
     import time
     skill = get_skill(skill_id)
     if not skill:
         return {"error": f"Skill {skill_id} not found", "response": "", "outcome": "failure"}
+
+    # Check approval status - skill must be approved before execution
+    approval_status = skill.get("approval_status", APPROVAL_PENDING)
+    if approval_status != APPROVAL_APPROVED:
+        return {
+            "error": "Skill has not been approved for execution",
+            "response": "",
+            "outcome": "blocked",
+            "reason": f"approval_status={approval_status}",
+        }
+
+    # Check safety level and confirmation requirements
+    safety_level = skill.get("safety_level", "read-only")
+    if safety_level in ("write", "privileged") and not confirmed:
+        return {
+            "error": "Per-execution confirmation required for this skill",
+            "response": "",
+            "outcome": "confirmation_required",
+            "safety_level": safety_level,
+            "skill_name": skill["name"],
+        }
 
     from ampai_identity import get_identity_info
     facts_section = core_facts.strip() or "No facts stored yet."
@@ -376,6 +467,7 @@ def run_skill(
     response_text = ""
     outcome = "failure"
     skill_improvement = None
+    error_reason = None
 
     try:
         from agent import get_llm
@@ -405,10 +497,23 @@ def run_skill(
 
     except Exception as exc:
         logger.warning("Skill execution error (id=%s): %s", skill_id, exc)
+        error_reason = str(exc)
         response_text = f"Skill execution failed: {exc}"
         outcome = "failure"
 
     latency_ms = int((time.time() - t0) * 1000)
+
+    # On failure: halt skill (set status to halted), preserve pre-execution state
+    if outcome == "failure" and error_reason:
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE agent_skills SET status = 'halted', updated_at = NOW() WHERE id = :sid"),
+                    {"sid": skill_id},
+                )
+        except Exception:
+            pass
+
     run_id = record_skill_run(
         skill_id=skill_id,
         session_id=session_id,
@@ -417,9 +522,10 @@ def run_skill(
         outcome=outcome,
         latency_ms=latency_ms,
         improvement_applied=skill_improvement,
+        error_reason=error_reason,
     )
 
-    return {
+    result = {
         "response": response_text,
         "outcome": outcome,
         "run_id": run_id,
@@ -427,6 +533,9 @@ def run_skill(
         "skill_improvement": skill_improvement,
         "latency_ms": latency_ms,
     }
+    if error_reason:
+        result["error"] = error_reason
+    return result
 
 
 # ── AUTO-DETECTION & SELF-IMPROVEMENT ────────────────────────────────────────
@@ -628,3 +737,297 @@ def get_skill_versions(skill_id: int) -> List[Dict[str, Any]]:
     except Exception as exc:
         logger.warning("get_skill_versions failed: %s", exc)
         return []
+
+
+# ── PATTERN DETECTION (Requirement 14.1) ─────────────────────────────────────
+
+import hashlib
+
+
+def _compute_pattern_hash(pattern_description: str) -> str:
+    """Compute a stable hash for a conversation pattern to track rejections."""
+    normalized = pattern_description.strip().lower()
+    return hashlib.sha256(normalized.encode()).hexdigest()[:32]
+
+
+def detect_repeated_patterns(
+    username: str,
+    lookback_days: int = 30,
+    min_occurrences: int = 3,
+) -> List[Dict[str, Any]]:
+    """
+    Detect repeated conversation patterns (3+ sessions in 30-day window).
+    Returns list of pattern suggestions that haven't been rejected.
+
+    Analyzes session categories and task_suggestions to find recurring workflows.
+    """
+    if not engine:
+        return []
+    try:
+        with engine.connect() as conn:
+            # Find categories with 3+ sessions in the lookback window
+            rows = conn.execute(
+                text("""
+                    SELECT category, COUNT(*) AS session_count,
+                           array_agg(session_id ORDER BY updated_at DESC) AS session_ids
+                    FROM session_metadata
+                    WHERE owner_username = :username
+                      AND updated_at >= NOW() - make_interval(days => :days)
+                      AND category IS NOT NULL
+                      AND category != 'Uncategorized'
+                    GROUP BY category
+                    HAVING COUNT(*) >= :min_occ
+                    ORDER BY COUNT(*) DESC
+                    LIMIT 10
+                """),
+                {"username": username, "days": lookback_days, "min_occ": min_occurrences},
+            ).fetchall()
+
+            suggestions = []
+            for row in rows:
+                category = row[0]
+                session_count = row[1]
+                session_ids = row[2] if row[2] else []
+
+                pattern_hash = _compute_pattern_hash(category)
+
+                # Check if this pattern was already rejected
+                if _is_pattern_rejected(conn, pattern_hash):
+                    continue
+
+                # Check if a skill already exists for this pattern
+                existing = conn.execute(
+                    text("SELECT id FROM agent_skills WHERE source_pattern_hash = :hash AND status != 'deleted'"),
+                    {"hash": pattern_hash},
+                ).fetchone()
+                if existing:
+                    continue
+
+                suggestions.append({
+                    "pattern_hash": pattern_hash,
+                    "pattern_description": category,
+                    "session_count": session_count,
+                    "session_ids": session_ids[:5],  # Limit to 5 most recent
+                    "suggested_name": f"Skill: {category}",
+                    "suggested_safety_level": "read-only",
+                })
+
+            return suggestions
+    except Exception as exc:
+        logger.warning("detect_repeated_patterns failed: %s", exc)
+        return []
+
+
+def _is_pattern_rejected(conn, pattern_hash: str) -> bool:
+    """Check if a pattern has been previously rejected."""
+    try:
+        row = conn.execute(
+            text("SELECT id FROM skill_rejections WHERE pattern_hash = :hash LIMIT 1"),
+            {"hash": pattern_hash},
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def is_pattern_rejected(pattern_hash: str) -> bool:
+    """Public check if a pattern has been previously rejected."""
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            return _is_pattern_rejected(conn, pattern_hash)
+    except Exception:
+        return False
+
+
+# ── APPROVAL WORKFLOW (Requirement 14.2) ──────────────────────────────────────
+
+
+def approve_skill(skill_id: int, approved_by: str) -> bool:
+    """Approve a skill for execution. Required before any skill can run."""
+    if not engine:
+        return False
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(
+                text("""
+                    UPDATE agent_skills
+                    SET approval_status = :status,
+                        approved_by = :approved_by,
+                        approved_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = :sid
+                """),
+                {"status": APPROVAL_APPROVED, "approved_by": approved_by, "sid": skill_id},
+            )
+            return (result.rowcount or 0) > 0
+    except Exception as exc:
+        logger.warning("approve_skill failed: %s", exc)
+        return False
+
+
+def reject_skill_suggestion(
+    skill_id: Optional[int] = None,
+    pattern_hash: Optional[str] = None,
+    pattern_description: Optional[str] = None,
+    rejected_by: str = "system",
+    reason: Optional[str] = None,
+) -> bool:
+    """
+    Reject a skill suggestion. Records the rejection so the same pattern
+    is not re-suggested unless the user explicitly requests re-evaluation.
+    (Requirement 14.6)
+    """
+    if not engine:
+        return False
+    try:
+        with engine.begin() as conn:
+            # If we have a skill_id, get its pattern hash
+            if skill_id and not pattern_hash:
+                row = conn.execute(
+                    text("SELECT source_pattern_hash, name FROM agent_skills WHERE id = :sid"),
+                    {"sid": skill_id},
+                ).fetchone()
+                if row:
+                    pattern_hash = row[0] or _compute_pattern_hash(row[1])
+                    if not pattern_description:
+                        pattern_description = row[1]
+
+            if not pattern_hash and pattern_description:
+                pattern_hash = _compute_pattern_hash(pattern_description)
+
+            if not pattern_hash:
+                return False
+
+            # Record the rejection
+            conn.execute(
+                text("""
+                    INSERT INTO skill_rejections (pattern_hash, pattern_description, rejected_by, reason, created_at)
+                    VALUES (:hash, :desc, :rejected_by, :reason, NOW())
+                """),
+                {
+                    "hash": pattern_hash,
+                    "desc": (pattern_description or "")[:1000],
+                    "rejected_by": rejected_by,
+                    "reason": (reason or "")[:500],
+                },
+            )
+
+            # If there's a skill_id, update its status
+            if skill_id:
+                conn.execute(
+                    text("""
+                        UPDATE agent_skills
+                        SET approval_status = 'rejected', status = 'inactive', updated_at = NOW()
+                        WHERE id = :sid
+                    """),
+                    {"sid": skill_id},
+                )
+
+            return True
+    except Exception as exc:
+        logger.warning("reject_skill_suggestion failed: %s", exc)
+        return False
+
+
+def clear_pattern_rejection(pattern_hash: str) -> bool:
+    """
+    Clear a pattern rejection so it can be re-suggested.
+    Used when user explicitly requests re-evaluation.
+    """
+    if not engine:
+        return False
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM skill_rejections WHERE pattern_hash = :hash"),
+                {"hash": pattern_hash},
+            )
+            return True
+    except Exception as exc:
+        logger.warning("clear_pattern_rejection failed: %s", exc)
+        return False
+
+
+# ── METRICS (Requirement 14.5) ────────────────────────────────────────────────
+
+
+def get_skill_metrics(skill_id: int) -> Dict[str, Any]:
+    """
+    Return skill performance metrics:
+    - invocation_count: total number of executions
+    - success_rate: ratio of successful executions
+    - avg_execution_duration_ms: average latency in milliseconds
+    """
+    if not engine:
+        return {"invocation_count": 0, "success_rate": 0.0, "avg_execution_duration_ms": 0.0}
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("""
+                    SELECT
+                        COUNT(*) AS invocation_count,
+                        COUNT(*) FILTER (WHERE outcome = 'success') AS successes,
+                        AVG(latency_ms) AS avg_latency,
+                        MAX(started_at) AS last_execution,
+                        MIN(started_at) AS first_execution
+                    FROM skill_runs
+                    WHERE skill_id = :sid
+                """),
+                {"sid": skill_id},
+            ).fetchone()
+            if not row or not row[0]:
+                return {
+                    "invocation_count": 0,
+                    "success_rate": 0.0,
+                    "avg_execution_duration_ms": 0.0,
+                }
+            invocation_count = int(row[0] or 0)
+            successes = int(row[1] or 0)
+            return {
+                "invocation_count": invocation_count,
+                "success_rate": round(successes / max(invocation_count, 1), 4),
+                "avg_execution_duration_ms": round(float(row[2] or 0), 1),
+                "last_execution": str(row[3]) if row[3] else None,
+                "first_execution": str(row[4]) if row[4] else None,
+            }
+    except Exception as exc:
+        logger.warning("get_skill_metrics failed: %s", exc)
+        return {"invocation_count": 0, "success_rate": 0.0, "avg_execution_duration_ms": 0.0}
+
+
+# ── SAFETY LEVEL ASSIGNMENT (Requirement 14.3) ───────────────────────────────
+
+
+def determine_safety_level(system_prompt: str, tool_requirements: Optional[List[str]] = None) -> str:
+    """
+    Determine the appropriate safety level for a skill based on its capabilities.
+    - read-only: may retrieve data but not modify state
+    - write: may modify user data (per-execution confirmation required)
+    - privileged: may invoke browser/terminal (admin approval + per-execution confirmation)
+    """
+    prompt_lower = (system_prompt or "").lower()
+    tools = [t.lower() for t in (tool_requirements or [])]
+
+    # Privileged: references browser or terminal tools
+    privileged_signals = [
+        "browser", "terminal", "shell", "command", "execute",
+        "playwright", "navigate", "click", "type_text",
+    ]
+    if any(sig in prompt_lower for sig in privileged_signals):
+        return "privileged"
+    if any(t in ("browser", "terminal", "shell") for t in tools):
+        return "privileged"
+
+    # Write: references modification actions
+    write_signals = [
+        "create", "update", "delete", "modify", "write", "save",
+        "insert", "remove", "edit", "change", "set",
+    ]
+    if any(sig in prompt_lower for sig in write_signals):
+        return "write"
+    if any(t in ("tasks", "memory", "write") for t in tools):
+        return "write"
+
+    return "read-only"

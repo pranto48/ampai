@@ -1,10 +1,21 @@
-"""Sessions router: list, history, delete, export, import, category, reports, brief, status."""
+"""Sessions router: CRUD endpoints for session management and chat history retrieval.
+
+Endpoints:
+- GET /api/sessions: list sessions paginated, sorted by pinned first then updated_at DESC
+- POST /api/sessions: create new session with optional title and category
+- PATCH /api/sessions/{session_id}: update title, category, pinned, archived
+- DELETE /api/sessions/{session_id}: delete session metadata, messages, and recall index
+- GET /api/history/{session_id}: get all messages for a session
+
+Requirements: 4.1, 4.2, 4.5, 4.6
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -20,10 +31,17 @@ from core.helpers import (
     _parse_iso_dt,
     _save_session_suggestions,
 )
-from core.models import CategoryRequest, ImportRequest, SuggestionTaskCreateRequest
+from core.models import (
+    CategoryRequest,
+    ImportRequest,
+    SessionCreateRequest,
+    SessionUpdateRequest,
+    SuggestionTaskCreateRequest,
+)
 from database import (
     CHAT_HISTORY_TABLE,
     build_session_report_card,
+    create_session_metadata,
     create_task,
     delete_session_metadata,
     engine,
@@ -32,6 +50,7 @@ from database import (
     get_accessible_session_ids,
     get_all_sessions,
     get_config,
+    get_session_metadata,
     get_session_owner,
     get_sql_chat_history,
     list_chat_messages,
@@ -40,11 +59,12 @@ from database import (
     session_exists,
     set_session_category,
     touch_session,
+    update_session_metadata,
 )
 from database import engine as db_engine
 from fastapi import APIRouter, Depends, HTTPException, Query
 from langchain_community.chat_message_histories import SQLChatMessageHistory
-from session_recall import get_session_recall_messages
+from session_recall import delete_session_recall_entries, get_session_recall_messages
 from sqlalchemy import text
 
 router = APIRouter(tags=["sessions"])
@@ -52,6 +72,26 @@ router = APIRouter(tags=["sessions"])
 logger = logging.getLogger("ampai")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
+
+
+# ── Helper: ownership check ──────────────────────────────────────────────────
+
+
+def _check_session_ownership(session_id: str, user: UserContext) -> None:
+    """Enforce user ownership. Admins can access any session."""
+    if user.role == "admin":
+        return
+    # Check if user can access the session
+    if not _can_access_session(session_id, user):
+        # Try to adopt orphan sessions
+        if session_exists(session_id) and not get_session_owner(session_id):
+            ensure_session_owner(session_id, user.username)
+            if _can_access_session(session_id, user):
+                return
+        raise HTTPException(status_code=403, detail="Forbidden: not your session")
+
+
+# ── GET /api/sessions ─────────────────────────────────────────────────────────
 
 
 @router.get("/api/sessions")
@@ -63,6 +103,7 @@ def get_sessions(
     offset: int = Query(default=0, ge=0),
     current_user: UserContext = Depends(require_authenticated_user),
 ):
+    """List sessions paginated (default 40), sorted by pinned first then updated_at DESC."""
     sessions = get_all_sessions(query=query, category=category, archived=archived)
     needs_migration = False
     if current_user.role != "admin":
@@ -122,10 +163,147 @@ def get_sessions(
     }
 
 
+# ── POST /api/sessions ────────────────────────────────────────────────────────
+
+
+@router.post("/api/sessions", status_code=201)
+def create_session(
+    request: SessionCreateRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    """Create a new session with optional title and category."""
+    session_id = str(uuid.uuid4())
+    title = request.title[:100] if request.title else None
+    category = request.category or "Uncategorized"
+
+    success = create_session_metadata(
+        session_id=session_id,
+        title=title,
+        category=category,
+        owner_username=current_user.username,
+    )
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to create session")
+
+    # Ensure session ownership is tracked
+    ensure_session_owner(session_id, current_user.username)
+
+    log_audit_event(
+        username=current_user.username,
+        action="session.create",
+        session_id=session_id,
+        details=f"title={title};category={category}",
+    )
+
+    return {
+        "session_id": session_id,
+        "title": title,
+        "category": category,
+        "pinned": False,
+        "archived": False,
+        "owner_username": current_user.username,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ── PATCH /api/sessions/{session_id} ─────────────────────────────────────────
+
+
+@router.patch("/api/sessions/{session_id}")
+def patch_session(
+    session_id: str,
+    request: SessionUpdateRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    """Update session title (max 100 chars), category, pinned, or archived."""
+    # Enforce ownership
+    _check_session_ownership(session_id, current_user)
+
+    # Validate title length
+    title = request.title
+    if title is not None and len(title) > 100:
+        title = title[:100]
+
+    # Check session exists
+    meta = get_session_metadata(session_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    success = update_session_metadata(
+        session_id=session_id,
+        title=title,
+        category=request.category,
+        pinned=request.pinned,
+        archived=request.archived,
+    )
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update session")
+
+    log_audit_event(
+        username=current_user.username,
+        action="session.update",
+        session_id=session_id,
+        details=f"title={title};category={request.category};pinned={request.pinned};archived={request.archived}",
+    )
+
+    # Return updated metadata
+    updated = get_session_metadata(session_id)
+    return updated or {"session_id": session_id, "status": "updated"}
+
+
+# ── DELETE /api/sessions/{session_id} ─────────────────────────────────────────
+
+
+@router.delete("/api/sessions/{session_id}")
+def delete_session(
+    session_id: str, user: UserContext = Depends(require_authenticated_user)
+):
+    """Delete session metadata, all chat messages, and session recall index entries."""
+    # Enforce ownership
+    _check_session_ownership(session_id, user)
+
+    try:
+        # Delete session metadata
+        delete_session_metadata(session_id)
+
+        # Delete all chat messages from SQL store
+        SQLChatMessageHistory(
+            session_id=session_id, connection_string=DATABASE_URL
+        ).clear()
+
+        # Clear Redis history
+        try:
+            get_redis_history(session_id).clear()
+        except Exception:
+            pass  # Redis may not be available
+
+        # Delete session recall index entries
+        try:
+            delete_session_recall_entries(session_id)
+        except Exception:
+            pass  # Session recall DB may not exist
+
+        log_audit_event(
+            username=user.username,
+            action="memory.delete.session",
+            session_id=session_id,
+        )
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── GET /api/history/{session_id} ─────────────────────────────────────────────
+
+
 @router.get("/api/history/{session_id}")
 def get_history(
     session_id: str, user: UserContext = Depends(require_authenticated_user)
 ):
+    """Get all messages for a session. Enforces user ownership."""
+    # Enforce ownership with fallback for orphan sessions
     if not _can_access_session(session_id, user):
         if (
             user.role != "admin"
@@ -193,39 +371,37 @@ def get_history(
         return {"messages": [], "error": str(e)}
 
 
-@router.delete("/api/sessions/{session_id}")
-def delete_session(
-    session_id: str, user: UserContext = Depends(require_authenticated_user)
+# ── POST /api/sessions/{session_id}/category ──────────────────────────────────
+
+
+@router.post("/api/sessions/{session_id}/category")
+def update_category(
+    session_id: str,
+    request: CategoryRequest,
+    user: UserContext = Depends(require_authenticated_user),
 ):
-    if not _can_access_session(session_id, user):
-        raise HTTPException(status_code=403, detail="Forbidden session")
-    try:
-        _enforce_session_access_or_403(session_id, user)
-        delete_session_metadata(session_id)
-        SQLChatMessageHistory(
-            session_id=session_id, connection_string=DATABASE_URL
-        ).clear()
-        get_redis_history(session_id).clear()
-        log_audit_event(
-            username=user.username,
-            action="memory.delete.session",
-            session_id=session_id,
-        )
-        return {"status": "success"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    _check_session_ownership(session_id, user)
+    success = set_session_category(session_id, request.category)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update category")
+    log_audit_event(
+        username=user.username,
+        action="memory.update.category",
+        session_id=session_id,
+        category=request.category,
+    )
+    return {"status": "success"}
+
+
+# ── GET /api/export/{session_id} ──────────────────────────────────────────────
 
 
 @router.get("/api/export/{session_id}")
 def export_session(
     session_id: str, user: UserContext = Depends(require_authenticated_user)
 ):
-    if not _can_access_session(session_id, user):
-        raise HTTPException(status_code=403, detail="Forbidden session")
+    _check_session_ownership(session_id, user)
     try:
-        _enforce_session_access_or_403(session_id, user)
         messages = list_chat_messages(session_id, dedupe=True)
         sessions = get_all_sessions()
         category = "Uncategorized"
@@ -238,6 +414,9 @@ def export_session(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── POST /api/import ──────────────────────────────────────────────────────────
 
 
 @router.post("/api/import")
@@ -263,6 +442,7 @@ def import_session(
                 inserted += 1
             elif msg.type == "ai":
                 history.add_ai_message(msg.content)
+                inserted += 1
         set_session_category(request.session_id, request.category)
         touch_session(request.session_id)
         return {"status": "success", "session_id": request.session_id}
@@ -272,24 +452,7 @@ def import_session(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/api/sessions/{session_id}/category")
-def update_category(
-    session_id: str,
-    request: CategoryRequest,
-    user: UserContext = Depends(require_authenticated_user),
-):
-    if not _can_access_session(session_id, user):
-        raise HTTPException(status_code=403, detail="Forbidden session")
-    success = set_session_category(session_id, request.category)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to update category")
-    log_audit_event(
-        username=user.username,
-        action="memory.update.category",
-        session_id=session_id,
-        category=request.category,
-    )
-    return {"status": "success"}
+# ── GET /api/sessions/{session_id}/task-suggestions ───────────────────────────
 
 
 @router.get("/api/sessions/{session_id}/task-suggestions")
@@ -306,15 +469,7 @@ def list_session_task_suggestions(
     return {"suggestions": scoped[:200]}
 
 
-@router.get("/api/sessions/{session_id}/task-suggestions", include_in_schema=False)
-def get_session_task_suggestions(
-    session_id: str, user: UserContext = Depends(require_authenticated_user)
-):
-    if not _can_access_session(session_id, user):
-        raise HTTPException(status_code=403, detail="Forbidden session")
-    suggestions = _load_session_suggestions(session_id)
-    unresolved = [s for s in suggestions if not bool(s.get("resolved"))]
-    return {"session_id": session_id, "suggestions": unresolved}
+# ── GET /api/reports/find ─────────────────────────────────────────────────────
 
 
 @router.get("/api/reports/find")
@@ -344,6 +499,9 @@ def find_reports(
     return {"count": len(matches), "matches": matches}
 
 
+# ── GET /api/reports/session-summary/{session_id} ─────────────────────────────
+
+
 @router.get("/api/reports/session-summary/{session_id}")
 def get_session_summary_report(
     session_id: str, current_user: UserContext = Depends(require_authenticated_user)
@@ -360,11 +518,14 @@ def get_session_summary_report(
     return report
 
 
+# ── GET /api/daily-brief ──────────────────────────────────────────────────────
+
+
 @router.get("/api/daily-brief")
 def get_daily_brief(current_user: UserContext = Depends(require_authenticated_user)):
     from database import get_core_memories, list_tasks
 
-    all_tasks = list_tasks()
+    all_tasks, _ = list_tasks()
     open_tasks = [t for t in all_tasks if (t.get("status") or "todo") != "done"][:10]
     memories = get_core_memories()[:8]
     pending_replies_raw = (
@@ -389,6 +550,9 @@ def get_daily_brief(current_user: UserContext = Depends(require_authenticated_us
         "pending_replies": pending_replies[:10],
         "pending_memory_candidates": pending_candidates,
     }
+
+
+# ── GET /api/status ───────────────────────────────────────────────────────────
 
 
 @router.get("/api/status")

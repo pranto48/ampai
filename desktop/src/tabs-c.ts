@@ -3,7 +3,7 @@ import{esc}from"./tabs-a";
 
 export function settingsTab():string{
   if(S.auth?.role!=="admin")return`<div class="section-empty">🛡️ Admin access required.</div>`;
-  const cfg=S.configs;const tg=S.tgStatus;
+  const cfg=S.configs;
   const provList=S.providers.length?S.providers:ALL_PROVIDERS.map(p=>({value:p.value,label:p.label}));
   return`<div class="panel">
   <div class="panel-title">AI Provider &amp; Model</div>
@@ -41,26 +41,6 @@ export function settingsTab():string{
     <label class="field">Memory Top-K<input name="memory_top_k" value="${esc(cfg.memory_top_k||"5")}" type="number" min="1" max="30"/></label>
     <label class="field">SerpAPI Key (Web Search)<input name="serpapi_api_key" value="${esc(cfg.serpapi_api_key||"")}" type="password"/></label>
     <button class="primary" type="submit">💾 Save AI Settings</button>
-  </form>
-</div>
-<div class="panel">
-  <div class="panel-title">Telegram Bot ${tg?`<span class="badge ${tg.enabled?"ok":"bad"}" style="float:right;font-size:.69rem">${tg.enabled?"Enabled":"Disabled"}</span>`:""}</div>
-  ${tg?`<div class="hint" style="margin-bottom:8px">Token: ${esc(tg.token_masked||"not set")} | Polling: ${tg.polling_enabled?"On":"Off"}</div>`:""}
-  <form class="stack" id="tg-form">
-    <label class="field">Bot Token<input name="telegram_bot_token" value="${esc(cfg.telegram_bot_token||"")}" type="password" placeholder="123456:ABC-…"/></label>
-    <label class="field">Webhook URL<input name="telegram_webhook_url" value="${esc(cfg.telegram_webhook_url||tg?.webhook_url||"")}" placeholder="https://yourdomain.com/webhook"/></label>
-    <div class="row">
-      <button class="primary" type="submit">💾 Save</button>
-      <button type="button" id="btn-tg-test">🤖 Test</button>
-    </div>
-    <div class="row">
-      <button type="button" id="btn-tg-connect">🔗 Set Webhook</button>
-      <button type="button" id="btn-tg-disconnect">❌ Remove</button>
-    </div>
-    <div class="row">
-      <button type="button" id="btn-tg-polling-on" class="success">▶ Enable Polling</button>
-      <button type="button" id="btn-tg-polling-off" class="danger">⏹ Disable Polling</button>
-    </div>
   </form>
 </div>
 <div class="panel">

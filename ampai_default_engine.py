@@ -129,7 +129,7 @@ def _get_pending_tasks_text() -> str:
     """Return pending tasks from DB."""
     try:
         from database import list_tasks
-        tasks = list_tasks()
+        tasks, _ = list_tasks()
         pending = [t for t in (tasks or []) if t.get("status") not in ("done", "completed")][:10]
         if not pending:
             return "You have no pending tasks! 🎉"

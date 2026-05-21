@@ -18,6 +18,7 @@ from core.helpers import (
     _ensure_session_owner_for_user,
     _get_memory_policy,
     _load_config_list,
+    _load_session_suggestions,
     _save_config_list,
 )
 from core.models import ChatRequest
@@ -27,6 +28,7 @@ from database import (
     get_config,
     get_effective_chat_preferences,
     log_audit_event,
+    persist_chat_message_metadata,
     touch_session,
 )
 from fastapi import APIRouter, Depends, HTTPException
@@ -151,11 +153,61 @@ def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated
                     default_result["memory_fact"],
                     confidence=0.75,
                 )
+
+            # Persist full message metadata for ampai_default mode
+            try:
+                tool_action_meta = {
+                    "enable_browser_tools": request.enable_browser_tools,
+                    "enable_terminal_tools": request.enable_terminal_tools,
+                    "persona_id": request.persona_id,
+                    "memory_mode": request.memory_mode,
+                    "memory_top_k": request.memory_top_k,
+                    "memory_recency_bias": request.memory_recency_bias,
+                    "memory_category_filter": request.memory_category_filter or "",
+                    "chat_output_mode": request.chat_output_mode,
+                    "attachments_count": len(request.attachments),
+                }
+                persist_chat_message_metadata(
+                    session_id=request.session_id,
+                    username=user.username,
+                    user_message=request.message or "",
+                    assistant_response=str(default_result.get("response") or ""),
+                    model_provider="ampai_default",
+                    model_name=None,
+                    memory_retrieval_metadata=default_result.get("retrieval") or {},
+                    web_search_metadata=default_result.get("web_search") or {},
+                    tool_action_metadata=tool_action_meta,
+                )
+            except Exception:
+                logger.debug("chat metadata persistence failed for ampai_default (non-blocking)")
+
+            # ── Task intent detection for ampai_default mode (Req 11.1) ───────
+            default_task_suggestions = []
+            default_has_task_cues = False
+            try:
+                from services.task_intent_service import process_chat_for_task_intent
+
+                existing_suggestions = _load_session_suggestions(request.session_id)
+                intent_suggestions = process_chat_for_task_intent(
+                    message=request.message,
+                    session_id=request.session_id,
+                    username=user.username,
+                    response_text=str(default_result.get("response") or ""),
+                    existing_suggestions=existing_suggestions,
+                )
+                if intent_suggestions:
+                    default_task_suggestions = _append_session_suggestions(
+                        request.session_id, intent_suggestions
+                    )
+                    default_has_task_cues = True
+            except Exception:
+                logger.debug("task intent detection failed in ampai_default mode (non-blocking)")
+
             return {
                 "response": default_result["response"],
                 "web_search": default_result.get("web_search", {}),
-                "task_suggestions": [],
-                "has_task_cues": False,
+                "task_suggestions": default_task_suggestions,
+                "has_task_cues": default_has_task_cues,
                 "retrieval": default_result.get("retrieval", {}),
                 "memory_action": default_result.get("memory_action"),
                 "memory_fact": default_result.get("memory_fact"),
@@ -299,6 +351,26 @@ def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated
                 flags=re.IGNORECASE | re.DOTALL,
             ).strip()
             result["response"] = cleaned or response_text
+
+        # ── Task intent detection from user message (Req 11.1, 11.4, 11.5) ───
+        if not suggestions:
+            try:
+                from services.task_intent_service import process_chat_for_task_intent
+
+                existing_session_suggestions = _load_session_suggestions(request.session_id)
+                intent_suggestions = process_chat_for_task_intent(
+                    message=request.message,
+                    session_id=request.session_id,
+                    username=user.username,
+                    response_text=response_text,
+                    existing_suggestions=existing_session_suggestions,
+                )
+                if intent_suggestions:
+                    result["task_suggestions"] = intent_suggestions
+                    result["has_task_cues"] = True
+            except Exception:
+                logger.debug("task intent detection failed (non-blocking)")
+
         if policy.get("auto_capture_enabled") and policy.get("require_approval"):
             user_msg = (request.message or "").strip()
             _AUTO_CAPTURE_RE = re.compile(
@@ -357,6 +429,34 @@ def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated
             INSIGHT_QUEUE.put_nowait(request.session_id)
         except Exception:
             pass
+
+        # ── Persist full message metadata per session (Req 4.4, 12.2) ─────────
+        try:
+            tool_action_meta = {
+                "enable_browser_tools": request.enable_browser_tools,
+                "enable_terminal_tools": request.enable_terminal_tools,
+                "persona_id": request.persona_id,
+                "memory_mode": effective_memory_mode,
+                "memory_top_k": clamped_top_k,
+                "memory_recency_bias": effective_recency_bias,
+                "memory_category_filter": category_filter_value,
+                "chat_output_mode": requested_mode,
+                "attachments_count": len(request.attachments),
+            }
+            persist_chat_message_metadata(
+                session_id=request.session_id,
+                username=user.username,
+                user_message=request.message or "",
+                assistant_response=str(result.get("response") or ""),
+                model_provider=request.model_type or effective_model_type,
+                model_name=request.model_name,
+                memory_retrieval_metadata=retrieval_meta,
+                web_search_metadata=result.get("web_search") or {},
+                tool_action_metadata=tool_action_meta,
+            )
+        except Exception:
+            logger.debug("chat metadata persistence failed (non-blocking)")
+
         return result
     except HTTPException:
         raise

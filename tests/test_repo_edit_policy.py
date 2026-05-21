@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from backend.policy.repo_edit_policy import RepoEditPolicy
-from backend.services.repo_edit_orchestrator import EditPlan, PatchHunk, RepoTargetContext
+from policy.repo_edit_policy import RepoEditPolicy
+from services.repo_edit_orchestrator import EditPlan, PatchHunk, RepoTargetContext
 
 
 def test_policy_blocks_sensitive_and_ci_without_allow(tmp_path: Path) -> None:

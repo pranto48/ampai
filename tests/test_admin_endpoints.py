@@ -1,5 +1,11 @@
-from fastapi.testclient import TestClient
-from backend import main
+import pytest
+
+try:
+    from fastapi.testclient import TestClient
+    import main
+except ImportError:
+    pytest.skip("langchain dependencies not installed", allow_module_level=True)
+
 import io
 import json
 import gzip
@@ -119,3 +125,111 @@ def test_settings_import_apply_overwrite(monkeypatch):
     assert data["summary"]["created"] == 1
     assert ("a", "2") in set_calls
     assert ("b", "3") in set_calls
+
+
+# ── Audit Logs Endpoint Tests ─────────────────────────────────────────────────
+
+
+def test_audit_logs_returns_events(monkeypatch):
+    """GET /api/admin/audit-logs returns events with pagination metadata."""
+    from core import audit as audit_module
+
+    fake_events = [
+        {
+            "id": 1,
+            "username": "admin",
+            "action_type": "memory_write",
+            "session_id": "sess-1",
+            "category": None,
+            "details": {"fact": "test"},
+            "created_at": "2024-06-01T12:00:00+00:00",
+        }
+    ]
+    monkeypatch.setattr(
+        audit_module.AuditLogger,
+        "query",
+        lambda self, **kwargs: fake_events,
+    )
+    resp = client.get("/api/admin/audit-logs")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 1
+    assert data["events"] == fake_events
+    assert data["limit"] == 100
+    assert data["offset"] == 0
+    assert "retention_policy" in data
+    assert data["retention_policy"]["min_retention_days"] == 90
+
+
+def test_audit_logs_filters_passed_to_query(monkeypatch):
+    """Filters are correctly forwarded to AuditLogger.query()."""
+    from core import audit as audit_module
+
+    captured_kwargs = {}
+
+    def mock_query(self, **kwargs):
+        captured_kwargs.update(kwargs)
+        return []
+
+    monkeypatch.setattr(audit_module.AuditLogger, "query", mock_query)
+    resp = client.get(
+        "/api/admin/audit-logs",
+        params={
+            "action_type": "terminal_execute",
+            "username": "testuser",
+            "session_id": "sess-42",
+            "limit": 50,
+            "offset": 10,
+        },
+    )
+    assert resp.status_code == 200
+    assert captured_kwargs["action_type"] == "terminal_execute"
+    assert captured_kwargs["username"] == "testuser"
+    assert captured_kwargs["session_id"] == "sess-42"
+    assert captured_kwargs["limit"] == 50
+    assert captured_kwargs["offset"] == 10
+
+
+def test_audit_logs_invalid_date_from():
+    """Invalid date_from returns 400."""
+    resp = client.get("/api/admin/audit-logs", params={"date_from": "not-a-date"})
+    assert resp.status_code == 400
+    assert "date_from" in resp.json()["detail"].lower()
+
+
+def test_audit_logs_invalid_date_to():
+    """Invalid date_to returns 400."""
+    resp = client.get("/api/admin/audit-logs", params={"date_to": "garbage"})
+    assert resp.status_code == 400
+    assert "date_to" in resp.json()["detail"].lower()
+
+
+def test_audit_logs_limit_capped_at_1000():
+    """Limit parameter is capped at 1000 by FastAPI validation."""
+    resp = client.get("/api/admin/audit-logs", params={"limit": 2000})
+    # FastAPI Query(le=1000) returns 422 for values > 1000
+    assert resp.status_code == 422
+
+
+def test_audit_logs_date_range_parsing(monkeypatch):
+    """Valid ISO 8601 dates are parsed and forwarded correctly."""
+    from core import audit as audit_module
+    from datetime import datetime, timezone
+
+    captured_kwargs = {}
+
+    def mock_query(self, **kwargs):
+        captured_kwargs.update(kwargs)
+        return []
+
+    monkeypatch.setattr(audit_module.AuditLogger, "query", mock_query)
+    resp = client.get(
+        "/api/admin/audit-logs",
+        params={
+            "date_from": "2024-01-01T00:00:00Z",
+            "date_to": "2024-12-31T23:59:59Z",
+        },
+    )
+    assert resp.status_code == 200
+    assert captured_kwargs["date_from"] == datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    assert captured_kwargs["date_to"] == datetime(2024, 12, 31, 23, 59, 59, tzinfo=timezone.utc)

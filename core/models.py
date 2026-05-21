@@ -28,6 +28,8 @@ class ChatRequest(BaseModel):
     memory_category_filter: Optional[str] = ""
     persona_id: Optional[str] = None
     use_web_search: bool = False
+    enable_browser_tools: bool = False
+    enable_terminal_tools: bool = False
     attachments: List[Attachment] = []
     recency_bias: Optional[float] = None
     category_filter: Optional[str] = None
@@ -130,6 +132,7 @@ class SkillUpdateRequest(BaseModel):
     parameters: Optional[Dict[str, Any]] = None
     tags: Optional[str] = None
     status: Optional[str] = None
+    safety_level: Optional[str] = None
 
 
 class SkillExecuteRequest(BaseModel):
@@ -232,6 +235,18 @@ class WorkspaceShareSessionRequest(BaseModel):
 
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
+
+
+class SessionCreateRequest(BaseModel):
+    title: Optional[str] = None
+    category: Optional[str] = "Uncategorized"
+
+
+class SessionUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    category: Optional[str] = None
+    pinned: Optional[bool] = None
+    archived: Optional[bool] = None
 
 
 class CategoryRequest(BaseModel):
@@ -374,6 +389,14 @@ class BackupConnectionTestRequest(BaseModel):
     path: Optional[str] = "/"
     share: Optional[str] = ""
     domain: Optional[str] = ""
+
+
+class BackupFtpTestRequest(BaseModel):
+    host: str
+    user: str = ""
+    password: str = ""
+    path: str = "/"
+    port: int = 21
 
 
 class RetentionRunRequest(BaseModel):

@@ -924,3 +924,338 @@ def notify_chat_reply(
         body_text=f"User: {current_user.username}\nSession: {request.session_id}\n\nReply preview:\n{preview}",
     )
     return {"status": "sent" if sent else "not_sent"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# New Memory Endpoints (Task 6.2)
+# Uses MemoryService and AuditLogger per design spec.
+# ══════════════════════════════════════════════════════════════════════════════
+
+from pydantic import BaseModel, Field
+
+from core.audit import (
+    AuditLogger,
+    ACTION_MEMORY_WRITE,
+    ACTION_MEMORY_READ,
+    ACTION_MEMORY_DELETE,
+)
+from database import engine as db_engine
+from services.memory_service import MemoryService
+
+
+# ── Request models ────────────────────────────────────────────────────────────
+
+
+class ExplicitMemoryRequest(BaseModel):
+    """Request body for POST /api/memory/core."""
+
+    text: str = Field(..., min_length=1, max_length=1000)
+    category: Optional[str] = None
+
+
+class MemorySearchRequest(BaseModel):
+    """Request body for POST /api/memory/search."""
+
+    query: str = Field(..., min_length=1, max_length=500)
+    limit: int = Field(default=5, ge=1, le=8)
+    mode: str = Field(default="hybrid")
+    category: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    recency_bias: float = Field(default=0.0, ge=0.0, le=1.0)
+    char_budget: int = Field(default=1200, ge=200, le=4000)
+
+
+class InboxActionRequest(BaseModel):
+    """Request body for PATCH /api/memory/inbox/{id}."""
+
+    action: str = Field(..., description="Must be 'approve' or 'reject'")
+    edited_text: Optional[str] = None
+
+
+# ── Service singletons ────────────────────────────────────────────────────────
+
+
+def _get_memory_service() -> MemoryService:
+    """Lazy-init MemoryService singleton."""
+    return MemoryService(db_engine=db_engine)
+
+
+def _get_audit_logger() -> AuditLogger:
+    """Lazy-init AuditLogger singleton."""
+    return AuditLogger(engine=db_engine)
+
+
+# ── GET /api/memory/core — list core memories ─────────────────────────────────
+
+
+@router.get("/api/memory/core")
+def list_core_memories(
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    """List all core memories for the authenticated user."""
+    audit = _get_audit_logger()
+    try:
+        from sqlalchemy import text as sa_text
+
+        with db_engine.connect() as conn:
+            rows = conn.execute(
+                sa_text(
+                    "SELECT id, username, fact, category, created_at "
+                    "FROM core_memories WHERE username = :username "
+                    "ORDER BY created_at DESC"
+                ),
+                {"username": current_user.username},
+            ).fetchall()
+
+        memories = [
+            {
+                "id": row[0],
+                "username": row[1],
+                "fact": row[2],
+                "category": row[3],
+                "created_at": str(row[4]) if row[4] else None,
+            }
+            for row in rows
+        ]
+    except Exception as exc:
+        logger.warning("list_core_memories failed: %s", exc)
+        memories = []
+
+    audit.log(
+        username=current_user.username,
+        action_type=ACTION_MEMORY_READ,
+        details={"operation": "list_core", "count": len(memories)},
+    )
+    return {"memories": memories, "total": len(memories)}
+
+
+# ── POST /api/memory/core — add explicit memory ──────────────────────────────
+
+
+@router.post("/api/memory/core", status_code=201)
+def add_explicit_memory(
+    request: ExplicitMemoryRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    """Save an explicit memory to core memories."""
+    svc = _get_memory_service()
+    audit = _get_audit_logger()
+
+    result = svc.save_explicit_memory(
+        username=current_user.username,
+        session_id=None,
+        text=request.text,
+        category=request.category,
+    )
+
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to save memory")
+
+    audit.log(
+        username=current_user.username,
+        action_type=ACTION_MEMORY_WRITE,
+        details={
+            "operation": "add_explicit",
+            "memory_id": result.get("id"),
+            "category": result.get("category"),
+            "fact_length": len(request.text),
+        },
+    )
+    return {"status": "success", "memory": result}
+
+
+# ── DELETE /api/memory/core/{id} — delete/forget memory ───────────────────────
+
+
+@router.delete("/api/memory/core/{memory_id}")
+def delete_memory(
+    memory_id: int,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    """Delete a core memory by ID. Returns 404 if not found."""
+    svc = _get_memory_service()
+    audit = _get_audit_logger()
+
+    deleted = svc.forget_memory(username=current_user.username, memory_id=memory_id)
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+    audit.log(
+        username=current_user.username,
+        action_type=ACTION_MEMORY_DELETE,
+        details={"operation": "forget", "memory_id": memory_id},
+    )
+    return {"status": "success", "deleted_id": memory_id}
+
+
+# ── GET /api/memory/inbox — list pending candidates ───────────────────────────
+
+
+@router.get("/api/memory/inbox/pending")
+def list_pending_candidates_v2(
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    """
+    List pending memory candidates (max 50, ordered by created_at DESC).
+
+    Uses MemoryService backed by the memory_candidates database table.
+    Provides the spec-required simple pending-only view (Requirement 5.6).
+    """
+    audit = _get_audit_logger()
+    try:
+        from sqlalchemy import text as sa_text
+
+        with db_engine.connect() as conn:
+            rows = conn.execute(
+                sa_text(
+                    "SELECT id, username, session_id, candidate_text, source, "
+                    "confidence, status, importance_score, created_at "
+                    "FROM memory_candidates "
+                    "WHERE username = :username AND status = 'pending' "
+                    "ORDER BY created_at DESC "
+                    "LIMIT 50"
+                ),
+                {"username": current_user.username},
+            ).fetchall()
+
+        candidates = [
+            {
+                "id": row[0],
+                "username": row[1],
+                "session_id": row[2],
+                "candidate_text": row[3],
+                "source": row[4],
+                "confidence": row[5],
+                "status": row[6],
+                "importance_score": row[7],
+                "created_at": str(row[8]) if row[8] else None,
+            }
+            for row in rows
+        ]
+    except Exception as exc:
+        logger.warning("list_pending_candidates failed: %s", exc)
+        candidates = []
+
+    audit.log(
+        username=current_user.username,
+        action_type=ACTION_MEMORY_READ,
+        details={"operation": "list_inbox_pending", "count": len(candidates)},
+    )
+    return {"candidates": candidates, "total": len(candidates)}
+
+
+# ── PATCH /api/memory/inbox/{id} — approve/reject candidate ──────────────────
+
+
+@router.patch("/api/memory/inbox/{candidate_id}/review")
+def review_memory_candidate_v2(
+    candidate_id: int,
+    request: InboxActionRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    """
+    Approve or reject a memory candidate using MemoryService.
+
+    - approve: promotes candidate to core memory + vector index
+    - reject: marks candidate as rejected, excluded from retrieval
+
+    Returns 404 if candidate not found or not in pending status.
+    (Requirement 5.7, 5.8, 5.9)
+    """
+    svc = _get_memory_service()
+    audit = _get_audit_logger()
+
+    action = request.action.strip().lower()
+    if action not in ("approve", "reject"):
+        raise HTTPException(
+            status_code=400, detail="action must be 'approve' or 'reject'"
+        )
+
+    if action == "approve":
+        result = svc.approve_candidate(
+            candidate_id=candidate_id,
+            edited_text=request.edited_text,
+        )
+        if not result:
+            raise HTTPException(
+                status_code=404, detail="Candidate not found or not pending"
+            )
+        audit.log(
+            username=current_user.username,
+            action_type=ACTION_MEMORY_WRITE,
+            details={
+                "operation": "approve_candidate",
+                "candidate_id": candidate_id,
+                "core_memory_id": result.get("core_memory_id"),
+            },
+        )
+        return {"status": "approved", "result": result}
+    else:
+        result = svc.reject_candidate(candidate_id=candidate_id)
+        if not result:
+            raise HTTPException(
+                status_code=404, detail="Candidate not found or not pending"
+            )
+        audit.log(
+            username=current_user.username,
+            action_type=ACTION_MEMORY_DELETE,
+            details={
+                "operation": "reject_candidate",
+                "candidate_id": candidate_id,
+            },
+        )
+        return {"status": "rejected", "result": result}
+
+
+# ── POST /api/memory/search — hybrid memory search ───────────────────────────
+
+
+@router.post("/api/memory/search")
+def search_memory(
+    request: MemorySearchRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    """
+    Perform hybrid memory search with configurable settings.
+
+    Returns matching memories compressed to char_budget along with
+    retrieval metadata (retrieved_count, context_chars, pipeline, latency_ms).
+    """
+    svc = _get_memory_service()
+    audit = _get_audit_logger()
+
+    search_result = svc.search_memory(
+        username=current_user.username,
+        query=request.query,
+        limit=request.limit,
+        mode=request.mode,
+        category=request.category,
+        date_from=request.date_from,
+        date_to=request.date_to,
+        recency_bias=request.recency_bias,
+        char_budget=request.char_budget,
+    )
+
+    audit.log(
+        username=current_user.username,
+        action_type=ACTION_MEMORY_READ,
+        details={
+            "operation": "search",
+            "query_length": len(request.query),
+            "mode": request.mode,
+            "retrieved_count": search_result.metadata.retrieved_count,
+            "latency_ms": search_result.metadata.latency_ms,
+        },
+    )
+
+    return {
+        "memories": search_result.memories,
+        "metadata": {
+            "retrieved_count": search_result.metadata.retrieved_count,
+            "context_chars": search_result.metadata.context_chars,
+            "pipeline": search_result.metadata.pipeline,
+            "latency_ms": search_result.metadata.latency_ms,
+        },
+    }

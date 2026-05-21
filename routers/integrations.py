@@ -55,7 +55,15 @@ from integrations.gmail_api import (
 from integrations.gmail_api import (
     refresh_access_token as refresh_gmail_access_token,
 )
-from integrations.telegram_api import delete_webhook, get_me, send_message, set_webhook
+from integrations.telegram_api import (
+    TelegramBotConfig,
+    TelegramBotService,
+    delete_webhook,
+    get_me,
+    send_message,
+    set_webhook,
+)
+
 from passlib.context import CryptContext
 
 router = APIRouter(tags=["integrations"])
@@ -613,6 +621,165 @@ def telegram_webhook(
             session_id=session_id,
         )
     return {"status": "ok"}
+
+
+# ── TelegramBotService-based endpoints (design spec paths) ────────────────────
+# These endpoints use the TelegramBotService class for full lifecycle management
+# and expose the canonical paths from the design document.
+
+
+def _get_telegram_bot_service() -> TelegramBotService:
+    """
+    Build a TelegramBotService instance from current app_configs.
+    This is constructed per-request to always reflect the latest config.
+    """
+    bot_token = (get_config("telegram_bot_token") or "").strip()
+    webhook_url = (get_config("telegram_webhook_url") or "").strip()
+    webhook_secret = (get_config("telegram_webhook_secret") or "").strip()
+    enabled = _config_bool("telegram_enabled", default=False)
+    polling_enabled = _config_bool("telegram_polling_enabled", default=False)
+
+    # Parse allowed user IDs from config (comma-separated list)
+    allowed_ids_raw = (get_config("allowed_telegram_user_ids") or "").strip()
+    allowed_ids: List[int] = []
+    if allowed_ids_raw:
+        for part in allowed_ids_raw.split(","):
+            part = part.strip()
+            if part.isdigit():
+                allowed_ids.append(int(part))
+
+    tool_access = _config_bool("telegram_tool_access_enabled", default=False)
+
+    config = TelegramBotConfig(
+        bot_token=bot_token,
+        webhook_url=webhook_url,
+        webhook_secret=webhook_secret,
+        enabled=enabled,
+        polling_enabled=polling_enabled,
+        allowed_telegram_user_ids=allowed_ids,
+        telegram_tool_access_enabled=tool_access,
+    )
+
+    def _chat_handler(session_id, message, username, **kwargs):
+        model_type = kwargs.get("model_type") or (
+            get_config("default_model", "ollama") or "ollama"
+        ).strip().lower()
+        policy = _get_memory_policy(username)
+        return chat_with_agent(
+            session_id=session_id,
+            message=message,
+            model_type=model_type,
+            api_key=None,
+            model_name=None,
+            memory_mode=kwargs.get("memory_mode", "indexed"),
+            memory_top_k=kwargs.get("memory_top_k", 5),
+            recency_bias=kwargs.get("recency_bias", 0.6),
+            category_filter="",
+            use_web_search=kwargs.get("use_web_search", False),
+            attachments=[],
+            chat_output_mode="normal",
+            username=username,
+            is_admin=False,
+            allowed_memory_categories=policy.get("allowed_categories") or [],
+            persist_memory=bool(policy.get("auto_capture_enabled", True)),
+            require_memory_approval=bool(policy.get("require_approval", False)),
+            pii_strict_mode=bool(policy.get("pii_strict_mode", True)),
+        )
+
+    def _audit_logger(username, action, session_id=None, details=None):
+        log_audit_event(
+            username=username,
+            action=action,
+            session_id=session_id,
+        )
+
+    def _user_resolver(telegram_user_id):
+        return lookup_username_by_telegram_user_id(telegram_user_id)
+
+    def _session_mgr(session_id, username):
+        ensure_session_owner(session_id, username)
+        touch_session(session_id)
+
+    return TelegramBotService(
+        config=config,
+        chat_handler=_chat_handler,
+        audit_logger=_audit_logger,
+        user_resolver=_user_resolver,
+        session_manager=_session_mgr,
+    )
+
+
+@router.post("/api/telegram/webhook")
+def telegram_webhook_v2(
+    payload: Dict[str, Any],
+    x_telegram_bot_api_secret_token: Optional[str] = Header(default=None),
+):
+    """
+    Telegram webhook receiver (design spec path).
+    Uses TelegramBotService for full lifecycle processing including
+    user resolution, rate limiting, access control, and audit logging.
+    """
+    if not _config_bool("telegram_enabled", default=False):
+        return {"status": "ignored", "reason": "disabled"}
+
+    bot_token = (get_config("telegram_bot_token") or "").strip()
+    if not bot_token:
+        raise HTTPException(status_code=400, detail="Telegram bot token is required")
+
+    # Validate webhook secret if configured
+    expected_secret = (get_config("telegram_webhook_secret") or "").strip()
+    if (
+        expected_secret
+        and (x_telegram_bot_api_secret_token or "").strip() != expected_secret
+    ):
+        logger.warning("telegram webhook rejected: invalid secret")
+        return {"status": "ok"}
+
+    service = _get_telegram_bot_service()
+    return service.process_webhook_update(payload or {})
+
+
+@router.post("/api/admin/telegram/enable-polling")
+def admin_telegram_enable_polling_v2(
+    current_user: UserContext = Depends(require_admin_user),
+):
+    """
+    Start long-polling mode (design spec path).
+    Uses TelegramBotService which deregisters any active webhook first.
+    """
+    token = (get_config("telegram_bot_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Telegram bot token is required")
+
+    # Deregister webhook (only one mode active at a time)
+    try:
+        delete_webhook(token)
+    except Exception:
+        pass
+
+    set_config("telegram_polling_enabled", "true")
+    set_config("telegram_enabled", "true")
+    _start_telegram_poller_if_enabled()
+
+    log_audit_event(
+        username=current_user.username, action="integration.telegram.enable_polling"
+    )
+    return {"ok": True, "mode": "polling"}
+
+
+@router.post("/api/admin/telegram/disable-polling")
+def admin_telegram_disable_polling_v2(
+    current_user: UserContext = Depends(require_admin_user),
+):
+    """
+    Stop long-polling mode (design spec path).
+    """
+    set_config("telegram_polling_enabled", "false")
+
+    log_audit_event(
+        username=current_user.username, action="integration.telegram.disable_polling"
+    )
+    return {"ok": True, "mode": "webhook"}
 
 
 # ── Email integration ─────────────────────────────────────────────────────────

@@ -1,4 +1,9 @@
-from backend.agent import _extract_explicit_memory_request, _normalize_memory_fact, _determine_memory_action
+import pytest
+
+try:
+    from agent import _extract_explicit_memory_request, _normalize_memory_fact, _determine_memory_action
+except ImportError:
+    pytest.skip("langchain dependencies not installed", allow_module_level=True)
 
 
 def test_extract_explicit_memory_request_plain_text():

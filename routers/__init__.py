@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from routers.admin import router as admin_router
 from routers.auth import router as auth_router
+from routers.browser import router as browser_router
 from routers.chat import router as chat_router
 from routers.integrations import router as integrations_router
 from routers.memory import router as memory_router
@@ -18,10 +19,13 @@ from routers.sessions import router as sessions_router
 from routers.skills import router as skills_router
 from routers.system import router as system_router
 from routers.tasks import router as tasks_router
+from routers.terminal import router as terminal_router
 from routers.users import router as users_router
+from routers.web_search import router as web_search_router
 
 ALL_ROUTERS = [
     auth_router,
+    browser_router,
     chat_router,
     sessions_router,
     memory_router,
@@ -34,6 +38,8 @@ ALL_ROUTERS = [
     admin_router,
     integrations_router,
     system_router,
+    terminal_router,
+    web_search_router,
 ]
 
 

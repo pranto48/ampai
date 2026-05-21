@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Dict, List, Optional
@@ -27,6 +27,7 @@ from backup_helpers import (
     write_backup_local,
     write_backup_smb,
 )
+from services.backup_service import BackupService
 from core.deps import UserContext, require_admin_user
 from core.helpers import (
     _check_db_health,
@@ -39,6 +40,7 @@ from core.models import (
     AdminUserCreateRequest,
     AdminUserUpdateRequest,
     BackupConnectionTestRequest,
+    BackupFtpTestRequest,
     BackupProfileCreateRequest,
     BackupProfileUpdateRequest,
     BackupRestoreRequest,
@@ -832,6 +834,73 @@ def admin_audit_events(limit: int = 200, _: UserContext = Depends(require_admin_
     return {"events": list_audit_events(limit=limit)}
 
 
+@router.get("/api/admin/audit-logs")
+def admin_audit_logs(
+    action_type: Optional[str] = Query(default=None, description="Filter by action type"),
+    username: Optional[str] = Query(default=None, description="Filter by username"),
+    date_from: Optional[str] = Query(default=None, description="Inclusive start date (ISO 8601)"),
+    date_to: Optional[str] = Query(default=None, description="Inclusive end date (ISO 8601)"),
+    session_id: Optional[str] = Query(default=None, description="Filter by session ID"),
+    limit: int = Query(default=100, ge=1, le=1000, description="Max results (1-1000)"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset"),
+    _: UserContext = Depends(require_admin_user),
+):
+    """
+    Query audit events with filters. Append-only: no UPDATE or DELETE is exposed.
+
+    Supports filtering by action_type, username, date range, and session_id.
+    Results are capped at 1000 per request. Audit entries older than 90 days
+    are eligible for retention policy cleanup.
+    """
+    from core.audit import AuditLogger
+
+    audit_logger = AuditLogger(engine)
+
+    # Parse date strings to datetime objects
+    parsed_date_from = None
+    parsed_date_to = None
+    if date_from:
+        try:
+            parsed_date_from = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid date_from format. Use ISO 8601 (e.g. 2024-01-01T00:00:00Z).",
+            )
+    if date_to:
+        try:
+            parsed_date_to = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid date_to format. Use ISO 8601 (e.g. 2024-12-31T23:59:59Z).",
+            )
+
+    events = audit_logger.query(
+        action_type=action_type,
+        username=username,
+        date_from=parsed_date_from,
+        date_to=parsed_date_to,
+        session_id=session_id,
+        limit=limit,
+        offset=offset,
+    )
+
+    # Calculate 90-day retention eligibility cutoff
+    retention_cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+
+    return {
+        "events": events,
+        "count": len(events),
+        "limit": limit,
+        "offset": offset,
+        "retention_policy": {
+            "min_retention_days": 90,
+            "eligible_before": retention_cutoff.isoformat(),
+        },
+    }
+
+
 # ── Backup helpers ────────────────────────────────────────────────────────────
 
 
@@ -1480,6 +1549,147 @@ def run_backup_compat(
 @router.get("/api/admin/backup/history")
 def get_backup_history_compat(user: UserContext = Depends(require_admin_user)):
     return get_backup_status_history(user)
+
+
+# ── Backup endpoints (BackupService) ─────────────────────────────────────────
+
+
+def _get_backup_service() -> BackupService:
+    """Instantiate BackupService with the current database engine."""
+    from core.audit import AuditLogger
+
+    audit = AuditLogger(engine) if engine else None
+    return BackupService(engine=engine, audit_logger=audit)
+
+
+@router.get("/api/admin/backup/jobs")
+def admin_backup_jobs(
+    limit: int = Query(default=50, ge=1, le=200),
+    _: UserContext = Depends(require_admin_user),
+):
+    """List backup job history."""
+    svc = _get_backup_service()
+    jobs = svc.list_backup_jobs(limit=limit)
+    return {"jobs": jobs}
+
+
+@router.post("/api/admin/backup/test-ftp")
+def admin_backup_test_ftp(
+    request: BackupFtpTestRequest,
+    _: UserContext = Depends(require_admin_user),
+):
+    """Test FTP connection with provided credentials."""
+    svc = _get_backup_service()
+    ok, detail = svc.test_ftp_connection(
+        host=request.host,
+        user=request.user,
+        password=request.password,
+        remote_path=request.path,
+        port=request.port,
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=detail)
+    return {"status": "success", "detail": detail}
+
+
+@router.get("/api/admin/backup/profiles")
+def admin_list_backup_profiles(_: UserContext = Depends(require_admin_user)):
+    """List all backup profiles."""
+    profiles = list_backup_profiles()
+    return {"profiles": profiles}
+
+
+@router.post("/api/admin/backup/profiles")
+def admin_create_backup_profile(
+    request: BackupProfileCreateRequest,
+    user: UserContext = Depends(require_admin_user),
+):
+    """Create a new backup profile."""
+    payload = {
+        "name": request.name,
+        "enabled": request.enabled,
+        "include_database": request.include_database,
+        "include_uploads": request.include_uploads,
+        "include_configs": request.include_configs,
+        "include_logs": request.include_logs,
+        "retention_count": request.retention_count,
+        "retention_days": request.retention_days,
+    }
+    if request.destination:
+        payload["destination_type"] = request.destination.type
+        payload["destination_path"] = request.destination.path
+        payload["destination_host"] = request.destination.host
+        payload["destination_port"] = request.destination.port
+        payload["destination_username"] = request.destination.username
+        payload["credential_key_ref"] = request.destination.credential_key_ref
+    if request.schedule:
+        payload["schedule_cron"] = request.schedule.cron
+        payload["schedule_interval_minutes"] = request.schedule.interval_minutes
+
+    profile_id = create_backup_profile(payload)
+    if not profile_id:
+        raise HTTPException(status_code=500, detail="Failed to create backup profile")
+
+    log_audit_event(
+        username=user.username,
+        action="admin.backup.profile.create",
+        details=f"profile_id={profile_id};name={request.name}",
+    )
+    return {"status": "success", "profile_id": profile_id}
+
+
+@router.patch("/api/admin/backup/profiles/{profile_id}")
+def admin_update_backup_profile(
+    profile_id: int,
+    request: BackupProfileUpdateRequest,
+    user: UserContext = Depends(require_admin_user),
+):
+    """Update an existing backup profile."""
+    existing = get_backup_profile(profile_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Backup profile not found")
+
+    payload: Dict[str, Any] = {}
+    if request.name is not None:
+        payload["name"] = request.name
+    if request.enabled is not None:
+        payload["enabled"] = request.enabled
+    if request.include_database is not None:
+        payload["include_database"] = request.include_database
+    if request.include_uploads is not None:
+        payload["include_uploads"] = request.include_uploads
+    if request.include_configs is not None:
+        payload["include_configs"] = request.include_configs
+    if request.include_logs is not None:
+        payload["include_logs"] = request.include_logs
+    if request.retention_count is not None:
+        payload["retention_count"] = request.retention_count
+    if request.retention_days is not None:
+        payload["retention_days"] = request.retention_days
+    if request.destination is not None:
+        payload["destination_type"] = request.destination.type
+        payload["destination_path"] = request.destination.path
+        payload["destination_host"] = request.destination.host
+        payload["destination_port"] = request.destination.port
+        payload["destination_username"] = request.destination.username
+        payload["credential_key_ref"] = request.destination.credential_key_ref
+    if request.schedule is not None:
+        payload["schedule_cron"] = request.schedule.cron
+        payload["schedule_interval_minutes"] = request.schedule.interval_minutes
+
+    if not payload:
+        return {"status": "success", "message": "No changes provided"}
+
+    ok = update_backup_profile(profile_id, payload)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to update backup profile")
+
+    log_audit_event(
+        username=user.username,
+        action="admin.backup.profile.update",
+        details=f"profile_id={profile_id};fields={list(payload.keys())}",
+    )
+    return {"status": "success", "profile_id": profile_id}
 
 
 @router.post("/api/admin/backup/test-connection")

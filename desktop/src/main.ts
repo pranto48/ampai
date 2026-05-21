@@ -13,6 +13,9 @@ import {
 import { accountTab, esc, historyTab, md, serverTab } from "./tabs-a";
 import { memoryTab, personasTab } from "./tabs-b";
 import { adminTab, personaliseTab, settingsTab, updateTab } from "./tabs-c";
+import { tasksTab } from "./tabs-tasks";
+import { browserTab } from "./tabs-browser";
+import { terminalTab } from "./tabs-terminal";
 
 type Health = { ok: boolean; status: string; detail: string };
 
@@ -189,14 +192,18 @@ function render(): void {
       <button class="collapse-btn" id="btn-sidebar-collapse">${S.sidebarCollapsed ? "»" : "«"}</button>
     </div>
     <div class="tab-bar">
-      ${tabButton("server", "Server")}
+      ${tabButton("server", "💬 Chat")}
       ${tabButton("account", "Account")}
       ${S.auth ? tabButton("history", "History") : ""}
-      ${S.auth ? tabButton("memory", "Memory") : ""}
+      ${S.auth ? tabButton("memory", "🧠 Memory") : ""}
+      ${S.auth ? tabButton("tasks", "📋 Tasks") : ""}
+      ${S.auth ? tabButton("browser", "🌐 Browser") : ""}
+      ${S.auth ? tabButton("terminal", "⌨️ Terminal") : ""}
       ${S.auth ? tabButton("personas", "AI Personas") : ""}
-      ${S.auth ? tabButton("settings", "Settings") : ""}
-      ${S.auth ? tabButton("personalise", "Personalise") : ""}
-      ${isAdmin() ? tabButton("admin", "Admin") : ""}
+      ${S.auth ? tabButton("settings", "⚙️ Settings") : ""}
+      ${S.auth ? tabButton("personalise", "🎨 Personalise") : ""}
+      ${isAdmin() ? tabButton("telegram", "📱 Telegram") : ""}
+      ${isAdmin() ? tabButton("admin", "🛡️ Admin") : ""}
       ${isAdmin() ? tabButton("update", "Update") : ""}
     </div>
     <div class="tab-panels">
@@ -204,9 +211,13 @@ function render(): void {
       ${tabPanel("account", accountTab())}
       ${S.auth ? tabPanel("history", historyTab()) : ""}
       ${S.auth ? tabPanel("memory", memoryTab()) : ""}
+      ${S.auth ? tabPanel("tasks", tasksTab()) : ""}
+      ${S.auth ? tabPanel("browser", browserTab()) : ""}
+      ${S.auth ? tabPanel("terminal", terminalTab()) : ""}
       ${S.auth ? tabPanel("personas", personasTab()) : ""}
       ${S.auth ? tabPanel("settings", settingsTab()) : ""}
       ${S.auth ? tabPanel("personalise", personaliseTab()) : ""}
+      ${isAdmin() ? tabPanel("telegram", telegramSettingsTab()) : ""}
       ${isAdmin() ? tabPanel("admin", adminTab()) : ""}
       ${isAdmin() ? tabPanel("update", updateTab()) : ""}
     </div>
@@ -282,6 +293,31 @@ function chatTopbar(): string {
   </select>
   <label class="chat-topbar-check"><input type="checkbox" id="chk-websearch" ${S.useWebSearch ? "checked" : ""}/> Web</label>
   <button class="sm" id="btn-new-session">New</button>
+</div>`;
+}
+
+function telegramSettingsTab(): string {
+  const cfg = S.configs;
+  const tg = S.tgStatus;
+  return `<div class="panel">
+  <div class="panel-title">📱 Telegram Bot ${tg ? `<span class="badge ${tg.enabled ? "ok" : "bad"}" style="float:right;font-size:.69rem">${tg.enabled ? "Enabled" : "Disabled"}</span>` : ""}</div>
+  ${tg ? `<div class="hint" style="margin-bottom:8px">Token: ${esc(tg.token_masked || "not set")} | Polling: ${tg.polling_enabled ? "On" : "Off"}</div>` : ""}
+  <form class="stack" id="tg-form">
+    <label class="field">Bot Token<input name="telegram_bot_token" value="${esc(cfg.telegram_bot_token || "")}" type="password" placeholder="123456:ABC-…"/></label>
+    <label class="field">Webhook URL<input name="telegram_webhook_url" value="${esc(cfg.telegram_webhook_url || tg?.webhook_url || "")}" placeholder="https://yourdomain.com/webhook"/></label>
+    <div class="row">
+      <button class="primary" type="submit">💾 Save</button>
+      <button type="button" id="btn-tg-test">🤖 Test</button>
+    </div>
+    <div class="row">
+      <button type="button" id="btn-tg-connect">🔗 Set Webhook</button>
+      <button type="button" id="btn-tg-disconnect">❌ Remove</button>
+    </div>
+    <div class="row">
+      <button type="button" id="btn-tg-polling-on" class="success">▶ Enable Polling</button>
+      <button type="button" id="btn-tg-polling-off" class="danger">⏹ Disable Polling</button>
+    </div>
+  </form>
 </div>`;
 }
 
@@ -383,8 +419,14 @@ async function loadTabData(tab: string): Promise<void> {
   }
   try {
     if (tab === "history") {
-      const data = await api<any>("/api/sessions?limit=100&archived=false");
+      S.sessionPage = 1;
+      S.sessionHasMore = true;
+      S.sessionError = "";
+      const data = await api<any>("/api/sessions?limit=40&archived=false");
       S.sessions = data.sessions || [];
+      if (S.sessions.length < 40) {
+        S.sessionHasMore = false;
+      }
     }
     if (tab === "memory") {
       const memories = await api<any>("/api/core-memories");
@@ -399,22 +441,51 @@ async function loadTabData(tab: string): Promise<void> {
         S.memoryAnalytics = await api<any>("/api/memory/analytics?days=30");
       }
     }
+    if (tab === "tasks") {
+      const data = await api<any>("/api/tasks");
+      S.taskState.tasks = data.tasks || [];
+    }
+    if (tab === "browser") {
+      try {
+        const jobs = await api<any>("/api/browser/jobs?limit=200");
+        S.browserState.jobs = jobs.jobs || [];
+        if (isAdmin()) {
+          const allowlist = await api<any>("/api/browser/allowlist");
+          S.browserState.allowlist = allowlist.domains || allowlist.allowlist || [];
+        }
+      } catch { /* browser endpoints may not be available */ }
+    }
+    if (tab === "terminal") {
+      try {
+        const logs = await api<any>("/api/terminal/logs?limit=200");
+        S.terminalState.logs = logs.logs || [];
+        if (isAdmin()) {
+          const policy = await api<any>("/api/terminal/policy");
+          S.terminalState.policy = policy;
+          S.terminalState.enabled = policy.enabled ?? false;
+        }
+      } catch { /* terminal endpoints may not be available */ }
+    }
     if (tab === "personas") {
       const data = await api<any>("/api/personas");
       S.personas = data.personas || [];
     }
     if (tab === "settings" && isAdmin()) {
-      const [configs, telegram, modelOptions] = await Promise.all([
+      const [configs, modelOptions] = await Promise.all([
         api<any>("/api/admin/configs"),
-        isAdmin()
-          ? api<any>("/api/admin/integrations/telegram/status")
-          : Promise.resolve(null),
         api<any>("/api/models/options"),
       ]);
       S.configs = configs || {};
-      S.tgStatus = telegram;
       S.providers = modelOptions.providers || [];
       S.modelType = S.configs.default_model_provider || S.modelType;
+    }
+    if (tab === "telegram" && isAdmin()) {
+      const [configs, telegram] = await Promise.all([
+        api<any>("/api/admin/configs"),
+        api<any>("/api/admin/integrations/telegram/status"),
+      ]);
+      S.configs = configs || {};
+      S.tgStatus = telegram;
     }
     if (tab === "admin" && isAdmin()) {
       const [users, summary, health, systemHealth] = await Promise.all([
@@ -431,6 +502,17 @@ async function loadTabData(tab: string): Promise<void> {
         uptime: systemHealth?.checks?.app?.detail || systemHealth?.status || "ok",
         health_checks: health.checks || [],
       };
+    }
+    if (tab === "browser") {
+      try {
+        const [allowlistData, jobsData] = await Promise.all([
+          api<any>("/api/browser/allowlist").catch(() => ({ domains: [] })),
+          api<any>("/api/browser/jobs?limit=200").catch(() => ({ jobs: [] })),
+        ]);
+        S.browserState.allowlist = allowlistData.domains || allowlistData.allowlist || [];
+        S.browserState.jobs = jobsData.jobs || [];
+        S.browserState.enabled = allowlistData.enabled ?? S.browserState.enabled;
+      } catch { /* handled per-call above */ }
     }
     if (tab === "update" && isAdmin()) {
       S.updateVersion = await api<any>("/api/admin/update/version");
@@ -598,6 +680,10 @@ function bind(): void {
   bindPersonas();
   bindSettings();
   bindPersonalise();
+  bindTelegram();
+  bindTasks();
+  bindBrowser();
+  bindTerminal();
   bindAdmin();
   bindUpdate();
 }
@@ -618,28 +704,67 @@ function bindAttachDelete(): void {
 
 function bindHistory(): void {
   document.getElementById("btn-reload-sessions")?.addEventListener("click", () => {
+    S.sessionPage = 1;
+    S.sessionHasMore = true;
     void loadTabData("history");
   });
-  document.getElementById("session-search")?.addEventListener("input", (event) => {
-    S.sessionSearch = (event.currentTarget as HTMLInputElement).value;
+
+  // New chat button in sidebar
+  document.getElementById("btn-new-chat-sidebar")?.addEventListener("click", () => {
+    newSessionId();
+    S.msgs = [];
+    S.attachments = [];
+    S.tab = "server";
     render();
   });
+
+  // Debounced search (300ms)
+  let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  document.getElementById("session-search")?.addEventListener("input", (event) => {
+    const value = (event.currentTarget as HTMLInputElement).value;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      S.sessionSearch = value;
+      render();
+    }, 300);
+  });
+
+  // Category filter chips
   document.querySelectorAll<HTMLElement>("[data-cat]").forEach((chip) => {
     chip.addEventListener("click", () => {
       S.sessionCategoryFilter = chip.dataset.cat || "";
       render();
     });
   });
+
+  // Load more on scroll
+  const scrollContainer = document.getElementById("sessions-list-scroll");
+  scrollContainer?.addEventListener("scroll", () => {
+    if (S.sessionLoadingMore || !S.sessionHasMore) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
+    if (scrollTop + clientHeight >= scrollHeight - 50) {
+      void loadMoreSessions();
+    }
+  });
+
+  // Load more button
+  document.getElementById("btn-load-more-sessions")?.addEventListener("click", () => {
+    void loadMoreSessions();
+  });
+
+  // Click session to load it
   document.querySelectorAll<HTMLElement>(".session-item[data-sid]").forEach((row) => {
     row.addEventListener("click", async (event) => {
       const target = event.target as HTMLElement;
-      if (target.closest("[data-del-sid]")) {
+      if (target.closest("[data-del-sid]") || target.closest("[data-rename-sid]") ||
+          target.closest("[data-pin-sid]") || target.closest("[data-archive-sid]") ||
+          target.closest("[data-assign-cat-sid]") || target.closest("[data-rename-save]") ||
+          target.closest("[data-rename-cancel]") || target.closest("[data-category-save]") ||
+          target.closest("[data-category-cancel]") || target.closest("input")) {
         return;
       }
       const sessionId = row.dataset.sid || "";
-      if (!sessionId) {
-        return;
-      }
+      if (!sessionId) return;
       S.sessionId = sessionId;
       localStorage.setItem(SESSK, sessionId);
       try {
@@ -656,17 +781,16 @@ function bindHistory(): void {
       render();
     });
   });
+
+  // Delete session
   document.querySelectorAll<HTMLButtonElement>("[data-del-sid]").forEach((button) => {
     button.addEventListener("click", async (event) => {
       event.stopPropagation();
       const sessionId = button.dataset.delSid || "";
-      if (!sessionId || !confirm("Delete this chat session?")) {
-        return;
-      }
+      if (!sessionId || !confirm("Delete this chat session?")) return;
+      S.sessionError = "";
       try {
-        await api(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-          method: "DELETE",
-        });
+        await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
         S.sessions = S.sessions.filter((item) => item.session_id !== sessionId);
         if (S.sessionId === sessionId) {
           newSessionId();
@@ -675,10 +799,208 @@ function bindHistory(): void {
         toast("Session deleted.", "info");
         render();
       } catch (error: any) {
-        toast(error.message, "err");
+        S.sessionError = `Delete failed: ${error.message || "Unknown error"}`;
+        toast(error.message || "Failed to delete session", "err");
+        render();
       }
     });
   });
+
+  // Pin/unpin session
+  document.querySelectorAll<HTMLButtonElement>("[data-pin-sid]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const sessionId = button.dataset.pinSid || "";
+      if (!sessionId) return;
+      const session = S.sessions.find((item) => item.session_id === sessionId);
+      if (!session) return;
+      const newPinned = !session.pinned;
+      try {
+        await api(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ pinned: newPinned }),
+        });
+        session.pinned = newPinned;
+        toast(newPinned ? "Session pinned." : "Session unpinned.", "ok");
+        render();
+      } catch (error: any) {
+        toast(error.message || "Failed to update pin", "err");
+      }
+    });
+  });
+
+  // Archive session
+  document.querySelectorAll<HTMLButtonElement>("[data-archive-sid]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const sessionId = button.dataset.archiveSid || "";
+      if (!sessionId) return;
+      S.sessionError = "";
+      try {
+        await api(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ archived: true }),
+        });
+        S.sessions = S.sessions.filter((item) => item.session_id !== sessionId);
+        toast("Session archived.", "ok");
+        render();
+      } catch (error: any) {
+        S.sessionError = `Archive failed: ${error.message || "Unknown error"}`;
+        toast(error.message || "Failed to archive session", "err");
+        render();
+      }
+    });
+  });
+
+  // Rename session - start
+  document.querySelectorAll<HTMLButtonElement>("[data-rename-sid]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const sessionId = button.dataset.renameSid || "";
+      if (!sessionId) return;
+      const session = S.sessions.find((item) => item.session_id === sessionId);
+      S.renamingSessionId = sessionId;
+      S.renamingSessionTitle = session?.title || session?.category || "";
+      render();
+      // Focus the rename input
+      setTimeout(() => {
+        const input = document.getElementById(`rename-input-${sessionId}`) as HTMLInputElement | null;
+        if (input) { input.focus(); input.select(); }
+      }, 50);
+    });
+  });
+
+  // Rename session - save
+  document.querySelectorAll<HTMLButtonElement>("[data-rename-save]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const sessionId = button.dataset.renameSave || "";
+      if (!sessionId) return;
+      const input = document.getElementById(`rename-input-${sessionId}`) as HTMLInputElement | null;
+      const title = (input?.value || "").trim().slice(0, 100);
+      if (!title) { toast("Title cannot be empty.", "err"); return; }
+      try {
+        await api(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ title }),
+        });
+        const session = S.sessions.find((item) => item.session_id === sessionId);
+        if (session) { session.title = title; }
+        S.renamingSessionId = null;
+        S.renamingSessionTitle = "";
+        toast("Session renamed.", "ok");
+        render();
+      } catch (error: any) {
+        toast(error.message || "Failed to rename session", "err");
+      }
+    });
+  });
+
+  // Rename session - cancel
+  document.querySelectorAll<HTMLButtonElement>("[data-rename-cancel]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      S.renamingSessionId = null;
+      S.renamingSessionTitle = "";
+      render();
+    });
+  });
+
+  // Rename session - Enter key to save, Escape to cancel
+  document.querySelectorAll<HTMLInputElement>(".session-rename-input").forEach((input) => {
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        const saveBtn = input.parentElement?.parentElement?.querySelector("[data-rename-save],[data-category-save]") as HTMLButtonElement | null;
+        saveBtn?.click();
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        const cancelBtn = input.parentElement?.parentElement?.querySelector("[data-rename-cancel],[data-category-cancel]") as HTMLButtonElement | null;
+        cancelBtn?.click();
+      }
+    });
+  });
+
+  // Assign category - start
+  document.querySelectorAll<HTMLButtonElement>("[data-assign-cat-sid]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const sessionId = button.dataset.assignCatSid || "";
+      if (!sessionId) return;
+      const session = S.sessions.find((item) => item.session_id === sessionId);
+      S.assigningCategorySessionId = sessionId;
+      S.assigningCategoryValue = session?.category || "";
+      render();
+      setTimeout(() => {
+        const input = document.getElementById(`category-input-${sessionId}`) as HTMLInputElement | null;
+        if (input) { input.focus(); input.select(); }
+      }, 50);
+    });
+  });
+
+  // Assign category - save
+  document.querySelectorAll<HTMLButtonElement>("[data-category-save]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const sessionId = button.dataset.categorySave || "";
+      if (!sessionId) return;
+      const input = document.getElementById(`category-input-${sessionId}`) as HTMLInputElement | null;
+      const category = (input?.value || "").trim() || "Uncategorized";
+      try {
+        await api(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ category }),
+        });
+        const session = S.sessions.find((item) => item.session_id === sessionId);
+        if (session) { session.category = category; }
+        S.assigningCategorySessionId = null;
+        S.assigningCategoryValue = "";
+        toast("Category updated.", "ok");
+        render();
+      } catch (error: any) {
+        toast(error.message || "Failed to assign category", "err");
+      }
+    });
+  });
+
+  // Assign category - cancel
+  document.querySelectorAll<HTMLButtonElement>("[data-category-cancel]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      S.assigningCategorySessionId = null;
+      S.assigningCategoryValue = "";
+      render();
+    });
+  });
+}
+
+async function loadMoreSessions(): Promise<void> {
+  if (S.sessionLoadingMore || !S.sessionHasMore) return;
+  S.sessionLoadingMore = true;
+  render();
+  try {
+    const nextPage = S.sessionPage + 1;
+    const offset = (nextPage - 1) * 40;
+    const data = await api<any>(`/api/sessions?limit=40&offset=${offset}&archived=false`);
+    const newSessions = data.sessions || [];
+    if (newSessions.length < 40) {
+      S.sessionHasMore = false;
+    }
+    // Append new sessions, avoiding duplicates
+    const existingIds = new Set(S.sessions.map((s: any) => s.session_id));
+    for (const session of newSessions) {
+      if (!existingIds.has(session.session_id)) {
+        S.sessions.push(session);
+      }
+    }
+    S.sessionPage = nextPage;
+  } catch (error: any) {
+    toast(error.message || "Failed to load more sessions", "err");
+  } finally {
+    S.sessionLoadingMore = false;
+    render();
+  }
 }
 
 function bindMemory(): void {
@@ -1034,47 +1356,6 @@ function bindSettings(): void {
       }
     });
 
-  document.getElementById("tg-form")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget as HTMLFormElement);
-    try {
-      await api("/api/admin/integrations/telegram/save", {
-        method: "POST",
-        body: JSON.stringify({
-          bot_token: form.get("telegram_bot_token"),
-          webhook_url: form.get("telegram_webhook_url"),
-          enabled: true,
-        }),
-      });
-      await loadTabData("settings");
-      toast("Telegram settings saved.", "ok");
-    } catch (error: any) {
-      toast(error.message, "err");
-    }
-  });
-
-  bindSimpleAction("btn-tg-test", "/api/admin/integrations/telegram/test", "Telegram test ok.");
-  bindSimpleAction(
-    "btn-tg-connect",
-    "/api/admin/integrations/telegram/connect",
-    "Telegram webhook connected."
-  );
-  bindSimpleAction(
-    "btn-tg-disconnect",
-    "/api/admin/integrations/telegram/disconnect",
-    "Telegram webhook removed."
-  );
-  bindSimpleAction(
-    "btn-tg-polling-on",
-    "/api/admin/integrations/telegram/enable-polling",
-    "Telegram polling enabled."
-  );
-  bindSimpleAction(
-    "btn-tg-polling-off",
-    "/api/admin/integrations/telegram/disable-polling",
-    "Telegram polling disabled."
-  );
-
   document
     .getElementById("btn-settings-export")
     ?.addEventListener("click", async () => {
@@ -1157,6 +1438,115 @@ function bindPersonalise(): void {
     S.sidebarCollapsed = !S.sidebarCollapsed;
     localStorage.setItem("ampai.sidebarCollapsed", S.sidebarCollapsed ? "1" : "0");
     render();
+  });
+}
+
+function bindTelegram(): void {
+  document.getElementById("tg-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget as HTMLFormElement);
+    try {
+      await api("/api/admin/integrations/telegram/save", {
+        method: "POST",
+        body: JSON.stringify({
+          bot_token: form.get("telegram_bot_token"),
+          webhook_url: form.get("telegram_webhook_url"),
+          enabled: true,
+        }),
+      });
+      await loadTabData("telegram");
+      toast("Telegram settings saved.", "ok");
+    } catch (error: any) {
+      toast(error.message, "err");
+    }
+  });
+
+  bindSimpleAction("btn-tg-test", "/api/admin/integrations/telegram/test", "Telegram test ok.");
+  bindSimpleAction(
+    "btn-tg-connect",
+    "/api/admin/integrations/telegram/connect",
+    "Telegram webhook connected."
+  );
+  bindSimpleAction(
+    "btn-tg-disconnect",
+    "/api/admin/integrations/telegram/disconnect",
+    "Telegram webhook removed."
+  );
+  bindSimpleAction(
+    "btn-tg-polling-on",
+    "/api/admin/integrations/telegram/enable-polling",
+    "Telegram polling enabled."
+  );
+  bindSimpleAction(
+    "btn-tg-polling-off",
+    "/api/admin/integrations/telegram/disable-polling",
+    "Telegram polling disabled."
+  );
+}
+
+function bindTasks(): void {
+  document.getElementById("btn-reload-tasks")?.addEventListener("click", () => {
+    void loadTabData("tasks");
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-task-status]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.taskId || "";
+      const status = button.dataset.taskStatus || "";
+      if (!id || !status) return;
+      try {
+        await api(`/api/tasks/${encodeURIComponent(id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status }),
+        });
+        await loadTabData("tasks");
+      } catch (error: any) {
+        toast(error.message, "err");
+      }
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-del-task]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.delTask || "";
+      if (!id || !confirm("Delete this task?")) return;
+      try {
+        await api(`/api/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+        toast("Task deleted.", "info");
+        await loadTabData("tasks");
+      } catch (error: any) {
+        toast(error.message, "err");
+      }
+    });
+  });
+}
+
+function bindBrowser(): void {
+  document.getElementById("btn-reload-browser")?.addEventListener("click", () => {
+    void loadTabData("browser");
+  });
+
+  document.getElementById("browser-allowlist-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget as HTMLFormElement);
+    const domain = String(form.get("domain") || "").trim();
+    if (!domain) return;
+    try {
+      const updated = [...S.browserState.allowlist, domain];
+      await api("/api/browser/allowlist", {
+        method: "POST",
+        body: JSON.stringify({ domains: updated }),
+      });
+      S.browserState.allowlist = updated;
+      toast(`Domain "${domain}" added to allowlist.`, "ok");
+      render();
+    } catch (error: any) {
+      toast(error.message || "Failed to update allowlist", "err");
+    }
+  });
+}
+
+function bindTerminal(): void {
+  document.getElementById("btn-reload-terminal")?.addEventListener("click", () => {
+    void loadTabData("terminal");
   });
 }
 
@@ -1399,8 +1789,11 @@ async function doSend(): Promise<void> {
         session_id: S.sessionId,
         message: message || "Please review the attached file.",
         model_type: S.modelType,
+        model_name: S.modelName || undefined,
         memory_mode: S.memoryMode,
         use_web_search: S.useWebSearch,
+        enable_browser_tools: S.enableBrowserTools,
+        enable_terminal_tools: S.enableTerminalTools,
         attachments: S.attachments,
       }),
     });
@@ -1408,7 +1801,13 @@ async function doSend(): Promise<void> {
     S.attachments = [];
     void loadTabData("history");
   } catch (error: any) {
-    pushMsg("assistant", `Error: ${error.message || "Chat failed"}`);
+    pushMsg("assistant", `Error: ${error.message || "Chat request failed"}`);
+    // Re-enable send button within 1 second per requirement 12.6
+    setTimeout(() => {
+      S.busy = false;
+      render();
+    }, Math.min(1000, 500));
+    return;
   } finally {
     S.busy = false;
     render();

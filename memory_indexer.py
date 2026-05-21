@@ -18,6 +18,54 @@ CANDIDATE_PREFILTER_LIMIT = 50
 SUMMARY_PREFILTER_LIMIT = 25
 
 
+class EmbeddingUnavailableError(Exception):
+    """Raised when no embedding provider is available and vector retrieval should be disabled."""
+    pass
+
+
+def _has_cloud_embedding_key() -> bool:
+    """Check if any cloud embedding API key is configured."""
+    openai_key = get_config("openai_api_key") or os.getenv("OPENAI_API_KEY")
+    gemini_key = get_config("gemini_api_key") or os.getenv("GOOGLE_API_KEY")
+    return bool(openai_key or gemini_key)
+
+
+def _is_ollama_reachable(base_url: str, timeout: float = 2.0) -> bool:
+    """Check if Ollama is reachable at the given base URL."""
+    try:
+        import urllib.request
+        urllib.request.urlopen(base_url, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _get_ollama_base_url() -> str:
+    """Resolve the Ollama base URL from config or environment."""
+    return get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+
+
+def _fallback_to_local_embedding() -> Any:
+    """Attempt local embedding fallback via Ollama with nomic-embed-text.
+
+    Requirement 6.7: If no cloud embedding API key configured and Ollama reachable,
+    use nomic-embed-text via Ollama.
+
+    Requirement 6.8: If no cloud embedding API key and Ollama unreachable,
+    raise EmbeddingUnavailableError to disable vector retrieval.
+    """
+    base_url = _get_ollama_base_url()
+    if _is_ollama_reachable(base_url):
+        from langchain_community.embeddings import OllamaEmbeddings
+        return OllamaEmbeddings(model="nomic-embed-text", base_url=base_url)
+    else:
+        raise EmbeddingUnavailableError(
+            "No embedding provider available. No cloud embedding API key (OpenAI or Gemini) "
+            "is configured and Ollama is unreachable at "
+            f"'{base_url}'. Vector-based memory retrieval is disabled until a provider becomes available."
+        )
+
+
 def get_embedding_model(model_type: str = "ollama"):
     configured_provider = (get_config("memory_embedding_provider", "") or "").strip().lower()
     provider = configured_provider or model_type
@@ -28,18 +76,20 @@ def get_embedding_model(model_type: str = "ollama"):
 
         key = get_config("openai_api_key") or os.getenv("OPENAI_API_KEY")
         if not key:
-            raise ValueError("OpenAI API key missing for embeddings")
+            # No OpenAI key: attempt local embedding fallback (Req 6.7, 6.8)
+            return _fallback_to_local_embedding()
         return OpenAIEmbeddings(model=configured_model or "text-embedding-3-small", api_key=key)
     elif provider == "gemini":
         from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
         key = get_config("gemini_api_key") or os.getenv("GOOGLE_API_KEY")
         if not key:
-            raise ValueError("Google API key missing for embeddings")
+            # No Gemini key: attempt local embedding fallback (Req 6.7, 6.8)
+            return _fallback_to_local_embedding()
         return GoogleGenerativeAIEmbeddings(model=configured_model or "models/embedding-001", google_api_key=key)
     elif provider in ("openrouter", "anthropic", "generic"):
-        # These providers don't offer embeddings; try OpenAI embeddings if key
-        # is available, otherwise fall through to Ollama.
+        # These providers don't offer embeddings; try cloud embedding keys first,
+        # then fall back to local Ollama embedding (Req 6.7, 6.8).
         openai_key = get_config("openai_api_key") or os.getenv("OPENAI_API_KEY")
         if openai_key:
             from langchain_openai import OpenAIEmbeddings
@@ -48,23 +98,18 @@ def get_embedding_model(model_type: str = "ollama"):
         if gemini_key:
             from langchain_google_genai import GoogleGenerativeAIEmbeddings
             return GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=gemini_key)
-        # Last resort: try Ollama but test connectivity first
-        base_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
-        try:
-            import urllib.request
-            urllib.request.urlopen(base_url, timeout=2)
-        except Exception:
-            raise ValueError(
-                f"No embedding provider available for model_type={model_type}. "
-                "Configure an OpenAI or Gemini API key, or ensure Ollama is running."
-            )
-        from langchain_community.embeddings import OllamaEmbeddings
-        return OllamaEmbeddings(model="nomic-embed-text", base_url=base_url)
+        # No cloud embedding key available: attempt local fallback
+        return _fallback_to_local_embedding()
     else:
         # Default: Ollama
+        base_url = _get_ollama_base_url()
+        if not _is_ollama_reachable(base_url) and not _has_cloud_embedding_key():
+            # Ollama explicitly requested but unreachable and no cloud fallback (Req 6.8)
+            raise EmbeddingUnavailableError(
+                f"Ollama is unreachable at '{base_url}' and no cloud embedding API key is configured. "
+                "Vector-based memory retrieval is disabled until a provider becomes available."
+            )
         from langchain_community.embeddings import OllamaEmbeddings
-
-        base_url = get_config("ollama_base_url") or os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
         return OllamaEmbeddings(model=configured_model or "nomic-embed-text", base_url=base_url)
 
 
@@ -81,6 +126,7 @@ class MemoryIndexer:
             "cache_hits": 0,
             "cache_misses": 0,
         }
+        self.disabled_reason: Optional[str] = None
         try:
             self.embedding_model = get_embedding_model(model_type)
             self.vectorstore = PGVector(
@@ -90,7 +136,13 @@ class MemoryIndexer:
                 use_jsonb=True,
             )
             self.enabled = True
+        except EmbeddingUnavailableError as e:
+            # Requirement 6.8: No embedding provider available, disable vector retrieval
+            self.disabled_reason = str(e)
+            print(f"Memory Indexer Disabled (no embedding provider): {e}")
+            self.enabled = False
         except Exception as e:
+            self.disabled_reason = f"PGVector initialization failed: {e}"
             print(f"Memory Indexer Disabled (PGVector initialization failed): {e}")
             self.enabled = False
 

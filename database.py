@@ -6,7 +6,12 @@ import math
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional, Dict, Tuple
-from sqlalchemy import create_engine, MetaData, Table as SATable, Column, Integer, String, DateTime, Boolean, select, inspect, text
+from sqlalchemy import (
+    create_engine, MetaData, Table as SATable, Column, Index,
+    Integer, BigInteger, String, Text, Float, DateTime, Boolean,
+    select, inspect, text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from cryptography.fernet import Fernet, InvalidToken
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from logging_utils import get_logger
@@ -24,28 +29,250 @@ def Table(*args, **kwargs):
     kwargs.setdefault("extend_existing", True)
     return SATable(*args, **kwargs)
 
-# LangChain SQLChatMessageHistory compatibility table.
-message_store = Table(
-    'message_store', metadata,
-    Column('id', Integer, primary_key=True),
-    Column('session_id', String),
-    Column('message', String)
-)
 
-session_metadata = Table(
-    'session_metadata', metadata,
-    Column('session_id', String, primary_key=True),
-    Column('category', String, default='Uncategorized'),
-    Column('pinned', Boolean, default=False),
-    Column('archived', Boolean, default=False),
-    Column('updated_at', String, default=lambda: datetime.now(timezone.utc).isoformat())
+# =============================================================================
+# AUTHORITATIVE SCHEMA DEFINITIONS
+# Each table is defined exactly once. No duplicate Table() declarations.
+# =============================================================================
+
+# --- Core tables ---
+
+users = Table(
+    "users",
+    metadata,
+    Column("username", String, primary_key=True),
+    Column("role", String, nullable=False, default="user"),
+    Column("password_hash", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
 
 app_configs = Table(
-    'app_configs', metadata,
-    Column('config_key', String, primary_key=True),
-    Column('config_value', String)
+    "app_configs",
+    metadata,
+    Column("config_key", String, primary_key=True),
+    Column("config_value", Text),
 )
+
+# --- Chat history ---
+
+chat_message_store = Table(
+    "chat_message_store",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("session_id", String, nullable=False),
+    Column("message", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+)
+
+Index("idx_chat_message_store_session", chat_message_store.c.session_id)
+
+# LangChain SQLChatMessageHistory compatibility table (legacy).
+message_store = Table(
+    "message_store",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("session_id", String),
+    Column("message", String),
+)
+
+session_metadata = Table(
+    "session_metadata",
+    metadata,
+    Column("session_id", String, primary_key=True),
+    Column("title", String(100), nullable=True),
+    Column("category", String, default="Uncategorized"),
+    Column("pinned", Boolean, default=False),
+    Column("archived", Boolean, default=False),
+    Column("owner_username", String, nullable=True),
+    Column("updated_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+    Column("task_suggestions", Text, nullable=True),
+)
+
+Index("idx_session_metadata_updated", session_metadata.c.updated_at.desc())
+Index("idx_session_metadata_owner", session_metadata.c.owner_username)
+
+# --- Memory system tables ---
+
+core_memories = Table(
+    "core_memories",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False, default="system"),
+    Column("fact", Text, nullable=False),
+    Column("category", String, default="general"),
+    Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+)
+
+memory_candidates = Table(
+    "memory_candidates",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("session_id", String, nullable=True),
+    Column("candidate_text", Text, nullable=False),
+    Column("edited_text", Text, nullable=True),
+    Column("source", String, default="auto"),
+    Column("source_message_id", String, nullable=True),
+    Column("source_offset", Integer, nullable=True),
+    Column("confidence", Float, default=0.5),
+    Column("status", String, nullable=False, default="pending"),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("reviewed_at", DateTime(timezone=True), nullable=True),
+)
+
+Index("idx_memory_candidates_user_status", memory_candidates.c.username, memory_candidates.c.status, memory_candidates.c.created_at)
+Index("idx_memory_candidates_session", memory_candidates.c.session_id)
+
+memory_summary_nodes = Table(
+    "memory_summary_nodes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("session_id", String, nullable=True),
+    Column("topic", String, nullable=True),
+    Column("summary", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+)
+
+Index("idx_memory_summary_user_topic", memory_summary_nodes.c.username, memory_summary_nodes.c.topic, memory_summary_nodes.c.created_at)
+
+memory_events = Table(
+    "memory_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("event_type", String, nullable=False),
+    Column("memory_id", Integer, nullable=True),
+    Column("details", JSONB, nullable=True),
+    Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+)
+
+Index("idx_memory_events_user", memory_events.c.username, memory_events.c.created_at)
+
+memory_embeddings = Table(
+    "memory_embeddings",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("memory_id", Integer, nullable=False),
+    # Note: vector(768) column is managed via raw SQL / pgvector extension
+    Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+)
+
+# --- Tasks ---
+
+tasks = Table(
+    "tasks",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("title", String(150), nullable=False),
+    Column("description", Text, nullable=True),
+    Column("status", String, default="todo"),
+    Column("priority", String, default="medium"),
+    Column("due_at", DateTime(timezone=True), nullable=True),
+    Column("session_id", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+    Column("updated_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+)
+
+Index("idx_tasks_user_status", tasks.c.username, tasks.c.status, tasks.c.due_at)
+
+# --- Audit ---
+
+audit_events = Table(
+    "audit_events",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("action_type", String, nullable=False),
+    Column("session_id", String, nullable=True),
+    Column("category", String, nullable=True),
+    Column("details", JSONB, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
+Index("idx_audit_events_user", audit_events.c.username, audit_events.c.created_at)
+Index("idx_audit_events_action", audit_events.c.action_type, audit_events.c.created_at)
+
+# --- Browser automation ---
+
+browser_profiles = Table(
+    "browser_profiles",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("domain", String, nullable=False),
+    Column("credential_encrypted", Text, nullable=True),
+    Column("approved", Boolean, default=False),
+    Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+)
+
+browser_sessions = Table(
+    "browser_sessions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("browser_id", String, nullable=True),
+    Column("status", String, default="idle"),
+    Column("current_url", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+    Column("updated_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+)
+
+automation_jobs = Table(
+    "automation_jobs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("job_type", String, nullable=False),
+    Column("status", String, default="queued"),
+    Column("request", JSONB, nullable=True),
+    Column("result", JSONB, nullable=True),
+    Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+
+# --- Terminal ---
+
+terminal_command_logs = Table(
+    "terminal_command_logs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False),
+    Column("command", Text, nullable=False),
+    Column("working_directory", String, nullable=True),
+    Column("exit_code", Integer, nullable=True),
+    Column("output_summary", Text, nullable=True),
+    Column("execution_ms", Integer, nullable=True),
+    Column("blocked", Boolean, default=False),
+    Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+)
+
+# --- Telegram ---
+
+telegram_users = Table(
+    "telegram_users",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("telegram_user_id", BigInteger, unique=True, nullable=False),
+    Column("username", String, nullable=False),
+    Column("display_name", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
+)
+
+# Legacy telegram_identities table (kept for backward compatibility)
+telegram_identities = Table(
+    "telegram_identities",
+    metadata,
+    Column("telegram_user_id", String, primary_key=True),
+    Column("telegram_chat_id", String, nullable=True),
+    Column("username", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
+)
+
+# --- Backup ---
 
 backup_profiles = Table(
     "backup_profiles",
@@ -94,10 +321,10 @@ restore_jobs = Table(
     Column("status", String, nullable=False, default="queued"),
     Column("current_step", String, nullable=True),
     Column("progress_percent", Integer, nullable=False, default=0),
-    Column("preflight_report", String, nullable=True),
+    Column("preflight_report", Text, nullable=True),
     Column("snapshot_path", String, nullable=True),
-    Column("result_summary", String, nullable=True),
-    Column("log_lines", String, nullable=True),
+    Column("result_summary", Text, nullable=True),
+    Column("log_lines", Text, nullable=True),
     Column("error_message", String, nullable=True),
     Column("started_at", DateTime(timezone=True), nullable=True),
     Column("finished_at", DateTime(timezone=True), nullable=True),
@@ -105,32 +332,14 @@ restore_jobs = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
 
-core_memories = Table(
-    'core_memories', metadata,
-    Column('id', Integer, primary_key=True, autoincrement=True),
-    Column('fact', String)
-)
-
-memory_candidates = Table(
-    "memory_candidates",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("username", String, nullable=False),
-    Column("session_id", String, nullable=True),
-    Column("candidate_text", String, nullable=False),
-    Column("source_message_id", String, nullable=True),
-    Column("source_offset", Integer, nullable=True),
-    Column("confidence", String, nullable=True),
-    Column("status", String, nullable=False, default="pending"),
-    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-    Column("reviewed_at", DateTime(timezone=True), nullable=True),
-)
+# --- Other existing tables (preserved) ---
 
 network_targets = Table(
-    'network_targets', metadata,
-    Column('id', Integer, primary_key=True, autoincrement=True),
-    Column('name', String),
-    Column('ip_address', String)
+    "network_targets",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String),
+    Column("ip_address", String),
 )
 
 media_assets = Table(
@@ -177,97 +386,6 @@ session_access = Table(
     Column("session_id", String, primary_key=True),
     Column("owner_username", String, nullable=False),
     Column("visibility", String, nullable=False, default="private"),
-    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-)
-
-tasks = Table(
-    "tasks",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("username", String, nullable=False),
-    Column("session_id", String, nullable=True),
-    Column("filename", String, nullable=False),
-    Column("url", String, nullable=False),
-    Column("mime_type", String, nullable=True),
-    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-)
-
-memory_groups = Table(
-    "memory_groups",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("name", String, nullable=False),
-    Column("description", String, nullable=True),
-    Column("created_by", String, nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-)
-
-memory_group_members = Table(
-    "memory_group_members",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("group_id", Integer, nullable=False),
-    Column("username", String, nullable=False),
-)
-
-memory_group_sessions = Table(
-    "memory_group_sessions",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("group_id", Integer, nullable=False),
-    Column("session_id", String, nullable=False),
-)
-
-tasks = Table(
-    'tasks', metadata,
-    Column('id', Integer, primary_key=True, autoincrement=True),
-    Column('title', String),
-    Column('description', String),
-    Column('status', String, default='todo'),
-    Column('priority', String, default='medium'),
-    Column('due_at', String),
-    Column('session_id', String),
-    Column('created_at', String, default=lambda: datetime.now(timezone.utc).isoformat()),
-    Column('updated_at', String, default=lambda: datetime.now(timezone.utc).isoformat())
-)
-
-users = Table(
-    "users",
-    metadata,
-    Column("username", String, primary_key=True),
-    Column("role", String, nullable=False, default="user"),
-    Column("password_hash", String, nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-)
-
-users = Table(
-    "users",
-    metadata,
-    Column("username", String, primary_key=True),
-    Column("role", String, nullable=False, default="user"),
-    Column("password_hash", String, nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-)
-
-users = Table(
-    "users",
-    metadata,
-    Column("username", String, primary_key=True),
-    Column("role", String, nullable=False, default="user"),
-    Column("password_hash", String, nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-    Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
-)
-
-telegram_identities = Table(
-    "telegram_identities",
-    metadata,
-    Column("telegram_user_id", String, primary_key=True),
-    Column("telegram_chat_id", String, nullable=True),
-    Column("username", String, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
@@ -387,13 +505,6 @@ def decrypt_config_value(value: Optional[str]) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-try:
-    engine = create_engine(DATABASE_URL)
-    metadata.create_all(engine)
-except Exception:
-    pass
 
 
 def get_sql_chat_history(session_id: str):
@@ -595,50 +706,144 @@ def get_duplicate_message_counts() -> Dict[str, int]:
         logger.exception("Error checking duplicate chat messages", exc_info=e)
         return {}
 
-def set_session_category(session_id: str, category: str):
-    return _upsert_session_metadata(session_id=session_id, category=category)
-
-
-def set_session_pinned(session_id: str, value: bool):
-    return _upsert_session_metadata(session_id=session_id, pinned=value)
-
-
-def set_session_archived(session_id: str, value: bool):
-    return _upsert_session_metadata(session_id=session_id, archived=value)
-
-
-def touch_session_updated_at(session_id: str):
-    return _upsert_session_metadata(session_id=session_id, touch_updated_at=True)
-
-
-def set_session_pinned(session_id: str, pinned: bool):
-    return _upsert_session_metadata(session_id, pinned=pinned, touch_updated_at=True)
-
-
-def set_session_archived(session_id: str, archived: bool):
-    return _upsert_session_metadata(session_id, archived=archived, touch_updated_at=True)
-
-
-def touch_session_updated_at(session_id: str):
-    return _upsert_session_metadata(session_id, touch_updated_at=True)
-
-
-def set_session_flags(session_id: str, pinned: bool = None, archived: bool = None):
+def _upsert_session_metadata(
+    session_id: str,
+    title: Optional[str] = None,
+    category: Optional[str] = None,
+    pinned: Optional[bool] = None,
+    archived: Optional[bool] = None,
+    owner_username: Optional[str] = None,
+    touch_updated_at: bool = False,
+) -> bool:
+    """Upsert session metadata with optional field updates."""
     if not engine:
         return False
     try:
         with engine.connect() as conn:
             _ensure_session_metadata_columns(conn)
-            upsert_stmt = text(
-                "INSERT INTO session_metadata (session_id, category, pinned, archived, updated_at) VALUES (:s, :c, FALSE, FALSE, :u) "
-                "ON CONFLICT (session_id) DO UPDATE SET category = EXCLUDED.category, updated_at = EXCLUDED.updated_at"
-            )
-            conn.execute(upsert_stmt, {"s": session_id, "c": category, "u": _now_iso()})
+            # Check if session exists
+            existing = conn.execute(
+                text("SELECT session_id FROM session_metadata WHERE session_id = :s"),
+                {"s": session_id},
+            ).first()
+            now = _now_iso()
+            if existing:
+                # Build dynamic UPDATE
+                updates = []
+                params: Dict[str, Any] = {"s": session_id}
+                if title is not None:
+                    updates.append("title = :title")
+                    params["title"] = title[:100] if title else None
+                if category is not None:
+                    updates.append("category = :category")
+                    params["category"] = category
+                if pinned is not None:
+                    updates.append("pinned = :pinned")
+                    params["pinned"] = pinned
+                if archived is not None:
+                    updates.append("archived = :archived")
+                    params["archived"] = archived
+                if owner_username is not None:
+                    updates.append("owner_username = :owner_username")
+                    params["owner_username"] = owner_username
+                if touch_updated_at or updates:
+                    updates.append("updated_at = :updated_at")
+                    params["updated_at"] = now
+                if updates:
+                    stmt = text(
+                        f"UPDATE session_metadata SET {', '.join(updates)} WHERE session_id = :s"
+                    )
+                    conn.execute(stmt, params)
+            else:
+                # INSERT new row
+                conn.execute(
+                    text(
+                        "INSERT INTO session_metadata "
+                        "(session_id, title, category, pinned, archived, owner_username, updated_at) "
+                        "VALUES (:s, :title, :category, :pinned, :archived, :owner_username, :updated_at)"
+                    ),
+                    {
+                        "s": session_id,
+                        "title": (title[:100] if title else None),
+                        "category": category or "Uncategorized",
+                        "pinned": pinned if pinned is not None else False,
+                        "archived": archived if archived is not None else False,
+                        "owner_username": owner_username,
+                        "updated_at": now,
+                    },
+                )
             conn.commit()
             return True
     except Exception as e:
-        logger.warning(f"Error setting category: {e}")
+        logger.warning(f"Error upserting session metadata: {e}")
         return False
+
+
+def create_session_metadata(
+    session_id: str,
+    title: Optional[str] = None,
+    category: Optional[str] = "Uncategorized",
+    owner_username: Optional[str] = None,
+) -> bool:
+    """Create a new session metadata entry."""
+    return _upsert_session_metadata(
+        session_id=session_id,
+        title=title,
+        category=category,
+        owner_username=owner_username,
+        touch_updated_at=True,
+    )
+
+
+def update_session_metadata(
+    session_id: str,
+    title: Optional[str] = None,
+    category: Optional[str] = None,
+    pinned: Optional[bool] = None,
+    archived: Optional[bool] = None,
+) -> bool:
+    """Update an existing session metadata entry."""
+    return _upsert_session_metadata(
+        session_id=session_id,
+        title=title,
+        category=category,
+        pinned=pinned,
+        archived=archived,
+        touch_updated_at=True,
+    )
+
+
+def get_session_metadata(session_id: str) -> Optional[Dict[str, Any]]:
+    """Get session metadata by session_id."""
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT session_id, title, category, pinned, archived, owner_username, updated_at "
+                    "FROM session_metadata WHERE session_id = :s"
+                ),
+                {"s": session_id},
+            ).first()
+            if not row:
+                return None
+            return {
+                "session_id": row[0],
+                "title": row[1],
+                "category": row[2] or "Uncategorized",
+                "pinned": bool(row[3]),
+                "archived": bool(row[4]),
+                "owner_username": row[5],
+                "updated_at": row[6],
+            }
+    except Exception as e:
+        logger.warning(f"Error getting session metadata: {e}")
+        return None
+
+
+def set_session_category(session_id: str, category: str):
+    return _upsert_session_metadata(session_id=session_id, category=category, touch_updated_at=True)
 
 
 def set_session_pinned(session_id: str, pinned: bool):
@@ -1433,17 +1638,17 @@ def delete_network_target(target_id: int):
         return False
 
 
-def create_task(title: str, description: str = "", priority: str = "medium", due_at: str = None, session_id: str = None):
+def create_task(title: str, description: str = "", priority: str = "medium", due_at: str = None, session_id: str = None, username: str = None):
     if not engine:
         return None
     try:
         with engine.connect() as conn:
             now = _now_iso()
             stmt = text(
-                "INSERT INTO tasks (title, description, status, priority, due_at, session_id, created_at, updated_at) "
-                "VALUES (:t, :d, 'todo', :p, :due, :sid, :c, :u) RETURNING id"
+                "INSERT INTO tasks (username, title, description, status, priority, due_at, session_id, created_at, updated_at) "
+                "VALUES (:u, :t, :d, 'todo', :p, :due, :sid, :c, :upd) RETURNING id"
             )
-            res = conn.execute(stmt, {"t": title, "d": description, "p": priority, "due": due_at, "sid": session_id, "c": now, "u": now})
+            res = conn.execute(stmt, {"u": username or "system", "t": title, "d": description, "p": priority, "due": due_at, "sid": session_id, "c": now, "upd": now})
             task_id = res.scalar()
             conn.commit()
             return task_id
@@ -1452,22 +1657,72 @@ def create_task(title: str, description: str = "", priority: str = "medium", due
         return None
 
 
-def list_tasks(status: str = None):
+def list_tasks(status: str = None, username: str = None, priority: str = None,
+               due_from: str = None, due_to: str = None, search: str = None,
+               limit: int = 20, offset: int = 0):
     if not engine:
-        return []
+        return [], 0
     try:
         with engine.connect() as conn:
-            query = select(tasks)
+            conditions = []
+            params: Dict[str, Any] = {}
+            if username:
+                conditions.append("username = :username")
+                params["username"] = username
             if status:
-                query = query.where(tasks.c.status == status)
-            rows = conn.execute(query).fetchall()
-            return [dict(r._mapping) for r in rows]
+                conditions.append("status = :status")
+                params["status"] = status
+            if priority:
+                conditions.append("priority = :priority")
+                params["priority"] = priority
+            if due_from:
+                conditions.append("due_at >= :due_from")
+                params["due_from"] = due_from
+            if due_to:
+                conditions.append("due_at <= :due_to")
+                params["due_to"] = due_to
+            if search:
+                conditions.append("(LOWER(title) LIKE :search OR LOWER(COALESCE(description, '')) LIKE :search)")
+                params["search"] = f"%{search.lower()}%"
+
+            where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+
+            # Get total count
+            count_stmt = text(f"SELECT COUNT(*) FROM tasks{where_clause}")
+            total = conn.execute(count_stmt, params).scalar() or 0
+
+            # Get paginated results
+            params["limit"] = limit
+            params["offset"] = offset
+            query_stmt = text(
+                f"SELECT * FROM tasks{where_clause} ORDER BY created_at DESC LIMIT :limit OFFSET :offset"
+            )
+            rows = conn.execute(query_stmt, params).fetchall()
+            return [dict(r._mapping) for r in rows], total
     except Exception as e:
         logger.warning(f"Error listing tasks: {e}")
-        return []
+        return [], 0
 
 
-def update_task(task_id: int, updates: dict):
+def get_task_by_id(task_id: int, username: str = None):
+    """Get a single task by ID, optionally scoped to a username."""
+    if not engine:
+        return None
+    try:
+        with engine.connect() as conn:
+            if username:
+                stmt = text("SELECT * FROM tasks WHERE id = :id AND username = :username")
+                row = conn.execute(stmt, {"id": task_id, "username": username}).first()
+            else:
+                stmt = text("SELECT * FROM tasks WHERE id = :id")
+                row = conn.execute(stmt, {"id": task_id}).first()
+            return dict(row._mapping) if row else None
+    except Exception as e:
+        logger.warning(f"Error getting task: {e}")
+        return None
+
+
+def update_task(task_id: int, updates: dict, username: str = None):
     if not engine:
         return False
     try:
@@ -1478,23 +1733,30 @@ def update_task(task_id: int, updates: dict):
         safe_updates["updated_at"] = _now_iso()
         set_clause = ", ".join([f"{k} = :{k}" for k in safe_updates.keys()])
         safe_updates["id"] = task_id
+        where_clause = "id = :id"
+        if username:
+            safe_updates["username"] = username
+            where_clause += " AND username = :username"
         with engine.connect() as conn:
-            conn.execute(text(f"UPDATE tasks SET {set_clause} WHERE id = :id"), safe_updates)
+            result = conn.execute(text(f"UPDATE tasks SET {set_clause} WHERE {where_clause}"), safe_updates)
             conn.commit()
-        return True
+            return result.rowcount > 0
     except Exception as e:
         logger.warning(f"Error updating task: {e}")
         return False
 
 
-def delete_task(task_id: int):
+def delete_task(task_id: int, username: str = None):
     if not engine:
         return False
     try:
         with engine.connect() as conn:
-            conn.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_id})
+            if username:
+                result = conn.execute(text("DELETE FROM tasks WHERE id = :id AND username = :username"), {"id": task_id, "username": username})
+            else:
+                result = conn.execute(text("DELETE FROM tasks WHERE id = :id"), {"id": task_id})
             conn.commit()
-            return True
+            return result.rowcount > 0
     except Exception as e:
         logger.warning(f"Error deleting task: {e}")
         return False
@@ -4174,3 +4436,60 @@ def create_skill_version(skill_id: int, instructions: str, trigger_patterns: Lis
             "quality_score": max(0.0, min(float(quality_score), 1.0)),
         })
     return int(row[0]) if row else None
+
+
+# ── Chat Message Metadata Persistence ─────────────────────────────────────────
+
+
+def persist_chat_message_metadata(
+    session_id: str,
+    username: str,
+    user_message: str,
+    assistant_response: str,
+    model_provider: str,
+    model_name: Optional[str] = None,
+    memory_retrieval_metadata: Optional[Dict[str, Any]] = None,
+    web_search_metadata: Optional[Dict[str, Any]] = None,
+    tool_action_metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[int]:
+    """
+    Persist full message metadata for a chat turn within a session.
+
+    Stores user message, assistant response, timestamp, model provider,
+    memory retrieval metadata, web search metadata, and tool/action metadata
+    as a JSONB record in chat_message_store.
+
+    Returns the inserted record ID or None on failure.
+    """
+    if not engine:
+        return None
+    try:
+        metadata_record = {
+            "type": "turn_metadata",
+            "username": username,
+            "user_message": user_message[:10000],  # cap for safety
+            "assistant_response": assistant_response[:50000],  # cap for safety
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "model_provider": model_provider,
+            "model_name": model_name,
+            "memory_retrieval": memory_retrieval_metadata or {},
+            "web_search": web_search_metadata or {},
+            "tool_action": tool_action_metadata or {},
+        }
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    f"INSERT INTO {CHAT_HISTORY_TABLE} (session_id, message, created_at) "
+                    "VALUES (:session_id, :message, NOW()) RETURNING id"
+                ),
+                {
+                    "session_id": session_id,
+                    "message": json.dumps(metadata_record),
+                },
+            )
+            row = result.first()
+            conn.commit()
+            return int(row[0]) if row else None
+    except Exception as e:
+        logger.warning(f"Error persisting chat message metadata: {e}")
+        return None

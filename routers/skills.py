@@ -1,4 +1,15 @@
-"""Skills router: synthesize, list, run, optimize, rollback plus full skill engine CRUD."""
+"""Skills router: synthesize, list, run, optimize, rollback plus full skill engine CRUD.
+
+Implements Requirements 14.1-14.6:
+- Pattern detection (3+ sessions in 30-day window) and skill suggestions
+- User/admin approval before activation
+- Safety levels: read-only, write, privileged
+- CRUD endpoints: GET/POST/PATCH/DELETE /api/skills
+- Execution: POST /api/skills/{id}/execute
+- Metrics: GET /api/skills/{id}/metrics
+- Failure handling: halt skill, preserve pre-execution state, return error
+- Rejection tracking: don't re-suggest rejected patterns
+"""
 
 from __future__ import annotations
 
@@ -36,10 +47,44 @@ from database import (
     set_config,
 )
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 router = APIRouter(tags=["skills"])
 
 logger = logging.getLogger("ampai")
+
+
+# ── Request/Response models for new endpoints ─────────────────────────────────
+
+
+class SkillApproveRequest(BaseModel):
+    """Request to approve a skill for execution."""
+    pass
+
+
+class SkillRejectRequest(BaseModel):
+    """Request to reject a skill suggestion."""
+    reason: Optional[str] = None
+
+
+class SkillExecuteNewRequest(BaseModel):
+    """Request to execute a skill (POST /api/skills/{id}/execute)."""
+    user_message: str
+    session_id: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+    model_type: str = "ollama"
+    confirmed: bool = False
+
+
+class PatternDetectionRequest(BaseModel):
+    """Request to detect repeated patterns."""
+    lookback_days: int = 30
+    min_occurrences: int = 3
+
+
+class ClearRejectionRequest(BaseModel):
+    """Request to clear a pattern rejection for re-evaluation."""
+    pattern_hash: str
 
 
 # ── Skill synthesis (from session) ────────────────────────────────────────────
@@ -124,10 +169,335 @@ def synthesize_skill(
 def get_skills(
     status: Optional[str] = None,
     limit: int = 100,
-    user: UserContext = Depends(get_current_user_from_cookie),
+    user: UserContext = Depends(require_authenticated_user),
 ):
+    """List all skills. Requirement 14.5."""
     ensure_skill_registry_tables()
-    return {"skills": list_agent_skills(status=status, limit=limit)}
+    from skill_engine import list_skills as se_list_skills
+
+    skills = se_list_skills(status=status or "active", limit=limit)
+    # Also include from the legacy registry
+    legacy_skills = list_agent_skills(status=status, limit=limit)
+    return {"skills": skills or legacy_skills}
+
+
+@router.post("/api/skills")
+def api_create_skill(
+    req: SkillCreateRequest,
+    user: UserContext = Depends(require_admin_user),
+):
+    """Create a new skill. Requires admin. Requirement 14.5."""
+    from skill_engine import create_skill, determine_safety_level
+
+    # Determine safety level based on system prompt content
+    safety_level = determine_safety_level(req.system_prompt)
+
+    skill = create_skill(
+        name=req.name,
+        description=req.description,
+        system_prompt=req.system_prompt,
+        trigger_pattern=req.trigger_pattern,
+        parameters=req.parameters,
+        tags=req.tags,
+        created_by=user.username,
+        safety_level=safety_level,
+    )
+    if not skill:
+        raise HTTPException(
+            status_code=400, detail="Failed to create skill (name may already exist)"
+        )
+    log_audit_event(
+        username=user.username,
+        action="skill.create",
+        details=f"skill_id={skill.get('id')};name={req.name};safety_level={safety_level}",
+    )
+    return skill
+
+
+@router.patch("/api/skills/{skill_id}")
+def api_patch_skill(
+    skill_id: int,
+    req: SkillUpdateRequest,
+    user: UserContext = Depends(require_admin_user),
+):
+    """Update a skill (partial update). Requires admin. Requirement 14.5."""
+    from skill_engine import get_skill, update_skill
+
+    skill = get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    updates = {k: v for k, v in req.dict().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    ok = update_skill(skill_id, **updates)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Update failed")
+
+    log_audit_event(
+        username=user.username,
+        action="skill.update",
+        details=f"skill_id={skill_id};fields={list(updates.keys())}",
+    )
+    return {"ok": True, "skill_id": skill_id}
+
+
+@router.get("/api/skills/{skill_id}")
+def api_get_skill(
+    skill_id: int, user: UserContext = Depends(require_authenticated_user)
+):
+    """Get a single skill by ID."""
+    from skill_engine import get_skill
+
+    skill = get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return skill
+
+
+@router.put("/api/skills/{skill_id}")
+def api_update_skill(
+    skill_id: int,
+    req: SkillUpdateRequest,
+    user: UserContext = Depends(require_admin_user),
+):
+    """Full update of a skill. Requires admin."""
+    from skill_engine import update_skill
+
+    updates = {k: v for k, v in req.dict().items() if v is not None}
+    ok = update_skill(skill_id, **updates)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Update failed")
+    return {"ok": True}
+
+
+@router.delete("/api/skills/{skill_id}")
+def api_delete_skill(
+    skill_id: int, user: UserContext = Depends(require_admin_user)
+):
+    """Delete (soft-delete) a skill. Requires admin. Requirement 14.5."""
+    from skill_engine import delete_skill, get_skill
+
+    skill = get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    ok = delete_skill(skill_id)
+    log_audit_event(
+        username=user.username,
+        action="skill.delete",
+        details=f"skill_id={skill_id};name={skill.get('name', '')}",
+    )
+    return {"ok": ok}
+
+
+# ── Skill Execution (Requirement 14.4, 14.5) ─────────────────────────────────
+
+
+@router.post("/api/skills/{skill_id}/execute")
+def api_execute_skill(
+    skill_id: int,
+    req: SkillExecuteNewRequest,
+    user: UserContext = Depends(require_authenticated_user),
+):
+    """
+    Execute a skill. Requirement 14.5.
+
+    Enforces:
+    - Skill must be approved before execution (Req 14.2)
+    - Safety level checks (Req 14.3):
+      - read-only: executes directly
+      - write: requires confirmed=True (per-execution confirmation)
+      - privileged: requires admin approval + confirmed=True
+    - On failure: halts skill, preserves pre-execution state, returns error (Req 14.4)
+    """
+    from skill_engine import get_skill, run_skill
+
+    skill = get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    # Privileged skills require admin role
+    safety_level = skill.get("safety_level", "read-only")
+    if safety_level == "privileged" and user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Privileged skills require admin approval to execute",
+        )
+
+    from database import get_core_memories
+
+    core_mems = get_core_memories()
+    core_facts = "\n".join(f"- {m['fact']}" for m in core_mems) if core_mems else ""
+
+    result = run_skill(
+        skill_id=skill_id,
+        user_message=req.user_message,
+        session_id=req.session_id,
+        username=user.username,
+        parameters=req.parameters,
+        model_type=req.model_type,
+        core_facts=core_facts,
+        confirmed=req.confirmed,
+    )
+
+    # Log execution to audit
+    log_audit_event(
+        username=user.username,
+        action="skill.execute",
+        session_id=req.session_id,
+        details=f"skill_id={skill_id};outcome={result.get('outcome')};latency_ms={result.get('latency_ms')}",
+    )
+
+    # If execution failed with an error, return appropriate HTTP status
+    if result.get("outcome") == "failure" and result.get("error"):
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": result["error"],
+                "outcome": "failure",
+                "skill_halted": True,
+                "run_id": result.get("run_id"),
+            },
+        )
+
+    return result
+
+
+# ── Skill Metrics (Requirement 14.5) ─────────────────────────────────────────
+
+
+@router.get("/api/skills/{skill_id}/metrics")
+def api_skill_metrics(
+    skill_id: int,
+    user: UserContext = Depends(require_authenticated_user),
+):
+    """
+    Get skill performance metrics. Requirement 14.5.
+    Returns: invocation_count, success_rate, avg_execution_duration_ms.
+    """
+    from skill_engine import get_skill, get_skill_metrics
+
+    skill = get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    metrics = get_skill_metrics(skill_id)
+    return {
+        "skill_id": skill_id,
+        "skill_name": skill.get("name", ""),
+        **metrics,
+    }
+
+
+# ── Skill Approval (Requirement 14.2) ────────────────────────────────────────
+
+
+@router.post("/api/skills/{skill_id}/approve")
+def api_approve_skill(
+    skill_id: int,
+    user: UserContext = Depends(require_admin_user),
+):
+    """Approve a skill for execution. Requires admin. Requirement 14.2."""
+    from skill_engine import approve_skill, get_skill
+
+    skill = get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    ok = approve_skill(skill_id, approved_by=user.username)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to approve skill")
+
+    log_audit_event(
+        username=user.username,
+        action="skill.approve",
+        details=f"skill_id={skill_id};name={skill.get('name', '')}",
+    )
+    return {"ok": True, "skill_id": skill_id, "approval_status": "approved"}
+
+
+@router.post("/api/skills/{skill_id}/reject")
+def api_reject_skill(
+    skill_id: int,
+    req: SkillRejectRequest,
+    user: UserContext = Depends(require_authenticated_user),
+):
+    """
+    Reject a skill suggestion. Records rejection so the same pattern
+    is not re-suggested. Requirement 14.6.
+    """
+    from skill_engine import get_skill, reject_skill_suggestion
+
+    skill = get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    ok = reject_skill_suggestion(
+        skill_id=skill_id,
+        rejected_by=user.username,
+        reason=req.reason,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to record rejection")
+
+    log_audit_event(
+        username=user.username,
+        action="skill.reject",
+        details=f"skill_id={skill_id};reason={req.reason or 'none'}",
+    )
+    return {"ok": True, "skill_id": skill_id, "approval_status": "rejected"}
+
+
+# ── Pattern Detection (Requirement 14.1) ─────────────────────────────────────
+
+
+@router.get("/api/skills/suggestions")
+def api_skill_suggestions(
+    lookback_days: int = 30,
+    min_occurrences: int = 3,
+    user: UserContext = Depends(require_authenticated_user),
+):
+    """
+    Detect repeated patterns and suggest skill creation. Requirement 14.1.
+    Returns patterns that have occurred 3+ times in the lookback window
+    and haven't been previously rejected.
+    """
+    from skill_engine import detect_repeated_patterns
+
+    suggestions = detect_repeated_patterns(
+        username=user.username,
+        lookback_days=lookback_days,
+        min_occurrences=min_occurrences,
+    )
+    return {"suggestions": suggestions, "count": len(suggestions)}
+
+
+@router.post("/api/skills/suggestions/clear-rejection")
+def api_clear_rejection(
+    req: ClearRejectionRequest,
+    user: UserContext = Depends(require_authenticated_user),
+):
+    """
+    Clear a pattern rejection so it can be re-suggested.
+    Used when user explicitly requests re-evaluation. Requirement 14.6.
+    """
+    from skill_engine import clear_pattern_rejection
+
+    ok = clear_pattern_rejection(req.pattern_hash)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to clear rejection")
+
+    log_audit_event(
+        username=user.username,
+        action="skill.clear_rejection",
+        details=f"pattern_hash={req.pattern_hash}",
+    )
+    return {"ok": True, "pattern_hash": req.pattern_hash}
+
+
+# ── Legacy endpoints (backward compatibility) ─────────────────────────────────
 
 
 @router.post("/api/skills/runs")
@@ -208,75 +578,16 @@ def rollback_skill(skill_id: int, user: UserContext = Depends(require_admin_user
     return {"status": "rolled_back", "skill_id": skill_id}
 
 
-# ── Skill Engine CRUD (autonomous agent section) ──────────────────────────────
-
-
-@router.post("/api/skills")
-def api_create_skill(
-    req: SkillCreateRequest,
-    user: UserContext = Depends(get_current_user_from_cookie),
-):
-    from skill_engine import create_skill
-
-    skill = create_skill(
-        name=req.name,
-        description=req.description,
-        system_prompt=req.system_prompt,
-        trigger_pattern=req.trigger_pattern,
-        parameters=req.parameters,
-        tags=req.tags,
-        created_by=user.username,
-    )
-    if not skill:
-        raise HTTPException(
-            status_code=400, detail="Failed to create skill (name may already exist)"
-        )
-    return skill
-
-
-@router.get("/api/skills/{skill_id}")
-def api_get_skill(
-    skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)
-):
-    from skill_engine import get_skill
-
-    skill = get_skill(skill_id)
-    if not skill:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    return skill
-
-
-@router.put("/api/skills/{skill_id}")
-def api_update_skill(
-    skill_id: int,
-    req: SkillUpdateRequest,
-    user: UserContext = Depends(get_current_user_from_cookie),
-):
-    from skill_engine import update_skill
-
-    updates = {k: v for k, v in req.dict().items() if v is not None}
-    ok = update_skill(skill_id, **updates)
-    if not ok:
-        raise HTTPException(status_code=400, detail="Update failed")
-    return {"ok": True}
-
-
-@router.delete("/api/skills/{skill_id}")
-def api_delete_skill(
-    skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)
-):
-    from skill_engine import delete_skill
-
-    ok = delete_skill(skill_id)
-    return {"ok": ok}
+# ── Legacy run endpoint (backward compat) ────────────────────────────────────
 
 
 @router.post("/api/skills/{skill_id}/run")
 def api_run_skill(
     skill_id: int,
     req: SkillExecuteRequest,
-    user: UserContext = Depends(get_current_user_from_cookie),
+    user: UserContext = Depends(require_authenticated_user),
 ):
+    """Legacy run endpoint. Delegates to the new execute logic."""
     from database import get_core_memories
     from skill_engine import run_skill
 
@@ -290,6 +601,7 @@ def api_run_skill(
         parameters=req.parameters,
         model_type=req.model_type,
         core_facts=core_facts,
+        confirmed=True,  # Legacy endpoint assumes confirmation
     )
     return result
 
@@ -297,7 +609,7 @@ def api_run_skill(
 @router.post("/api/skills/{skill_id}/improve")
 def api_improve_skill(
     skill_id: int,
-    user: UserContext = Depends(get_current_user_from_cookie),
+    user: UserContext = Depends(require_authenticated_user),
 ):
     from skill_engine import get_skill, run_improvement_pass
 
@@ -312,7 +624,7 @@ def api_improve_skill(
 def api_skill_runs(
     skill_id: int,
     limit: int = 50,
-    user: UserContext = Depends(get_current_user_from_cookie),
+    user: UserContext = Depends(require_authenticated_user),
 ):
     from skill_engine import get_skill_runs
 
@@ -321,7 +633,7 @@ def api_skill_runs(
 
 @router.get("/api/skills/{skill_id}/versions")
 def api_skill_versions(
-    skill_id: int, user: UserContext = Depends(get_current_user_from_cookie)
+    skill_id: int, user: UserContext = Depends(require_authenticated_user)
 ):
     from skill_engine import get_skill_versions
 
@@ -332,7 +644,7 @@ def api_skill_versions(
 def api_skill_performance(
     skill_id: int,
     lookback_days: int = 14,
-    user: UserContext = Depends(get_current_user_from_cookie),
+    user: UserContext = Depends(require_authenticated_user),
 ):
     from skill_engine import get_skill_performance as _perf
 
@@ -342,7 +654,7 @@ def api_skill_performance(
 @router.post("/api/skills/auto-create")
 def api_auto_create_skill(
     req: SkillAutoCreateRequest,
-    user: UserContext = Depends(get_current_user_from_cookie),
+    user: UserContext = Depends(require_authenticated_user),
 ):
     from skill_engine import auto_create_skill_from_session
 

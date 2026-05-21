@@ -6,8 +6,8 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
 
 ## Tasks
 
-- [ ] 1. Docker Environment and Service Orchestration
-  - [ ] 1.1 Update docker-compose.yml with renamed services and health checks
+- [x] 1. Docker Environment and Service Orchestration
+  - [x] 1.1 Update docker-compose.yml with renamed services and health checks
     - Rename `db` → `agent_postgres` (image: pgvector/pgvector:pg16, container: ampai-agent-postgres)
     - Rename `redis` → `agent_redis` (image: redis:7-alpine, container: ampai-agent-redis)
     - Add health checks: pg_isready (interval 5s, timeout 5s, retries 20), redis-cli ping (interval 5s, timeout 3s, retries 20)
@@ -16,19 +16,19 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Add volumes: agent_postgres_data, agent_redis_data, ampai_data
     - _Requirements: 1.1, 1.2, 1.3, 1.4_
 
-  - [ ] 1.2 Create .env.example with all documented variables
+  - [x] 1.2 Create .env.example with all documented variables
     - List every environment variable: DATABASE_URL, REDIS_URL, JWT_SECRET, AMPAI_ENV, AMPAI_DEFAULT_ADMIN_USERNAME, AMPAI_DEFAULT_ADMIN_PASSWORD, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, CONFIG_ENCRYPTION_KEY, OLLAMA_BASE_URL, ALLOWED_ORIGINS, TELEGRAM_BOT_TOKEN, WEB_SEARCH_PROVIDER, BROWSER_AUTOMATION_ENABLED, BROWSER_HEADLESS, TERMINAL_TOOLS_ENABLED, TERMINAL_REQUIRE_CONFIRMATION
     - Include description, example/default value, and required/optional status for each
     - Mark placeholder values clearly as needing replacement
     - _Requirements: 1.6, 17.3_
 
-  - [ ] 1.3 Update docker-entrypoint.sh with main.py path validation
+  - [x] 1.3 Update docker-entrypoint.sh with main.py path validation
     - Check for main.py existence at expected paths
     - Exit with non-zero status and log error if not found
     - _Requirements: 1.5_
 
-- [ ] 2. Configuration Validation and Security
-  - [ ] 2.1 Create config_validator.py with unsafe default detection
+- [x] 2. Configuration Validation and Security
+  - [x] 2.1 Create config_validator.py with unsafe default detection
     - Implement UNSAFE_DEFAULTS dict for JWT_SECRET, AMPAI_DEFAULT_ADMIN_PASSWORD, POSTGRES_PASSWORD
     - Detect production mode from AMPAI_ENV (case-insensitive "production" or "prod")
     - In production: terminate with non-zero exit code and error log for unsafe defaults
@@ -36,19 +36,19 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Ensure validation runs before any network listener binds
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6_
 
-  - [ ] 2.2 Integrate config_validator into main.py startup sequence
+  - [x] 2.2 Integrate config_validator into main.py startup sequence
     - Call validate_config() before uvicorn bind in the startup lifecycle
     - Ensure no requests are served while configuration is unsafe
     - _Requirements: 2.6_
 
-- [ ] 3. Database Schema Consolidation and Migration
-  - [ ] 3.1 Refactor database.py to consolidate all table definitions
+- [x] 3. Database Schema Consolidation and Migration
+  - [x] 3.1 Refactor database.py to consolidate all table definitions
     - Remove duplicate Table() declarations across the codebase
     - Define single authoritative schema: users, app_configs, chat_message_store, session_metadata, core_memories, memory_candidates, memory_summary_nodes, memory_events, memory_embeddings, tasks, audit_events, browser_profiles, browser_sessions, automation_jobs, terminal_command_logs, telegram_users
     - Add all performance indexes per design (memory_candidates, memory_summary_nodes, memory_events, tasks, chat_message_store, session_metadata, audit_events)
     - _Requirements: 3.1, 3.3, 3.4_
 
-  - [ ] 3.2 Create migration_runner.py with safe additive-only migrations
+  - [x] 3.2 Create migration_runner.py with safe additive-only migrations
     - Implement MigrationRunner class with register(), run_pending(), _get_applied_versions(), _mark_applied()
     - Create _migrations tracking table for applied versions
     - Use CREATE TABLE IF NOT EXISTS and ADD COLUMN IF NOT EXISTS patterns only
@@ -57,7 +57,7 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Implement connection retry: 3 attempts with 2-second delay
     - _Requirements: 3.1, 3.2, 3.5, 3.6, 3.7_
 
-  - [ ] 3.3 Integrate migration_runner into application startup
+  - [x] 3.3 Integrate migration_runner into application startup
     - Call MigrationRunner.run_pending() after config validation but before router registration
     - Handle timeout and connection errors gracefully
     - _Requirements: 3.6, 3.7_
@@ -68,11 +68,11 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - All migrations use IF NOT EXISTS guards
     - **Validates: Requirements 3.1, 3.5**
 
-- [ ] 4. Checkpoint - Ensure infrastructure tests pass
+- [x] 4. Checkpoint - Ensure infrastructure tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 5. Core Audit Logger
-  - [ ] 5.1 Create core/audit.py with AuditLogger class
+- [x] 5. Core Audit Logger
+  - [x] 5.1 Create core/audit.py with AuditLogger class
     - Implement append-only insert into audit_events table
     - Store: username, action_type, session_id, category, details (max 2000 chars), server-generated timestamp
     - Implement query() with filters: action_type, username, date_from, date_to, session_id, limit (max 1000), offset
@@ -86,8 +86,8 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - No security-sensitive operation completes without an audit record attempt
     - **Validates: Requirements 15.1, 15.2, 15.3**
 
-- [ ] 6. Memory Service and Endpoints
-  - [ ] 6.1 Create services/memory_service.py as unified memory facade
+- [x] 6. Memory Service and Endpoints
+  - [x] 6.1 Create services/memory_service.py as unified memory facade
     - Implement MemoryService class wrapping memory_indexer, memory_curator, memory_persistence
     - Implement save_chat_turn(): persist message and trigger candidate evaluation (importance > 0.15 → pending)
     - Implement capture_candidate(): create memory candidate with importance score
@@ -99,7 +99,7 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Return retrieval metadata: retrieved_count, context_chars, pipeline, latency_ms
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 5.9, 5.10, 5.11_
 
-  - [ ] 6.2 Extend routers/memory.py with full memory endpoints
+  - [x] 6.2 Extend routers/memory.py with full memory endpoints
     - GET /api/memory/core: list core memories
     - POST /api/memory/core: add explicit memory
     - DELETE /api/memory/core/{id}: delete/forget memory (return error if not found)
@@ -121,8 +121,8 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - MemoryService truncates and compresses results before returning
     - **Validates: Requirements 5.3, 5.10**
 
-- [ ] 7. Chat History and Session Management
-  - [ ] 7.1 Create routers/sessions.py with session CRUD endpoints
+- [x] 7. Chat History and Session Management
+  - [x] 7.1 Create routers/sessions.py with session CRUD endpoints
     - GET /api/sessions: list sessions paginated (default 40), sorted by pinned first then updated_at DESC
     - POST /api/sessions: create new session with optional title and category
     - PATCH /api/sessions/{id}: update title (max 100 chars), category, pinned, archived
@@ -131,7 +131,7 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Enforce user ownership checks on all endpoints
     - _Requirements: 4.1, 4.2, 4.5, 4.6_
 
-  - [ ] 7.2 Extend routers/chat.py to persist full message metadata
+  - [x] 7.2 Extend routers/chat.py to persist full message metadata
     - Save user message, assistant response, timestamp, model provider, memory retrieval metadata, web search metadata, and tool/action metadata per session
     - Accept extended ChatRequest payload: session_id, message, model_type, model_name, memory_mode, memory_top_k, memory_recency_bias, memory_category_filter, use_web_search, enable_browser_tools, enable_terminal_tools, chat_output_mode, attachments
     - _Requirements: 4.4, 12.2_
@@ -142,8 +142,8 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - All session endpoints enforce ownership checks
     - **Validates: Requirements 4.5, 4.6**
 
-- [ ] 8. Model Provider Routing
-  - [ ] 8.1 Extend routers/models_router.py with health and options endpoints
+- [x] 8. Model Provider Routing
+  - [x] 8.1 Extend routers/models_router.py with health and options endpoints
     - GET /api/models/options: return available providers filtered by local_only_mode
     - GET /api/models/health: return JSON per provider with name, ok boolean, latency_ms
     - Implement fallback chain: Ollama → OpenRouter → OpenAI → Gemini → Anthropic → Generic → AmpAI_Default
@@ -151,16 +151,16 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Handle cloud fallback: skip providers without configured API keys
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6_
 
-  - [ ] 8.2 Implement local embedding fallback in memory_indexer
+  - [x] 8.2 Implement local embedding fallback in memory_indexer
     - If no cloud embedding API key configured and Ollama reachable: use nomic-embed-text via Ollama
     - If no cloud embedding API key and Ollama unreachable: report error, disable vector retrieval
     - _Requirements: 6.7, 6.8_
 
-- [ ] 9. Checkpoint - Ensure core services tests pass
+- [x] 9. Checkpoint - Ensure core services tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 10. Web Search Service
-  - [ ] 10.1 Create services/web_search_service.py with multi-provider support
+- [x] 10. Web Search Service
+  - [x] 10.1 Create services/web_search_service.py with multi-provider support
     - Implement WebSearchService with provider order: DuckDuckGo (default, no key), Tavily, SerpAPI, Brave Search
     - Implement search(): try providers in order until one succeeds
     - Implement summarize_for_context(): compress results to char_budget (1200 chars)
@@ -168,7 +168,7 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Return SearchHit objects with title, url, snippet, provider, timestamp
     - _Requirements: 7.1, 7.2, 7.3, 7.5, 7.6_
 
-  - [ ] 10.2 Add POST /api/tools/web-search endpoint
+  - [x] 10.2 Add POST /api/tools/web-search endpoint
     - Accept query (1-500 chars), return summarized results within 15 seconds
     - Log search to AuditLogger: query, provider, result_count, latency_ms
     - If all providers fail, return response without search results with error status
@@ -180,13 +180,13 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Test all-fail path: returns empty with error status
     - _Requirements: 7.5, 7.6_
 
-- [ ] 11. Browser Automation
-  - [ ] 11.1 Create policy/browser_policy.py with domain allowlist enforcement
+- [x] 11. Browser Automation
+  - [x] 11.1 Create policy/browser_policy.py with domain allowlist enforcement
     - Implement domain allowlist check: empty allowlist blocks all navigation
     - Validate URLs against allowlist before any browser action
     - _Requirements: 8.3, 8.10_
 
-  - [ ] 11.2 Create services/browser_automation_service.py with Playwright integration
+  - [x] 11.2 Create services/browser_automation_service.py with Playwright integration
     - Implement BrowserAutomationService with all actions: open, navigate, click, type, submit, extract, screenshot, summarize, close
     - Enforce disabled-by-default (BROWSER_AUTOMATION_ENABLED=false)
     - Use headed browser by default (BROWSER_HEADLESS=false)
@@ -197,7 +197,7 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Log each action to AuditLogger: action type, target URL/element, timestamp, outcome
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 8.8, 8.9, 8.10_
 
-  - [ ] 11.3 Create routers/browser.py with browser automation endpoints
+  - [x] 11.3 Create routers/browser.py with browser automation endpoints
     - POST /api/browser/open, navigate, search, click, type, submit, extract, screenshot, close
     - GET /api/browser/jobs: list automation jobs
     - GET /api/browser/allowlist (admin): get domain allowlist
@@ -210,14 +210,14 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Check occurs before any tool logic executes
     - **Validates: Requirements 8.2, 9.2**
 
-- [ ] 12. Terminal Access
-  - [ ] 12.1 Create policy/terminal_policy.py with command security validation
+- [x] 12. Terminal Access
+  - [x] 12.1 Create policy/terminal_policy.py with command security validation
     - Implement DANGEROUS_PATTERNS regex list per design
     - Implement denylist/allowlist with denylist precedence (max 500 entries each)
     - Implement allowed_folders check: reject commands referencing paths outside approved folders
     - _Requirements: 9.3, 9.4, 9.5_
 
-  - [ ] 12.2 Create services/terminal_service.py with shell command executor
+  - [x] 12.2 Create services/terminal_service.py with shell command executor
     - Implement TerminalService with check_enabled(), validate_command(), execute()
     - Support macOS shell, Windows PowerShell, Windows CMD (auto-detect)
     - Enforce disabled-by-default with per-session confirmation
@@ -226,7 +226,7 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Log to AuditLogger: command, working_directory, exit_code, execution_ms, output (truncated)
     - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7, 9.9_
 
-  - [ ] 12.3 Create routers/terminal.py with terminal endpoints
+  - [x] 12.3 Create routers/terminal.py with terminal endpoints
     - POST /api/terminal/run: execute command with confirmation flow
     - GET /api/terminal/logs: get command execution history
     - GET /api/terminal/policy (admin): get current terminal policy
@@ -239,11 +239,11 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Denylist is evaluated first
     - **Validates: Requirements 9.4, 9.5**
 
-- [ ] 13. Checkpoint - Ensure browser and terminal tests pass
+- [x] 13. Checkpoint - Ensure browser and terminal tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 14. Telegram Bot Integration
-  - [ ] 14.1 Extend integrations/telegram_api.py with full bot lifecycle
+- [x] 14. Telegram Bot Integration
+  - [x] 14.1 Extend integrations/telegram_api.py with full bot lifecycle
     - Support webhook and long-polling modes (only one active; enabling polling deregisters webhook)
     - Resolve Telegram user ID to AmpAI username via telegram_users table
     - Silently discard messages from user IDs not in allowed_telegram_user_ids, log audit event
@@ -254,7 +254,7 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - On processing failure: send generic failure notification, log audit event
     - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8_
 
-  - [ ] 14.2 Extend routers/integrations.py with Telegram admin endpoints
+  - [x] 14.2 Extend routers/integrations.py with Telegram admin endpoints
     - GET /api/admin/integrations/telegram/status: bot connection status
     - POST /api/admin/integrations/telegram/save: save bot config
     - POST /api/admin/integrations/telegram/test: test bot token
@@ -269,15 +269,15 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Test tool access: browser/terminal refused unless admin-enabled
     - _Requirements: 10.3, 10.6, 10.7_
 
-- [ ] 15. Task Memory and Suggestions
-  - [ ] 15.1 Create routers/tasks.py with task CRUD endpoints
+- [x] 15. Task Memory and Suggestions
+  - [x] 15.1 Create routers/tasks.py with task CRUD endpoints
     - GET /api/tasks: list tasks paginated (default 20), filterable by status, priority, due date range, searchable by title/description
     - POST /api/tasks: create task with title (max 150 chars), description (max 1000 chars), priority, due_at, session_id
     - PATCH /api/tasks/{id}: update task, allow status transitions (todo, in_progress, done) in any direction
     - DELETE /api/tasks/{id}: delete task
     - _Requirements: 11.2, 11.4, 11.5, 11.6_
 
-  - [ ] 15.2 Implement task intent detection in chat pipeline
+  - [x] 15.2 Implement task intent detection in chat pipeline
     - Detect task-related intent keywords: todo, remind me, I need to, follow up, deadline, action item, task
     - Generate task suggestion with title, description, priority, optional due date
     - On approval: create task with status todo, link to source session
@@ -290,8 +290,8 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Test suggestion rejection marks as dismissed
     - _Requirements: 11.1, 11.4, 11.5_
 
-- [ ] 16. Agent Learning Loop and Skill Engine
-  - [ ] 16.1 Implement skill detection and CRUD endpoints
+- [x] 16. Agent Learning Loop and Skill Engine
+  - [x] 16.1 Implement skill detection and CRUD endpoints
     - Detect repeated patterns (3+ sessions in 30-day window) and suggest skill creation
     - Require user/admin approval before activation
     - Assign safety levels: read-only, write (per-execution confirmation), privileged (admin approval + confirmation)
@@ -300,17 +300,17 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Record rejections, don't re-suggest same pattern unless user requests
     - _Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6_
 
-- [ ] 17. Checkpoint - Ensure all service tests pass
+- [x] 17. Checkpoint - Ensure all service tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 18. Desktop Application Upgrades
-  - [ ] 18.1 Refactor desktop/src/state.ts with new feature states
+- [x] 18. Desktop Application Upgrades
+  - [x] 18.1 Refactor desktop/src/state.ts with new feature states
     - Add BrowserState, TerminalState, TaskState interfaces
     - Add S.browserState, S.terminalState, S.taskState to global state
     - Add S.enableBrowserTools, S.enableTerminalTools per-chat toggles
     - _Requirements: 12.1, 12.2_
 
-  - [ ] 18.2 Refactor desktop/src/main.ts with sidebar and tab routing
+  - [x] 18.2 Refactor desktop/src/main.ts with sidebar and tab routing
     - Implement collapsible left sidebar with tabs: Chat, Memory, Tasks, Browser, Terminal, Telegram Settings, Admin Settings
     - Persist sidebar collapse state to local storage
     - Implement server probe on startup (5s timeout per candidate), show Online/Offline status
@@ -318,32 +318,32 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Handle chat request failures: display error in chat area, re-enable send button within 1s
     - _Requirements: 12.1, 12.3, 12.4, 12.5, 12.6_
 
-  - [ ] 18.3 Create desktop/src/tabs-tasks.ts with task management UI
+  - [x] 18.3 Create desktop/src/tabs-tasks.ts with task management UI
     - Display columns: todo, in_progress, done
     - Show priority indicators, due dates, source chat links
     - Implement search by title/description, filter by status/priority/due date range
     - _Requirements: 11.3_
 
-  - [ ] 18.4 Create desktop/src/tabs-browser.ts with browser automation UI
+  - [x] 18.4 Create desktop/src/tabs-browser.ts with browser automation UI
     - Show automation enable/disable status
     - Display domain allowlist configuration
     - Show scrollable action history (most recent 200 entries)
     - _Requirements: 8.12_
 
-  - [ ] 18.5 Create desktop/src/tabs-terminal.ts with terminal tools UI
+  - [x] 18.5 Create desktop/src/tabs-terminal.ts with terminal tools UI
     - Show terminal policy (enabled/disabled, allowed folders, allowlist/denylist)
     - Display command history (most recent 200 entries)
     - Provide execution controls
     - _Requirements: 9.10_
 
-  - [ ] 18.6 Update desktop/src/tabs-a.ts with ChatGPT-style session sidebar
+  - [x] 18.6 Update desktop/src/tabs-a.ts with ChatGPT-style session sidebar
     - Display sessions sorted by pinned first, then updated_at DESC, paginated (40 per page, load more on scroll)
     - Implement controls: new chat, rename (max 100 chars), search (filter within 300ms), pin, archive, delete, assign category
     - Display error on failed delete/archive operations
     - _Requirements: 4.1, 4.2, 4.3, 4.7_
 
-- [ ] 19. Backup and Restore
-  - [ ] 19.1 Refactor services/backup_service.py from backup_helpers.py
+- [x] 19. Backup and Restore
+  - [x] 19.1 Refactor services/backup_service.py from backup_helpers.py
     - Implement daily automated backup of database (chat history, memories, core memories, users, configs, personas, tasks)
     - Generate manifest: schema version, timestamp, session count, message count, SHA-256 checksum
     - Support local filesystem and FTP destinations with configurable profiles (type, host, path, credentials, retention count)
@@ -353,7 +353,7 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Record failures with error details in backup status history
     - _Requirements: 13.1, 13.2, 13.4, 13.5, 13.6, 13.7_
 
-  - [ ] 19.2 Extend routers/admin.py with backup endpoints
+  - [x] 19.2 Extend routers/admin.py with backup endpoints
     - POST /api/admin/backup/run: trigger manual backup
     - GET /api/admin/backup/jobs: list backup history
     - POST /api/admin/backup/test-ftp: test FTP connection
@@ -367,19 +367,19 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Test failed preflight: schema mismatch, checksum failure, DB unreachable
     - _Requirements: 13.4, 13.5_
 
-- [ ] 20. Audit Logging Endpoints and Retention
-  - [ ] 20.1 Extend routers/admin.py with audit log query endpoint
+- [x] 20. Audit Logging Endpoints and Retention
+  - [x] 20.1 Extend routers/admin.py with audit log query endpoint
     - GET /api/admin/audit-logs: filter by action_type, username, date_range, session_id
     - Max 1000 results per request, support limit parameter for pagination
     - Enforce append-only: no UPDATE or DELETE through application
     - Implement 90-day retention policy eligibility
     - _Requirements: 15.4, 15.5, 15.6, 15.8_
 
-- [ ] 21. Checkpoint - Ensure all feature tests pass
+- [x] 21. Checkpoint - Ensure all feature tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 22. Testing Suite
-  - [ ] 22.1 Create test suite with subsystem isolation
+- [x] 22. Testing Suite
+  - [x] 22.1 Create test suite with subsystem isolation
     - Write at least one nominal-path and one error-path test for each subsystem:
       - Docker environment validation (config_validator)
       - Memory system operations
@@ -397,8 +397,8 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - Exit with non-zero code on any test failure
     - _Requirements: 16.1, 16.2, 16.3, 16.4_
 
-- [ ] 23. Documentation
-  - [ ] 23.1 Create docs/ directory with all documentation files
+- [x] 23. Documentation
+  - [x] 23.1 Create docs/ directory with all documentation files
     - docs/MEMORY_ARCHITECTURE.md: memory system design, retrieval pipeline, configuration
     - docs/BROWSER_AUTOMATION.md: setup, domain allowlist, security constraints, usage
     - docs/TERMINAL_TOOLS.md: setup, policy configuration, dangerous command blocking
@@ -408,13 +408,13 @@ This plan implements the AmpAI Personal Agent feature across 15 task groups, bui
     - docs/SECURITY_POLICY.md: per-tool permitted/denied operations, override conditions
     - _Requirements: 17.1, 17.4_
 
-  - [ ] 23.2 Update README.md with quickstart instructions
+  - [x] 23.2 Update README.md with quickstart instructions
     - Document `docker compose up -d --build` as primary setup method
     - List system prerequisites and required port availability
     - Include verification step confirming deployment is running
     - _Requirements: 17.2_
 
-- [ ] 24. Final Checkpoint - Ensure all tests pass
+- [x] 24. Final Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes

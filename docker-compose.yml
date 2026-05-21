@@ -1,26 +1,26 @@
 services:
-  db:
+  agent_postgres:
     image: pgvector/pgvector:pg16
-    container_name: ampai-db
+    container_name: ampai-agent-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ampai
-      POSTGRES_USER: ampai
-      POSTGRES_PASSWORD: ampai
+      POSTGRES_DB: ${POSTGRES_DB:-ampai}
+      POSTGRES_USER: ${POSTGRES_USER:-ampai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
     volumes:
-      - ampai_postgres:/var/lib/postgresql/data
+      - agent_postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ampai -d ampai"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ampai} -d ${POSTGRES_DB:-ampai}"]
       interval: 5s
       timeout: 5s
       retries: 20
 
-  redis:
+  agent_redis:
     image: redis:7-alpine
-    container_name: ampai-redis
+    container_name: ampai-agent-redis
     restart: unless-stopped
     volumes:
-      - ampai_redis:/data
+      - agent_redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -28,33 +28,40 @@ services:
       retries: 20
 
   ampai:
-    build:
-      context: .
+    build: .
     container_name: ampai-server
     restart: unless-stopped
     depends_on:
-      db:
+      agent_postgres:
         condition: service_healthy
-      redis:
+      agent_redis:
         condition: service_healthy
     ports:
       - "8000:8000"
       - "8001:8000"
     environment:
-      DATABASE_URL: postgresql://ampai:ampai@db:5432/ampai
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ampai}:${POSTGRES_PASSWORD}@agent_postgres:5432/${POSTGRES_DB:-ampai}
+      REDIS_URL: redis://agent_redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET required}
+      AMPAI_ENV: ${AMPAI_ENV:-development}
+      AMPAI_DEFAULT_ADMIN_USERNAME: ${AMPAI_DEFAULT_ADMIN_USERNAME:-admin}
+      AMPAI_DEFAULT_ADMIN_PASSWORD: ${AMPAI_DEFAULT_ADMIN_PASSWORD:?AMPAI_DEFAULT_ADMIN_PASSWORD required}
+      CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       SESSION_RECALL_DB_PATH: /data/agent_data/session_recall.db
-      OLLAMA_BASE_URL: http://host.docker.internal:11434
-      ALLOWED_ORIGINS: http://localhost:1420,http://127.0.0.1:1420,tauri://localhost,http://tauri.localhost,https://tauri.localhost
-      AMPAI_DEFAULT_ADMIN_USERNAME: admin
-      AMPAI_DEFAULT_ADMIN_PASSWORD: P@ssw0rd
-      USER_USERNAME: user
-      USER_PASSWORD: user123
-      JWT_SECRET: change-me-for-production
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:1420,http://127.0.0.1:1420,tauri://localhost}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-duckduckgo}
+      BROWSER_AUTOMATION_ENABLED: ${BROWSER_AUTOMATION_ENABLED:-false}
+      BROWSER_HEADLESS: ${BROWSER_HEADLESS:-false}
+      TERMINAL_TOOLS_ENABLED: ${TERMINAL_TOOLS_ENABLED:-false}
+      TERMINAL_REQUIRE_CONFIRMATION: ${TERMINAL_REQUIRE_CONFIRMATION:-true}
     volumes:
       - ampai_data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
-  ampai_postgres:
-  ampai_redis:
+  agent_postgres_data:
+  agent_redis_data:
   ampai_data:
