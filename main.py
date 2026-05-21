@@ -227,6 +227,13 @@ except Exception as e:
 app = FastAPI()
 app.include_router(github_router)
 
+# Register all domain routers with deduplication.
+# This safely adds routers from routers/__init__.py without creating
+# duplicate routes for endpoints already defined inline in this file.
+from routers import register_all_with_dedup, RouteInventory
+
+_route_inventory = register_all_with_dedup(app)
+
 # Add CORS middleware
 # CORS â€” allow the Tauri desktop client plus any localhost port.
 # Set ALLOWED_ORIGINS env var to a comma-separated list to override.
@@ -1804,8 +1811,32 @@ def logout():
     return response
 
 
+def _log_route_inventory() -> None:
+    """Log all registered routes at startup for observability."""
+    routes = []
+    for route in app.routes:
+        if hasattr(route, "methods") and hasattr(route, "path"):
+            for method in sorted(route.methods):
+                routes.append(f"  {method} {route.path}")
+    routes.sort()
+    logger.info(
+        "=== Route Inventory (%d routes) ===\n%s",
+        len(routes),
+        "\n".join(routes),
+    )
+    if _route_inventory.skipped_duplicates:
+        logger.warning(
+            "Skipped %d duplicate route(s) during registration:\n%s",
+            len(_route_inventory.skipped_duplicates),
+            "\n".join(_route_inventory.duplicate_details),
+        )
+
+
 @app.on_event("startup")
 def startup_event():
+    # Log the complete route inventory at startup
+    _log_route_inventory()
+
     try:
         _bootstrap_default_users()
     except Exception as exc:

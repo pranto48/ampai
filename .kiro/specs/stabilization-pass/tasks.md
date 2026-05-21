@@ -6,8 +6,8 @@ This plan implements a stabilization, verification, and security-hardening pass 
 
 ## Tasks
 
-- [ ] 1. Create foundational services and infrastructure
-  - [ ] 1.1 Create `services/rate_limiter.py` with `RateLimiter` class
+- [x] 1. Create foundational services and infrastructure
+  - [x] 1.1 Create `services/rate_limiter.py` with `RateLimiter` class
     - Implement `RateLimiter` with per-user per-minute (10) and per-day (100) counters
     - Support Redis backend with in-memory fallback when Redis is unavailable
     - Return `RateLimitResult` dataclass with allowed/denied status, remaining counts, and retry_after_seconds
@@ -15,20 +15,20 @@ This plan implements a stabilization, verification, and security-hardening pass 
     - Return HTTP 429 with descriptive message on limit exceeded
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6_
 
-  - [ ] 1.2 Create `services/confirmation_token.py` with `ConfirmationTokenService`
+  - [x] 1.2 Create `services/confirmation_token.py` with `ConfirmationTokenService`
     - Implement HMAC-SHA256 signed token generation bound to username, session_id, command_hash, working_directory, shell_type
     - Include browser-specific fields: action_type, target_url, element_selector
     - Implement validation: signature check, 60-second TTL expiry, command hash match, binding field verification
     - Return structured `ValidationResult` with specific rejection reasons
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 7.4, 7.5, 7.6_
 
-  - [ ] 1.3 Implement `register_all_with_dedup` in `routers/__init__.py`
+  - [x] 1.3 Implement `register_all_with_dedup` in `routers/__init__.py`
     - Replace `register_all` with `register_all_with_dedup` that detects duplicate (method, path) combinations
     - Skip duplicates and log WARNING-level messages identifying conflicting path and method
     - Return `RouteInventory` dataclass with registered routes and skipped duplicates count
     - _Requirements: 1.1, 1.4_
 
-  - [ ] 1.4 Add startup route inventory logging in `main.py`
+  - [x] 1.4 Add startup route inventory logging in `main.py`
     - Call `register_all_with_dedup` during app startup
     - Log complete route inventory at INFO level (one entry per line: METHOD /path)
     - Ensure all key routes are active: GET /api/sessions, POST /api/chat, POST /api/tools/web-search, POST /api/browser/open, POST /api/terminal/run, GET /api/tasks, GET /api/models/options
