@@ -7370,7 +7370,15 @@ def _list_code_backups() -> List[Dict[str, Any]]:
 
 
 def _do_update_in_thread(actor: str) -> None:
-    """Run the update process in a background thread."""
+    """Run the update process in a background thread.
+
+    Downloads the latest code from the GitHub archive (tar.gz), extracts it,
+    backs up current files, applies the update while preserving user data,
+    installs dependencies, and restarts the server.
+    """
+    import subprocess
+    import tarfile
+
     global _update_status
     _update_status = {
         "state": "running",
@@ -7381,13 +7389,11 @@ def _do_update_in_thread(actor: str) -> None:
     _update_log_lines.clear()
 
     try:
-        import subprocess
-
         _update_log("Starting AmpAI code update...")
         _update_log(f"Triggered by: {actor}")
         _update_log(f"Repo: {REPO_URL}")
 
-        # â”€â”€ Step 1: Create code backup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # -- Step 1: Create code backup --
         _update_log("--- Step 1: Creating code backup ---")
         os.makedirs(CODE_BACKUP_DIR, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -7408,136 +7414,150 @@ def _do_update_in_thread(actor: str) -> None:
             )
             _update_log("Backed up: frontend/")
 
-        # Save current commit
         current_commit = _get_current_git_commit()
         with open(os.path.join(backup_path, "git_commit.txt"), "w") as f:
             f.write(current_commit)
         _update_log(f"Backup created at: {backup_path} (commit: {current_commit})")
 
-        # â”€â”€ Step 2: Pull latest code â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        _update_log("--- Step 2: Pulling latest code from GitHub ---")
+        # -- Step 2: Download latest code from GitHub archive --
+        _update_log("--- Step 2: Downloading latest code from GitHub ---")
 
-        # Candidate paths for the host-mounted git repo
-        repo_root = _find_git_repo_root()
+        slug = _extract_github_slug(REPO_URL)
+        if not slug:
+            raise RuntimeError(f"Cannot extract GitHub slug from REPO_URL: {REPO_URL}")
 
-        if repo_root:
-            _update_log(f"Found git repo at {repo_root}")
-            result = subprocess.run(
-                ["git", "-C", repo_root, "fetch", "origin"],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            _update_log(
-                f"git fetch: {result.stdout.strip() or result.stderr.strip() or 'ok'}"
-            )
-
-            for branch in ["main", "master"]:
-                r = subprocess.run(
-                    ["git", "-C", repo_root, "reset", "--hard", f"origin/{branch}"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
+        # Try main branch first, then master as fallback
+        archive_url = None
+        for branch in ["main", "master"]:
+            candidate_url = f"https://github.com/{slug}/archive/refs/heads/{branch}.tar.gz"
+            try:
+                req = urllib.request.Request(
+                    candidate_url,
+                    method="HEAD",
+                    headers={"User-Agent": "ampai-updater/1.0"},
                 )
-                if r.returncode == 0:
-                    _update_log(f"Reset to origin/{branch}: {r.stdout.strip()}")
-                    break
-                _update_log(f"Branch {branch} not found, trying next...")
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status == 200:
+                        archive_url = candidate_url
+                        _update_log(f"Found archive for branch '{branch}'")
+                        break
+            except Exception:
+                continue
 
-            new_commit = subprocess.run(
-                ["git", "-C", repo_root, "rev-parse", "--short", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ).stdout.strip()
-            _update_log(f"Updated to commit: {new_commit}")
-            updated_app_dir = _runnable_app_dir(repo_root)
-            if not updated_app_dir:
-                raise RuntimeError(
-                    "Updated repository does not contain main.py or backend/main.py"
-                )
-            _copy_updated_backend(updated_app_dir, backend_src)
-            if os.path.abspath(updated_app_dir) != os.path.abspath(backend_src):
-                _update_log(f"Copied runnable backend from {updated_app_dir}")
-            repo_frontend = _resolve_frontend_dir() or os.path.join(repo_root, "frontend")
-            if os.path.isdir(os.path.join(repo_root, "frontend")) and os.path.abspath(repo_frontend) != os.path.abspath(os.path.join(repo_root, "frontend")):
-                shutil.copytree(
-                    os.path.join(repo_root, "frontend"),
-                    repo_frontend,
-                    dirs_exist_ok=True,
-                )
-                _update_log("Copied frontend assets from updated repository")
-        else:
-            # Fallback: download code via GitHub archive API
-            _update_log(
-                "No git repo found. Downloading latest code from GitHub..."
+        if not archive_url:
+            raise RuntimeError(
+                f"Failed to find archive for {slug} on main or master branch"
             )
-            import tempfile
 
-            # Try multiple archive URL formats
-            slug = _extract_github_slug(REPO_URL)
-            if not slug:
-                raise RuntimeError(f"Cannot extract GitHub slug from REPO_URL: {REPO_URL}")
+        _update_log(f"Downloading: {archive_url}")
+        temp_tar = tempfile.mktemp(suffix=".tar.gz")
+        try:
+            urllib.request.urlretrieve(archive_url, temp_tar)
+        except Exception as dl_err:
+            raise RuntimeError(f"Archive download failed: {dl_err}") from dl_err
+        _update_log("Download complete. Extracting...")
 
-            archive_url = None
-            for branch in ["main", "master"]:
-                candidate_url = f"https://github.com/{slug}/archive/refs/heads/{branch}.zip"
-                try:
-                    req = urllib.request.Request(candidate_url, method="HEAD")
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        if resp.status == 200:
-                            archive_url = candidate_url
-                            _update_log(f"Found archive at: {archive_url}")
-                            break
-                except Exception:
-                    continue
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with tarfile.open(temp_tar, "r:gz") as tf:
+                tf.extractall(temp_dir)
+        except Exception as ext_err:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise RuntimeError(f"Archive extraction failed: {ext_err}") from ext_err
+        finally:
+            if os.path.exists(temp_tar):
+                os.remove(temp_tar)
 
-            if not archive_url:
-                # Try the codeload URL format
-                archive_url = f"https://codeload.github.com/{slug}/zip/refs/heads/main"
-                _update_log(f"Trying codeload URL: {archive_url}")
+        # Find extracted root directory (e.g. ampai-main/)
+        extracted_dirs = [
+            d
+            for d in os.listdir(temp_dir)
+            if os.path.isdir(os.path.join(temp_dir, d))
+        ]
+        if not extracted_dirs:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise RuntimeError("Archive extraction yielded no directory")
+        extracted_root = os.path.join(temp_dir, extracted_dirs[0])
+        _update_log(f"Extracted to: {extracted_root}")
 
-            _update_log(f"Downloading: {archive_url}")
-            temp_zip = tempfile.mktemp(suffix=".zip")
-            urllib.request.urlretrieve(archive_url, temp_zip)
-            _update_log("Download complete. Extracting...")
+        # -- Copy files, preserving user data --
+        PRESERVE_FILES = {".env", "docker-compose.yml"}
+        PRESERVE_DIRS = {"data", "agent_data"}
+        PRESERVE_EXTENSIONS = {".db", ".db-journal"}
 
-            temp_dir = tempfile.mkdtemp()
-            with zipfile.ZipFile(temp_zip, "r") as zf:
-                zf.extractall(temp_dir)
-            os.remove(temp_zip)
+        def _should_preserve(name: str, is_dir: bool = False) -> bool:
+            """Return True if this file/dir should NOT be overwritten."""
+            if is_dir:
+                return name in PRESERVE_DIRS
+            if name in PRESERVE_FILES:
+                return True
+            for ext in PRESERVE_EXTENSIONS:
+                if name.endswith(ext):
+                    return True
+            return False
 
-            # Find extracted root (ampai-main/ or similar)
-            extracted_dirs = [
+        updated_app_dir = _runnable_app_dir(extracted_root)
+        if not updated_app_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise RuntimeError(
+                "Downloaded archive does not contain main.py or backend/main.py"
+            )
+
+        _update_log(
+            "Copying updated files (preserving .env, *.db, data/, agent_data/, docker-compose.yml)..."
+        )
+        for dirpath, dirnames, filenames in os.walk(updated_app_dir):
+            rel_dir = os.path.relpath(dirpath, updated_app_dir)
+            target_dir = (
+                os.path.join(backend_src, rel_dir) if rel_dir != "." else backend_src
+            )
+
+            # Skip preserved and non-essential directories
+            dirnames[:] = [
                 d
-                for d in os.listdir(temp_dir)
-                if os.path.isdir(os.path.join(temp_dir, d))
+                for d in dirnames
+                if not _should_preserve(d, is_dir=True)
+                and d
+                not in {
+                    ".git",
+                    "__pycache__",
+                    ".pytest_cache",
+                    "node_modules",
+                    ".vs",
+                }
             ]
-            if not extracted_dirs:
-                raise RuntimeError("Archive extraction yielded no directory")
-            extracted_root = os.path.join(temp_dir, extracted_dirs[0])
 
-            # Copy runnable app layout and frontend
-            new_frontend = os.path.join(extracted_root, "frontend")
-            updated_app_dir = _runnable_app_dir(extracted_root)
-            if not updated_app_dir:
-                raise RuntimeError(
-                    "Downloaded repository does not contain backend/main.py or main.py"
-                )
-            _copy_updated_backend(updated_app_dir, backend_src)
-            if os.path.abspath(updated_app_dir) == os.path.abspath(extracted_root):
-                _update_log("Copied runnable app from archive root")
-            else:
-                _update_log(f"Copied runnable backend from {updated_app_dir}")
-            if os.path.isdir(new_frontend):
+            os.makedirs(target_dir, exist_ok=True)
+
+            for fname in filenames:
+                if _should_preserve(fname):
+                    target_file = os.path.join(target_dir, fname)
+                    if os.path.exists(target_file):
+                        continue
+                if fname.endswith(".pyc"):
+                    continue
+                src_file = os.path.join(dirpath, fname)
+                dst_file = os.path.join(target_dir, fname)
+                shutil.copy2(src_file, dst_file)
+
+        # Copy frontend if present in archive
+        new_frontend = os.path.join(extracted_root, "frontend")
+        if os.path.isdir(new_frontend) and os.path.abspath(
+            updated_app_dir
+        ) != os.path.abspath(extracted_root):
+            shutil.copytree(new_frontend, frontend_src, dirs_exist_ok=True)
+            _update_log("Copied new frontend/")
+        elif os.path.isdir(new_frontend):
+            if os.path.abspath(frontend_src) != os.path.abspath(
+                os.path.join(backend_src, "frontend")
+            ):
                 shutil.copytree(new_frontend, frontend_src, dirs_exist_ok=True)
                 _update_log("Copied new frontend/")
 
-            shutil.rmtree(temp_dir)
-            _update_log("Archive update complete.")
-            new_commit = "downloaded"
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        _update_log("File copy complete.")
 
-        # â”€â”€ Step 3: Install dependencies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # -- Step 3: Install dependencies --
         _update_log("--- Step 3: Installing Python dependencies ---")
         req_candidates = [
             os.path.join(os.path.dirname(__file__), "requirements.txt"),
@@ -7554,14 +7574,19 @@ def _do_update_in_thread(actor: str) -> None:
             if result.returncode == 0:
                 _update_log("Dependencies installed successfully.")
             else:
-                _update_log(f"pip warning: {result.stderr.strip()[:400]}")
+                # pip failure is non-fatal - log warning and continue
+                _update_log(
+                    f"pip warning (non-fatal): {result.stderr.strip()[:400]}"
+                )
         else:
             _update_log("No requirements.txt found, skipping.")
 
+        # -- Step 4: Validate updated app --
         _update_log("--- Step 4: Validating updated app ---")
         _validate_runnable_app()
         _update_log("Updated app import validation passed.")
 
+        # -- Step 5: Signal server reload --
         _update_log("--- Step 5: Signaling server reload ---")
         _update_log("Update complete! Restarting uvicorn in 3 seconds...")
 
@@ -7592,6 +7617,12 @@ def _do_update_in_thread(actor: str) -> None:
         log_audit_event(
             username=actor, action="admin.docker.update.failure", details=str(exc)
         )
+    finally:
+        # Ensure the update lock is always released
+        try:
+            _update_lock.release()
+        except RuntimeError:
+            pass  # Lock was not held (shouldn't happen, but be safe)
 
 
 @app.get("/api/admin/update/version")
@@ -7620,10 +7651,7 @@ def update_trigger(user: UserContext = Depends(require_admin_user)):
             target=_do_update_in_thread, args=(user.username,), daemon=True
         )
         t.start()
-        # release lock after thread is done
-        threading.Thread(
-            target=lambda: (t.join(), _update_lock.release()), daemon=True
-        ).start()
+        # Lock is released inside _do_update_in_thread's finally block
     except Exception as e:
         _update_lock.release()
         raise HTTPException(status_code=500, detail=str(e))

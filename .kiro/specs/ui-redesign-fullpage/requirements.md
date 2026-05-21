@@ -31,7 +31,7 @@ This feature addresses three major issues in the AmpAI application: a broken Doc
 1. WHEN the Desktop_App loads, THE Desktop_App SHALL display the Chat_View as the default full-screen view with the Nav_Bar visible.
 2. WHEN a user selects a navigation item from the Nav_Bar, THE Desktop_App SHALL replace the current view with the corresponding Full_Page_View.
 3. THE Nav_Bar SHALL display navigation items as compact icons with short labels, occupying no more than 60 pixels in width (vertical) or 48 pixels in height (horizontal).
-4. WHEN a Full_Page_View is active, THE Desktop_App SHALL display a back button that returns the user to the Chat_View.
+4. WHEN a Full_Page_View is active, THE Desktop_App SHALL display a visible back button; WHEN the back button is clicked, THE Desktop_App SHALL navigate the user back to the Chat_View.
 5. THE Desktop_App SHALL support the following sections as Full_Page_Views: Chat, Account, History, Memory, AI Models, Tasks, Browser, Terminal, AI Personas, Settings, Personalise, Telegram, Admin, and Update.
 6. WHEN the user navigates to a Full_Page_View, THE Desktop_App SHALL load the relevant data for that section from the Backend before rendering.
 7. THE Nav_Bar SHALL display primary items (Chat, History, Memory, AI, Tasks) directly and group remaining items under a More_Menu.
@@ -74,10 +74,10 @@ This feature addresses three major issues in the AmpAI application: a broken Doc
 #### Acceptance Criteria
 
 1. WHEN the AI Models Full_Page_View loads, THE Desktop_App SHALL call the Provider_Models_Endpoint for the currently selected provider and display the returned models.
-2. WHEN a user changes the provider in the Model_Selector, THE Desktop_App SHALL call the Provider_Models_Endpoint for the newly selected provider and update the model dropdown with the fetched models.
+2. WHEN a user changes the provider in the Model_Selector, THE Desktop_App SHALL enforce sequential processing by waiting for any in-progress fetch to complete before initiating a new fetch for the newly selected provider, then update the model dropdown with the fetched models.
 3. THE Model_Selector SHALL display all configured providers in the provider dropdown, including Ollama, OpenRouter, OpenAI, Gemini, Anthropic, Groq, Mistral, Cohere, LM Studio, and AnythingLLM.
 4. WHEN models are fetched from OpenRouter, THE Desktop_App SHALL highlight models that are free (zero prompt and completion cost) with a visible "FREE" badge.
-5. IF the Provider_Models_Endpoint returns an error for a provider, THEN THE Desktop_App SHALL display a toast notification with the error message and retain any previously loaded models for that provider.
+5. IF the Provider_Models_Endpoint returns an error for a provider, THEN THE Desktop_App SHALL display a toast notification with the error message AND retain any previously loaded models for that provider; IF either the toast display or model retention fails, THE Desktop_App SHALL treat it as a complete error handling failure and log the issue.
 6. THE Model_Selector in the chat topbar SHALL display the fetched models for the currently selected provider, not only hardcoded defaults.
 7. WHEN the Desktop_App starts and a user is authenticated, THE Desktop_App SHALL fetch models for the default provider configured in settings.
 
@@ -116,4 +116,4 @@ This feature addresses three major issues in the AmpAI application: a broken Doc
 2. WHILE the update state is "running", THE Desktop_App SHALL poll `GET /api/admin/update/status` every 3 seconds and display the latest log lines.
 3. WHEN the update state changes to "success", THE Desktop_App SHALL display a success badge and stop polling.
 4. WHEN the update state changes to "error", THE Desktop_App SHALL display an error badge with the error message and stop polling.
-5. WHILE the update is running, THE Desktop_App SHALL disable the "Pull Update" button to prevent duplicate triggers.
+5. WHILE the update is running, THE Desktop_App SHALL disable the "Pull Update" button to prevent duplicate triggers; WHEN the update state changes to "success" or "error", THE Desktop_App SHALL automatically re-enable the "Pull Update" button without requiring a page refresh.

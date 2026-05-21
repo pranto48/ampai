@@ -108,7 +108,7 @@ def fetch_provider_models(
 ):
     """Dynamically fetch available models from a provider's API.
 
-    Supports: ollama, openrouter, openai, gemini, anthropic.
+    Supports: ollama, openrouter, openai, gemini, generic, groq, mistral, cohere.
     Returns a list of model objects with id, name, and metadata.
     """
     import json
@@ -226,6 +226,72 @@ def fetch_provider_models(
                         "context_length": 0,
                         "free": True,
                         "local": True,
+                    })
+
+        elif provider == "groq":
+            key = (configs.get("groq_api_key") or "").strip()
+            if not key:
+                raise HTTPException(status_code=400, detail="Groq API key not configured")
+            req = urllib.request.Request(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for m in data.get("data", []):
+                model_id = m.get("id", "")
+                if model_id:
+                    models.append({
+                        "id": model_id,
+                        "name": model_id,
+                        "provider": "groq",
+                        "context_length": m.get("context_window", 0),
+                        "free": False,
+                        "local": False,
+                    })
+
+        elif provider == "mistral":
+            key = (configs.get("mistral_api_key") or "").strip()
+            if not key:
+                raise HTTPException(status_code=400, detail="Mistral API key not configured")
+            req = urllib.request.Request(
+                "https://api.mistral.ai/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for m in data.get("data", []):
+                model_id = m.get("id", "")
+                if model_id:
+                    models.append({
+                        "id": model_id,
+                        "name": model_id,
+                        "provider": "mistral",
+                        "context_length": m.get("max_context_length", 0),
+                        "free": False,
+                        "local": False,
+                    })
+
+        elif provider == "cohere":
+            key = (configs.get("cohere_api_key") or "").strip()
+            if not key:
+                raise HTTPException(status_code=400, detail="Cohere API key not configured")
+            req = urllib.request.Request(
+                "https://api.cohere.ai/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for m in data.get("models", []):
+                model_id = m.get("name", "")
+                if model_id:
+                    models.append({
+                        "id": model_id,
+                        "name": model_id,
+                        "provider": "cohere",
+                        "context_length": m.get("context_length", 0),
+                        "free": False,
+                        "local": False,
                     })
 
         else:
