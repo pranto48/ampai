@@ -102,6 +102,156 @@ def get_model_options(_: UserContext = Depends(require_authenticated_user)):
     }
 
 
+@router.get("/api/models/fetch/{provider}")
+def fetch_provider_models(
+    provider: str, _: UserContext = Depends(require_authenticated_user)
+):
+    """Dynamically fetch available models from a provider's API.
+
+    Supports: ollama, openrouter, openai, gemini, anthropic.
+    Returns a list of model objects with id, name, and metadata.
+    """
+    import json
+
+    configs = get_all_configs()
+    models: List[Dict[str, Any]] = []
+
+    try:
+        if provider == "ollama":
+            base = (configs.get("ollama_base_url") or "http://host.docker.internal:11434").rstrip("/")
+            req = urllib.request.Request(f"{base}/api/tags")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for m in data.get("models", []):
+                name = m.get("name", "")
+                if name:
+                    models.append({
+                        "id": name,
+                        "name": name,
+                        "provider": "ollama",
+                        "context_length": m.get("details", {}).get("parameter_size", ""),
+                        "free": True,
+                        "local": True,
+                    })
+
+        elif provider == "openrouter":
+            key = (configs.get("openrouter_api_key") or "").strip()
+            headers = {}
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            req = urllib.request.Request(
+                "https://openrouter.ai/api/v1/models", headers=headers
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for m in data.get("data", []):
+                model_id = m.get("id", "")
+                if not model_id:
+                    continue
+                pricing = m.get("pricing", {})
+                is_free = (
+                    str(pricing.get("prompt", "0")) == "0"
+                    and str(pricing.get("completion", "0")) == "0"
+                )
+                models.append({
+                    "id": model_id,
+                    "name": m.get("name", model_id),
+                    "provider": "openrouter",
+                    "context_length": m.get("context_length", 0),
+                    "free": is_free,
+                    "local": False,
+                    "description": m.get("description", "")[:200],
+                })
+
+        elif provider == "openai":
+            key = (configs.get("openai_api_key") or "").strip()
+            if not key:
+                raise HTTPException(status_code=400, detail="OpenAI API key not configured")
+            req = urllib.request.Request(
+                "https://api.openai.com/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for m in data.get("data", []):
+                model_id = m.get("id", "")
+                if model_id and ("gpt" in model_id or "o1" in model_id or "o3" in model_id):
+                    models.append({
+                        "id": model_id,
+                        "name": model_id,
+                        "provider": "openai",
+                        "context_length": 0,
+                        "free": False,
+                        "local": False,
+                    })
+
+        elif provider == "gemini":
+            key = (configs.get("gemini_api_key") or "").strip()
+            if not key:
+                raise HTTPException(status_code=400, detail="Gemini API key not configured")
+            req = urllib.request.Request(
+                f"https://generativelanguage.googleapis.com/v1/models?key={key}"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for m in data.get("models", []):
+                model_id = m.get("name", "").replace("models/", "")
+                if model_id and "gemini" in model_id:
+                    models.append({
+                        "id": model_id,
+                        "name": m.get("displayName", model_id),
+                        "provider": "gemini",
+                        "context_length": m.get("inputTokenLimit", 0),
+                        "free": False,
+                        "local": False,
+                    })
+
+        elif provider == "generic":
+            base = (configs.get("generic_base_url") or "").rstrip("/")
+            if not base:
+                raise HTTPException(status_code=400, detail="Generic base URL not configured")
+            headers = {}
+            if configs.get("generic_api_key"):
+                headers["Authorization"] = f"Bearer {configs['generic_api_key']}"
+            req = urllib.request.Request(f"{base}/v1/models", headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for m in data.get("data", []):
+                model_id = m.get("id", "")
+                if model_id:
+                    models.append({
+                        "id": model_id,
+                        "name": model_id,
+                        "provider": "generic",
+                        "context_length": 0,
+                        "free": True,
+                        "local": True,
+                    })
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+
+    except HTTPException:
+        raise
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Provider API error: HTTP {exc.code}"
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to fetch models from {provider}: {str(exc)[:200]}"
+        )
+
+    # Sort: free models first, then alphabetically
+    models.sort(key=lambda m: (not m.get("free", False), m.get("name", "")))
+
+    return {
+        "provider": provider,
+        "models": models,
+        "count": len(models),
+    }
+
+
 @router.get("/api/models/health")
 def get_model_health(_: UserContext = Depends(require_authenticated_user)):
     """Return reachability status for each configured provider.

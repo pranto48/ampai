@@ -172,6 +172,7 @@ export const S={
   themeAccent:localStorage.getItem(ACCENT_K)||"#6366f1",
   sidebarCollapsed:localStorage.getItem("ampai.sidebarCollapsed")==="1",
   ollamaModels:[] as string[],
+  providerModels:{} as Record<string, Array<{id:string;name:string;free?:boolean;context_length?:number;local?:boolean}>>,
   modal:null as string|null,
   modelType:"ollama",
   modelName:"",

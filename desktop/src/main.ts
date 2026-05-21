@@ -13,6 +13,7 @@ import {
 import { accountTab, esc, historyTab, md, serverTab } from "./tabs-a";
 import { memoryTab, personasTab } from "./tabs-b";
 import { adminTab, personaliseTab, settingsTab, updateTab } from "./tabs-c";
+import { aiTab } from "./tabs-ai";
 import { tasksTab } from "./tabs-tasks";
 import { browserTab } from "./tabs-browser";
 import { terminalTab } from "./tabs-terminal";
@@ -196,6 +197,7 @@ function render(): void {
       ${tabButton("account", "Account")}
       ${S.auth ? tabButton("history", "History") : ""}
       ${S.auth ? tabButton("memory", "🧠 Memory") : ""}
+      ${S.auth ? tabButton("ai", "🤖 AI Models") : ""}
       ${S.auth ? tabButton("tasks", "📋 Tasks") : ""}
       ${S.auth ? tabButton("browser", "🌐 Browser") : ""}
       ${S.auth ? tabButton("terminal", "⌨️ Terminal") : ""}
@@ -211,6 +213,7 @@ function render(): void {
       ${tabPanel("account", accountTab())}
       ${S.auth ? tabPanel("history", historyTab()) : ""}
       ${S.auth ? tabPanel("memory", memoryTab()) : ""}
+      ${S.auth ? tabPanel("ai", aiTab()) : ""}
       ${S.auth ? tabPanel("tasks", tasksTab()) : ""}
       ${S.auth ? tabPanel("browser", browserTab()) : ""}
       ${S.auth ? tabPanel("terminal", terminalTab()) : ""}
@@ -268,6 +271,15 @@ function chatTopbar(): string {
         { value: "anthropic", label: "Anthropic" },
       ];
   const session = S.sessions.find((item) => item.session_id === S.sessionId);
+
+  // Build model options for the current provider
+  const currentModels = S.providerModels[S.modelType] || [];
+  const modelOptions = currentModels.length
+    ? currentModels.map(m =>
+        `<option value="${esc(m.id)}"${S.modelName === m.id ? " selected" : ""}>${esc(m.name || m.id)}${m.free ? " ✦" : ""}</option>`
+      ).join("")
+    : `<option value="${esc(S.modelName)}">${esc(S.modelName || "default")}</option>`;
+
   return `
 <div class="chat-topbar">
   <div class="chat-topbar-info">
@@ -275,13 +287,16 @@ function chatTopbar(): string {
     <div class="chat-topbar-sub">${esc(S.sessionId.slice(0, 20))}…</div>
   </div>
   <span class="ai-name-badge">${esc(S.configs.chat_agent_name || "AmpAI")}</span>
-  <select class="chat-topbar-select" id="sel-model">
+  <select class="chat-topbar-select" id="sel-provider">
     ${providers
       .map(
         (provider) =>
           `<option value="${esc(provider.value)}"${S.modelType === provider.value ? " selected" : ""}>${esc(provider.label)}</option>`
       )
       .join("")}
+  </select>
+  <select class="chat-topbar-select" id="sel-model" style="max-width:180px">
+    ${modelOptions}
   </select>
   <select class="chat-topbar-select" id="sel-memory">
     ${["full", "indexed", "context_only", "none"]
@@ -444,6 +459,30 @@ async function loadTabData(tab: string): Promise<void> {
     if (tab === "tasks") {
       const data = await api<any>("/api/tasks");
       S.taskState.tasks = data.tasks || [];
+    }
+    if (tab === "ai") {
+      // Load model options and try to fetch models for current provider
+      try {
+        const options = await api<any>("/api/models/options");
+        S.providers = options.providers || [];
+        // Store default model lists from options
+        const modelLists = options.models || {};
+        for (const [prov, models] of Object.entries(modelLists)) {
+          if (Array.isArray(models) && models.length && !S.providerModels[prov]?.length) {
+            S.providerModels[prov] = (models as string[]).map(m => ({
+              id: m, name: m, free: m.includes(":free"), local: prov === "ollama" || prov === "generic",
+            }));
+          }
+        }
+      } catch { /* models endpoint may not be available */ }
+      // Try to fetch dynamic models for current provider
+      try {
+        const currentProv = S.modelType || S.configs.default_model_provider || "ollama";
+        const fetched = await api<any>(`/api/models/fetch/${currentProv}`);
+        if (fetched.models?.length) {
+          S.providerModels[currentProv] = fetched.models;
+        }
+      } catch { /* provider may not be reachable */ }
     }
     if (tab === "browser") {
       try {
@@ -610,8 +649,25 @@ function bind(): void {
     render();
   });
 
-  document.getElementById("sel-model")?.addEventListener("change", (event) => {
+  document.getElementById("sel-provider")?.addEventListener("change", (event) => {
     S.modelType = (event.currentTarget as HTMLSelectElement).value;
+    S.modelName = ""; // Reset model when provider changes
+    // Try to fetch models for the new provider
+    if (!S.providerModels[S.modelType]?.length) {
+      void (async () => {
+        try {
+          const data = await api<any>(`/api/models/fetch/${S.modelType}`);
+          if (data.models?.length) {
+            S.providerModels[S.modelType] = data.models;
+            render();
+          }
+        } catch { /* provider may not be reachable */ }
+      })();
+    }
+    render();
+  });
+  document.getElementById("sel-model")?.addEventListener("change", (event) => {
+    S.modelName = (event.currentTarget as HTMLSelectElement).value;
   });
   document.getElementById("sel-memory")?.addEventListener("change", (event) => {
     S.memoryMode = (event.currentTarget as HTMLSelectElement).value;
@@ -681,6 +737,7 @@ function bind(): void {
   bindSettings();
   bindPersonalise();
   bindTelegram();
+  bindAI();
   bindTasks();
   bindBrowser();
   bindTerminal();
@@ -1482,6 +1539,85 @@ function bindTelegram(): void {
     "/api/admin/integrations/telegram/disable-polling",
     "Telegram polling disabled."
   );
+}
+
+function bindAI(): void {
+  // Fetch models for a specific provider
+  document.querySelectorAll<HTMLButtonElement>("[data-fetch-models]").forEach((btn) => {
+    btn.addEventListener("click", async (event) => {
+      event.preventDefault();
+      const provider = btn.dataset.fetchModels || "";
+      if (!provider) return;
+      btn.textContent = "⏳ Loading...";
+      btn.disabled = true;
+      try {
+        const data = await api<any>(`/api/models/fetch/${encodeURIComponent(provider)}`);
+        if (data.models?.length) {
+          S.providerModels[provider] = data.models;
+          toast(`Loaded ${data.count} models from ${provider}`, "ok");
+        } else {
+          toast(`No models found for ${provider}`, "info");
+        }
+      } catch (error: any) {
+        toast(error.message || `Failed to fetch models from ${provider}`, "err");
+      } finally {
+        render();
+      }
+    });
+  });
+
+  // Select a provider
+  document.querySelectorAll<HTMLElement>("[data-select-provider]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const provider = el.dataset.selectProvider || "";
+      if (!provider) return;
+      S.modelType = provider;
+      render();
+      // Auto-fetch models if not already loaded
+      if (!S.providerModels[provider]?.length) {
+        void loadTabData("ai");
+      }
+    });
+  });
+
+  // Select a model from the list
+  document.querySelectorAll<HTMLElement>("[data-select-model]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const modelId = el.dataset.selectModel || "";
+      if (!modelId) return;
+      S.modelName = modelId;
+      toast(`Model set: ${modelId}`, "ok");
+      render();
+    });
+  });
+
+  // Custom model form
+  document.getElementById("custom-model-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = document.getElementById("custom-model-input") as HTMLInputElement | null;
+    const value = (input?.value || "").trim();
+    if (value) {
+      S.modelName = value;
+      toast(`Model set: ${value}`, "ok");
+      render();
+    }
+  });
+
+  // Refresh all models
+  document.getElementById("btn-refresh-all-models")?.addEventListener("click", async () => {
+    toast("Fetching models from all providers...", "info");
+    const providers = ["ollama", "openrouter", "openai", "gemini", "generic"];
+    for (const prov of providers) {
+      try {
+        const data = await api<any>(`/api/models/fetch/${prov}`);
+        if (data.models?.length) {
+          S.providerModels[prov] = data.models;
+        }
+      } catch { /* skip unavailable providers */ }
+    }
+    toast("Model refresh complete", "ok");
+    render();
+  });
 }
 
 function bindTasks(): void {
