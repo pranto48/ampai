@@ -7383,7 +7383,7 @@ def _do_update_in_thread(actor: str) -> None:
     try:
         import subprocess
 
-        _update_log("Starting AmpAI code updateâ€¦")
+        _update_log("Starting AmpAI code update...")
         _update_log(f"Triggered by: {actor}")
         _update_log(f"Repo: {REPO_URL}")
 
@@ -7442,7 +7442,7 @@ def _do_update_in_thread(actor: str) -> None:
                 if r.returncode == 0:
                     _update_log(f"Reset to origin/{branch}: {r.stdout.strip()}")
                     break
-                _update_log(f"Branch {branch} not found, trying nextâ€¦")
+                _update_log(f"Branch {branch} not found, trying next...")
 
             new_commit = subprocess.run(
                 ["git", "-C", repo_root, "rev-parse", "--short", "HEAD"],
@@ -7470,18 +7470,37 @@ def _do_update_in_thread(actor: str) -> None:
         else:
             # Fallback: download code via GitHub archive API
             _update_log(
-                "No git repo found on mounted volume. Downloading via GitHub archiveâ€¦"
+                "No git repo found. Downloading latest code from GitHub..."
             )
             import tempfile
 
-            archive_url = (
-                REPO_URL.rstrip("/").replace(".git", "")
-                + "/archive/refs/heads/main.zip"
-            )
+            # Try multiple archive URL formats
+            slug = _extract_github_slug(REPO_URL)
+            if not slug:
+                raise RuntimeError(f"Cannot extract GitHub slug from REPO_URL: {REPO_URL}")
+
+            archive_url = None
+            for branch in ["main", "master"]:
+                candidate_url = f"https://github.com/{slug}/archive/refs/heads/{branch}.zip"
+                try:
+                    req = urllib.request.Request(candidate_url, method="HEAD")
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        if resp.status == 200:
+                            archive_url = candidate_url
+                            _update_log(f"Found archive at: {archive_url}")
+                            break
+                except Exception:
+                    continue
+
+            if not archive_url:
+                # Try the codeload URL format
+                archive_url = f"https://codeload.github.com/{slug}/zip/refs/heads/main"
+                _update_log(f"Trying codeload URL: {archive_url}")
+
             _update_log(f"Downloading: {archive_url}")
             temp_zip = tempfile.mktemp(suffix=".zip")
             urllib.request.urlretrieve(archive_url, temp_zip)
-            _update_log("Download complete. Extractingâ€¦")
+            _update_log("Download complete. Extracting...")
 
             temp_dir = tempfile.mkdtemp()
             with zipfile.ZipFile(temp_zip, "r") as zf:
@@ -7560,7 +7579,7 @@ def _do_update_in_thread(actor: str) -> None:
             import time as _t
 
             _t.sleep(3)
-            _update_log("Restarting server nowâ€¦")
+            _update_log("Restarting server now...")
             _restart_uvicorn()
 
         threading.Thread(target=_restart_server, daemon=True).start()
