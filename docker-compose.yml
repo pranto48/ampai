@@ -39,6 +39,12 @@ services:
     ports:
       - "8000:8000"
       - "8001:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-ampai}:${POSTGRES_PASSWORD}@agent_postgres:5432/${POSTGRES_DB:-ampai}
       REDIS_URL: redis://agent_redis:6379/0

@@ -1,91 +1,84 @@
 # AmpAI Personal Agent
 
-AmpAI is a personal AI desktop and Docker agent combining chat, long-term memory, offline/online AI model support, web search, Telegram bot integration, browser automation, and controlled terminal access into a unified platform.
+A personal AI agent with long-term memory, web search, browser automation, terminal access, and Telegram integration.
 
-## Quickstart
-
-### Prerequisites
-
-- **Docker** (v20.10+) and **Docker Compose** (v2.0+)
-- **Ports available**: `8000` and `8001` on the host machine
-- **(Optional)** [Ollama](https://ollama.ai) running locally on port `11434` for local LLM inference
-
-### Setup
-
-1. **Clone the repository** and navigate to the project root:
-
-   ```bash
-   git clone <repository-url>
-   cd ampai
-   ```
-
-2. **Create your environment file** from the provided template:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-3. **Edit `.env`** and replace all `<CHANGE_ME>` placeholders with secure values. At minimum, set:
-
-   - `POSTGRES_PASSWORD` — database password
-   - `JWT_SECRET` — a long random string (generate with `openssl rand -hex 32`)
-   - `AMPAI_DEFAULT_ADMIN_PASSWORD` — admin account password
-
-4. **Start the stack**:
-
-   ```bash
-   docker compose up -d --build
-   ```
-
-   This builds and starts three services:
-   - **agent_postgres** — PostgreSQL 16 with pgvector (container: `ampai-agent-postgres`)
-   - **agent_redis** — Redis 7 (container: `ampai-agent-redis`)
-   - **ampai** — the FastAPI application server (container: `ampai-server`)
-
-   The server waits for both PostgreSQL and Redis to report healthy before accepting requests.
-
-### Verify Deployment
-
-Confirm all services are running and healthy:
+## Quick Start (Docker)
 
 ```bash
+git clone https://github.com/pranto48/ampai.git
+cd ampai
+chmod +x setup.sh && ./setup.sh
+docker compose up -d --build
+```
+
+That's it. The `setup.sh` script generates a `.env` file with secure random secrets.
+
+**Access:**
+- API: http://localhost:8000/docs
+- Health: http://localhost:8000/healthz
+
+**Admin credentials** are printed by `setup.sh`. Default username is `admin`.
+
+## Manual Setup
+
+If you prefer to configure manually:
+
+```bash
+cp .env.example .env
+# Edit .env and replace all <CHANGE_ME> values
+docker compose up -d --build
+```
+
+### Required Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `POSTGRES_PASSWORD` | Database password |
+| `JWT_SECRET` | JWT signing key (generate: `openssl rand -hex 32`) |
+| `AMPAI_DEFAULT_ADMIN_PASSWORD` | Admin account password |
+
+## Verify
+
+```bash
+# Check all services are healthy
 docker compose ps
+
+# Check logs
+docker logs ampai-server --tail=50
+
+# Test the API
+curl http://localhost:8000/healthz
 ```
 
-You should see all three containers with status `Up` and `(healthy)`. Then verify the API is responding:
+## Stop
 
 ```bash
-curl http://localhost:8000/docs
+docker compose down        # Stop containers (keep data)
+docker compose down -v     # Stop and delete all data
 ```
 
-A successful response (HTTP 200 with the Swagger UI page) confirms the deployment is running.
+## Architecture
 
-### Ports
+| Service | Container | Port |
+|---------|-----------|------|
+| PostgreSQL 16 + pgvector | ampai-agent-postgres | 5432 (internal) |
+| Redis 7 | ampai-agent-redis | 6379 (internal) |
+| AmpAI API (FastAPI) | ampai-server | 8000, 8001 |
 
-| Port | Service |
-|------|---------|
-| 8000 | AmpAI API (primary) |
-| 8001 | AmpAI API (secondary/mirror) |
+## Optional: Local AI with Ollama
 
-### Stopping
+Install [Ollama](https://ollama.ai) on your host machine:
 
 ```bash
-docker compose down
+ollama pull llama3.2
+ollama pull nomic-embed-text
 ```
 
-To also remove persistent volumes (database data, Redis data, app data):
-
-```bash
-docker compose down -v
-```
-
-## Configuration
-
-See [`.env.example`](.env.example) for a full list of environment variables with descriptions, defaults, and required/optional status.
+AmpAI auto-detects Ollama at `http://host.docker.internal:11434`.
 
 ## Documentation
 
-Detailed documentation is available in the [`docs/`](docs/) directory:
+See [`docs/`](docs/) for detailed documentation:
 
 - [Memory Architecture](docs/MEMORY_ARCHITECTURE.md)
 - [Browser Automation](docs/BROWSER_AUTOMATION.md)
@@ -94,3 +87,18 @@ Detailed documentation is available in the [`docs/`](docs/) directory:
 - [Backup and Restore](docs/BACKUP_AND_RESTORE.md)
 - [Model Providers](docs/MODEL_PROVIDERS.md)
 - [Security Policy](docs/SECURITY_POLICY.md)
+
+## Desktop App
+
+The Tauri desktop app is in `desktop/`. See [desktop/README.md](desktop/README.md) for build instructions.
+
+## Development
+
+```bash
+# Run tests (inside Docker)
+docker compose exec ampai pytest -q
+
+# Run tests (local, requires Python 3.11+ and dependencies)
+pip install -r requirements.txt
+pytest tests/ -q
+```
