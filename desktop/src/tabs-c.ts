@@ -4,7 +4,7 @@ import{esc}from"./tabs-a";
 export function settingsTab():string{
   if(S.auth?.role!=="admin")return`<div class="section-empty">🛡️ Admin access required.</div>`;
   const cfg=S.configs;
-  const provList=S.providers.length?S.providers:ALL_PROVIDERS.map(p=>({value:p.value,label:p.label}));
+  const provList=ALL_PROVIDERS.map(p=>({value:p.value,label:p.label}));
   return`<div class="panel">
   <div class="panel-title">AI Provider &amp; Model</div>
   <form class="stack" id="cfg-model-form">

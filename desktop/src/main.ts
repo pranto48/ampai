@@ -179,75 +179,122 @@ function render(): void {
   if (!app) {
     return;
   }
+
+  // Page-based layout: Chat is default, other tabs open as full-page overlays
+  const isPageOpen = S.tab !== "server";
+
+  if (isPageOpen) {
+    // Full-page view for non-chat tabs
+    const pageContent = getPageContent(S.tab);
+    app.innerHTML = `
+<div class="page-overlay">
+  <div class="page-header">
+    <button class="page-back-btn" id="btn-back-to-chat">← Back to Chat</button>
+    <span class="page-title">${esc(getPageTitle(S.tab))}</span>
+  </div>
+  <div class="page-body">${pageContent}</div>
+</div>
+<div id="toast-container"></div>`;
+    bind();
+    return;
+  }
+
+  // Default: Chat view with nav bar
   app.innerHTML = `
-<div class="app-shell">
-  <aside class="sidebar${S.sidebarCollapsed ? " collapsed" : ""}">
-    <div class="sidebar-header">
-      <div class="sidebar-brand">
-        <div class="brand-icon">AI</div>
-        <div>
-          <div class="brand-name">AmpAI</div>
-          <div class="brand-sub">Shared Desktop + Web</div>
-        </div>
-      </div>
-      <button class="collapse-btn" id="btn-sidebar-collapse">${S.sidebarCollapsed ? "»" : "«"}</button>
+<div class="chat-fullscreen">
+  ${chatTopbar()}
+  <div class="chat-messages" id="msgs">${renderMsgs()}</div>
+  <div class="chat-input-bar">
+    <div class="attach-pills" id="attach-pills">${renderAttachPills()}</div>
+    <div class="input-box">
+      <textarea id="chat-textarea" class="chat-textarea" rows="1" placeholder="${S.auth ? "Message AmpAI…" : "Login to chat"}" ${S.auth ? "" : "disabled"}></textarea>
+      <label class="attach-btn" title="Attach file">
+        📎
+        <input type="file" id="file-input" multiple style="display:none"/>
+      </label>
+      <button class="chat-send-btn" id="btn-send" ${S.auth && !S.busy ? "" : "disabled"}>${S.busy ? "…" : "Send"}</button>
     </div>
-    <div class="tab-bar">
-      ${tabButton("server", "💬 Chat")}
-      ${tabButton("account", "Account")}
-      ${S.auth ? tabButton("history", "History") : ""}
-      ${S.auth ? tabButton("memory", "🧠 Memory") : ""}
-      ${S.auth ? tabButton("ai", "🤖 AI Models") : ""}
-      ${S.auth ? tabButton("tasks", "📋 Tasks") : ""}
-      ${S.auth ? tabButton("browser", "🌐 Browser") : ""}
-      ${S.auth ? tabButton("terminal", "⌨️ Terminal") : ""}
-      ${S.auth ? tabButton("personas", "AI Personas") : ""}
-      ${S.auth ? tabButton("settings", "⚙️ Settings") : ""}
-      ${S.auth ? tabButton("personalise", "🎨 Personalise") : ""}
-      ${isAdmin() ? tabButton("telegram", "📱 Telegram") : ""}
-      ${isAdmin() ? tabButton("admin", "🛡️ Admin") : ""}
-      ${isAdmin() ? tabButton("update", "Update") : ""}
-    </div>
-    <div class="tab-panels">
-      ${tabPanel("server", serverTab())}
-      ${tabPanel("account", accountTab())}
-      ${S.auth ? tabPanel("history", historyTab()) : ""}
-      ${S.auth ? tabPanel("memory", memoryTab()) : ""}
-      ${S.auth ? tabPanel("ai", aiTab()) : ""}
-      ${S.auth ? tabPanel("tasks", tasksTab()) : ""}
-      ${S.auth ? tabPanel("browser", browserTab()) : ""}
-      ${S.auth ? tabPanel("terminal", terminalTab()) : ""}
-      ${S.auth ? tabPanel("personas", personasTab()) : ""}
-      ${S.auth ? tabPanel("settings", settingsTab()) : ""}
-      ${S.auth ? tabPanel("personalise", personaliseTab()) : ""}
-      ${isAdmin() ? tabPanel("telegram", telegramSettingsTab()) : ""}
-      ${isAdmin() ? tabPanel("admin", adminTab()) : ""}
-      ${isAdmin() ? tabPanel("update", updateTab()) : ""}
-    </div>
-  </aside>
-  <main class="chat-shell">
-    ${chatTopbar()}
-    <div class="chat-messages" id="msgs">${renderMsgs()}</div>
-    <div class="chat-input-bar">
-      <div class="attach-pills" id="attach-pills">${renderAttachPills()}</div>
-      <div class="input-box">
-        <textarea id="chat-textarea" class="chat-textarea" rows="1" placeholder="${S.auth ? "Message AmpAI…" : "Login to chat"}" ${S.auth ? "" : "disabled"}></textarea>
-        <label class="attach-btn" title="Attach file">
-          📎
-          <input type="file" id="file-input" multiple style="display:none"/>
-        </label>
-        <button class="chat-send-btn" id="btn-send" ${S.auth && !S.busy ? "" : "disabled"}>${S.busy ? "…" : "Send"}</button>
-      </div>
-    </div>
-  </main>
+  </div>
+  <nav class="nav-bar">
+    ${navItem("server", "💬", "Chat")}
+    ${navItem("history", "📜", "History")}
+    ${navItem("memory", "🧠", "Memory")}
+    ${navItem("ai", "🤖", "AI")}
+    ${navItem("tasks", "📋", "Tasks")}
+    ${navItem("more", "☰", "More")}
+  </nav>
+  ${S.tab === "more" ? renderMoreMenu() : ""}
 </div>
 <div id="toast-container"></div>`;
   const msgBox = document.getElementById("msgs");
   if (msgBox) {
     msgBox.scrollTop = msgBox.scrollHeight;
   }
-  applySidebarState();
   bind();
+}
+
+function navItem(id: string, icon: string, label: string): string {
+  const active = S.tab === id ? " active" : "";
+  return `<button class="nav-item${active}" data-nav="${id}"><span class="nav-icon">${icon}</span><span class="nav-label">${label}</span></button>`;
+}
+
+function renderMoreMenu(): string {
+  const items = [
+    { id: "account", icon: "👤", label: "Account" },
+    { id: "browser", icon: "🌐", label: "Browser" },
+    { id: "terminal", icon: "⌨️", label: "Terminal" },
+    { id: "personas", icon: "🎭", label: "AI Personas" },
+    { id: "settings", icon: "⚙️", label: "Settings" },
+    { id: "personalise", icon: "🎨", label: "Personalise" },
+    ...(isAdmin() ? [
+      { id: "telegram", icon: "📱", label: "Telegram" },
+      { id: "admin", icon: "🛡️", label: "Admin" },
+      { id: "update", icon: "🔄", label: "Update" },
+    ] : []),
+  ];
+  return `<div class="more-menu-overlay" id="more-menu">
+  <div class="more-menu">
+    ${items.map(i => `<button class="more-menu-item" data-nav="${i.id}"><span>${i.icon}</span> ${esc(i.label)}</button>`).join("")}
+  </div>
+</div>`;
+}
+
+function getPageTitle(tab: string): string {
+  const titles: Record<string, string> = {
+    account: "👤 Account",
+    history: "📜 Chat History",
+    memory: "🧠 Memory",
+    ai: "🤖 AI Models & Providers",
+    tasks: "📋 Tasks",
+    browser: "🌐 Browser Automation",
+    terminal: "⌨️ Terminal Tools",
+    personas: "🎭 AI Personas",
+    settings: "⚙️ Settings",
+    personalise: "🎨 Personalise",
+    telegram: "📱 Telegram",
+    admin: "🛡️ Admin",
+    update: "🔄 Update",
+  };
+  return titles[tab] || tab;
+}
+
+function getPageContent(tab: string): string {
+  switch (tab) {
+    case "account": return accountTab();
+    case "history": return historyTab();
+    case "memory": return memoryTab();
+    case "ai": return aiTab();
+    case "tasks": return tasksTab();
+    case "browser": return browserTab();
+    case "terminal": return terminalTab();
+    case "personas": return personasTab();
+    case "settings": return settingsTab();
+    case "personalise": return personaliseTab();
+    case "telegram": return telegramSettingsTab();
+    case "admin": return adminTab();
+    case "update": return updateTab();
+    default: return `<div class="section-empty">Page not found</div>`;
+  }
 }
 
 function tabButton(id: string, label: string): string {
@@ -256,9 +303,7 @@ function tabButton(id: string, label: string): string {
 
 function tabPanel(id: string, content: string): string {
   return `<div class="tab-panel${S.tab === id ? " active" : ""}">${content}</div>`;
-}
-
-function chatTopbar(): string {
+}function chatTopbar(): string {
   const providers = S.providers.length
     ? S.providers
     : [
@@ -574,18 +619,50 @@ function switchTab(tab: string): void {
 }
 
 function bind(): void {
+  // Navigation: nav bar items and more menu
+  document
+    .querySelectorAll<HTMLButtonElement>("[data-nav]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        const target = button.dataset.nav || "server";
+        if (target === "more") {
+          // Toggle more menu
+          const menu = document.getElementById("more-menu");
+          if (menu) {
+            menu.remove();
+          } else {
+            S.tab = "more";
+            render();
+          }
+          return;
+        }
+        switchTab(target);
+      });
+    });
+
+  // Back to chat button on page overlays
+  document
+    .getElementById("btn-back-to-chat")
+    ?.addEventListener("click", () => {
+      S.tab = "server";
+      render();
+    });
+
+  // Close more menu when clicking overlay
+  document
+    .querySelector(".more-menu-overlay")
+    ?.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).classList.contains("more-menu-overlay")) {
+        S.tab = "server";
+        render();
+      }
+    });
+
+  // Legacy tab buttons (keep for backward compat)
   document
     .querySelectorAll<HTMLButtonElement>(".tab-btn[data-tab]")
     .forEach((button) => {
       button.addEventListener("click", () => switchTab(button.dataset.tab || "server"));
-    });
-
-  document
-    .getElementById("btn-sidebar-collapse")
-    ?.addEventListener("click", () => {
-      S.sidebarCollapsed = !S.sidebarCollapsed;
-      localStorage.setItem("ampai.sidebarCollapsed", S.sidebarCollapsed ? "1" : "0");
-      render();
     });
 
   document
