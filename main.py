@@ -230,9 +230,17 @@ app.include_router(github_router)
 # Register all domain routers with deduplication.
 # This safely adds routers from routers/__init__.py without creating
 # duplicate routes for endpoints already defined inline in this file.
-from routers import register_all_with_dedup, RouteInventory
+from routers import register_all_with_dedup, verify_no_duplicates, RouteInventory
 
 _route_inventory = register_all_with_dedup(app)
+
+# Verify no duplicates exist after registration
+_post_reg_duplicates = verify_no_duplicates(app)
+if _post_reg_duplicates:
+    logging.getLogger("ampai").error(
+        "DUPLICATE ROUTES DETECTED after registration: %s",
+        _post_reg_duplicates,
+    )
 
 # Add CORS middleware
 # CORS â€” allow the Tauri desktop client plus any localhost port.
@@ -1824,12 +1832,24 @@ def _log_route_inventory() -> None:
         len(routes),
         "\n".join(routes),
     )
+    # Log skipped duplicates
     if _route_inventory.skipped_duplicates:
         logger.warning(
             "Skipped %d duplicate route(s) during registration:\n%s",
             len(_route_inventory.skipped_duplicates),
-            "\n".join(_route_inventory.duplicate_details),
+            "\n".join(f"  {d}" for d in _route_inventory.duplicate_details),
         )
+    else:
+        logger.info("No duplicate routes detected during registration.")
+    # Log post-registration verification
+    if _post_reg_duplicates:
+        logger.error(
+            "POST-REGISTRATION DUPLICATES FOUND: %d\n%s",
+            len(_post_reg_duplicates),
+            "\n".join(f"  {m} {p}" for m, p in _post_reg_duplicates),
+        )
+    else:
+        logger.info("Post-registration verification: zero duplicate routes.")
 
 
 @app.on_event("startup")

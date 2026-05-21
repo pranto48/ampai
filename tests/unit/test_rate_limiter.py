@@ -97,8 +97,16 @@ class TestRateLimiterRedisFallback:
     """Redis failure fallback behavior."""
 
     def test_redis_unavailable_uses_memory_fallback(self):
-        """When Redis URL is invalid, should fall back to in-memory."""
-        limiter = RateLimiter(redis_url="redis://nonexistent:6379/0", per_minute=10, per_day=100)
+        """When Redis connection fails, should fall back to in-memory."""
+        # Mock redis to simulate connection failure
+        mock_redis_module = MagicMock()
+        mock_client = MagicMock()
+        mock_client.ping.side_effect = ConnectionError("Connection refused")
+        mock_redis_module.from_url.return_value = mock_client
+
+        with patch.dict(sys.modules, {"redis": mock_redis_module}):
+            limiter = RateLimiter(redis_url="redis://unreachable:6379/0", per_minute=10, per_day=100)
+
         assert limiter.backend_type == "memory"
 
         # Should still work
