@@ -18,7 +18,8 @@ export function settingsTab():string{
     <!-- 1. AI Provider -->
     <div class="settings-sub-group" data-group="provider" style="display: ${S.settingsSubTab === "provider" ? "flex" : "none"}; flex-direction: column; gap: 14px;">
       <div class="panel">
-        <div class="panel-title">Default Provider & Agent</div>
+        <div class="panel-title">🤖 Default Provider & Agent</div>
+        <div class="panel-desc">Configure the default large language model provider and core agent details.</div>
         <div class="form-grid">
           <label class="field">Default Provider
             <select name="default_model_provider">
@@ -31,13 +32,19 @@ export function settingsTab():string{
           <label class="field">AI Agent Name
             <input name="chat_agent_name" value="${esc(cfg.chat_agent_name||"AmpAI")}" placeholder="AmpAI"/>
           </label>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">🦙 Ollama Config (Local AI)</div>
+        <div class="panel-desc">Configure your local Ollama connection. Make sure Ollama is running and accessible from the server.</div>
+        <div class="form-grid">
           <label class="field">Ollama URL
             <input name="ollama_base_url" value="${esc(cfg.ollama_base_url||"")}" placeholder="http://host.docker.internal:11434"/>
           </label>
         </div>
-        <div style="margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-          <button type="button" id="btn-fetch-ollama-models" class="sm">🔍 Fetch Ollama Models</button>
-          ${S.ollamaModels.length?`<div style="font-size:.75rem;color:var(--muted);flex:1">Ollama models: ${S.ollamaModels.slice(0,6).join(", ")}</div>`:""}
+        <div style="margin-top:16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+          <button type="button" id="btn-fetch-ollama-models" class="sm success">🔍 Fetch Ollama Models</button>
+          ${S.ollamaModels.length?`<div class="ollama-tags-list">Models: ${S.ollamaModels.slice(0,8).map(m => `<span class="tag-badge">${esc(m)}</span>`).join("")}</div>`:""}
         </div>
       </div>
     </div>
@@ -45,7 +52,8 @@ export function settingsTab():string{
     <!-- 2. API Credentials -->
     <div class="settings-sub-group" data-group="api" style="display: ${S.settingsSubTab === "api" ? "flex" : "none"}; flex-direction: column; gap: 14px;">
       <div class="panel">
-        <div class="panel-title">API Keys & Endpoints</div>
+        <div class="panel-title">🌐 Major Cloud AI Providers</div>
+        <div class="panel-desc">API keys for cloud-hosted models. Your keys are stored securely on the server.</div>
         <div class="form-grid">
           <label class="field">OpenRouter Key
             <input name="openrouter_api_key" value="${esc(cfg.openrouter_api_key||"")}" type="password" placeholder="sk-or-…"/>
@@ -59,6 +67,12 @@ export function settingsTab():string{
           <label class="field">Anthropic Key
             <input name="anthropic_api_key" value="${esc(cfg.anthropic_api_key||"")}" type="password" placeholder="sk-ant-…"/>
           </label>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">🖥️ Local & Alternative Providers</div>
+        <div class="panel-desc">Connect custom local endpoints, specialized models, or AnythingLLM workspaces.</div>
+        <div class="form-grid">
           <label class="field">Groq Key
             <input name="groq_api_key" value="${esc(cfg.groq_api_key||"")}" type="password" placeholder="gsk_…"/>
           </label>
@@ -90,16 +104,28 @@ export function settingsTab():string{
     <!-- 3. Memory Defaults -->
     <div class="settings-sub-group" data-group="memory" style="display: ${S.settingsSubTab === "memory" ? "flex" : "none"}; flex-direction: column; gap: 14px;">
       <div class="panel">
-        <div class="panel-title">Memory & Web Search</div>
+        <div class="panel-title">🧠 Chat Memory Configuration</div>
+        <div class="panel-desc">Control how previous message context and semantic memories are injected into your chats.</div>
         <div class="form-grid">
           <label class="field">Memory Mode
             <select name="memory_mode">
-              ${["full","indexed","context_only","none"].map(m=>`<option${cfg.memory_mode===m?" selected":""}>${m}</option>`).join("")}
+              ${[
+                { value: "full", label: "Full (recall everything dynamically)" },
+                { value: "indexed", label: "Indexed (semantic retrieval)" },
+                { value: "context_only", label: "Context Only (recent messages)" },
+                { value: "none", label: "None (fresh start every message)" }
+              ].map(m=>`<option value="${m.value}"${cfg.memory_mode===m.value?" selected":""}>${m.label}</option>`).join("")}
             </select>
           </label>
           <label class="field">Memory Top-K
             <input name="memory_top_k" value="${esc(cfg.memory_top_k||"5")}" type="number" min="1" max="30"/>
           </label>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">🌐 Web Search Settings</div>
+        <div class="panel-desc">Configure search engines for real-time web grounding of agent queries.</div>
+        <div class="form-grid">
           <label class="field">SerpAPI Key (Web Search)
             <input name="serpapi_api_key" value="${esc(cfg.serpapi_api_key||"")}" type="password" placeholder="SerpAPI Key"/>
           </label>
@@ -114,11 +140,12 @@ export function settingsTab():string{
   <!-- 4. Backup & Import -->
   <div class="settings-sub-group" data-group="backup" style="display: ${S.settingsSubTab === "backup" ? "block" : "none"}; margin-top: 10px;">
     <div class="panel">
-      <div class="panel-title">Settings Backup</div>
-      <div class="row">
-        <button id="btn-settings-export">📥 Export JSON</button>
+      <div class="panel-title">📥 Backup & Restore Configurations</div>
+      <div class="panel-desc">Export or import your complete settings as a JSON file. API keys are excluded by default for security.</div>
+      <div class="row" style="margin-top: 16px;">
+        <button id="btn-settings-export" class="primary">📥 Export Settings JSON</button>
         <label style="flex:1;cursor:pointer">
-          <button type="button" onclick="this.parentElement.querySelector('input').click()" style="width:100%">📤 Import JSON</button>
+          <button type="button" onclick="this.parentElement.querySelector('input').click()" style="width:100%" class="success">📤 Import Settings JSON</button>
           <input type="file" id="settings-import-file" accept=".json" style="display:none"/>
         </label>
       </div>

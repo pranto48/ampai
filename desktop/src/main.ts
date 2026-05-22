@@ -138,12 +138,34 @@ function renderAttachPills(): string {
 function renderMsgs(): string {
   if (!S.msgs.length) {
     return `
-<div class="chat-empty">
-  <div class="msg-avatar" style="background:linear-gradient(135deg,#10b981,#3b82f6)">AI</div>
-  <div class="chat-empty-bubble">
-    <strong>Hello! I'm AmpAI.</strong><br/>
-    I remember your conversations and can reuse them in future chats.<br/><br/>
-    <span style="color:var(--muted);font-size:.85rem">Chat history, memory, admin settings, and integrations are shared between the web app and the Windows app.</span>
+<div class="chat-empty-hero">
+  <div class="chat-empty-icon-wrapper">
+    <div class="chat-empty-icon">🤖</div>
+  </div>
+  <h2 class="chat-empty-title">Hello! I'm AmpAI</h2>
+  <p class="chat-empty-subtitle">Your personal AI workspace. All chat logs, memories, configuration settings, and integrations are securely synchronized.</p>
+  
+  <div class="chat-empty-grid">
+    <div class="chat-empty-card" data-nav="settings">
+      <div class="card-icon">⚙️</div>
+      <div class="card-title">AI Provider & Settings</div>
+      <div class="card-desc">Configure LLMs, API Keys, Ollama endpoints, and credentials.</div>
+    </div>
+    <div class="chat-empty-card" data-nav="personalise">
+      <div class="card-icon">🎨</div>
+      <div class="card-title">Theme & Layout</div>
+      <div class="card-desc">Customize accent colors, override custom hex, and toggle sidebar.</div>
+    </div>
+    <div class="chat-empty-card" data-nav="memory">
+      <div class="card-icon">🧠</div>
+      <div class="card-title">Memory Default Mode</div>
+      <div class="card-desc">Recall previous context, semantic index, or disable memory.</div>
+    </div>
+    <div class="chat-empty-card" data-nav="tasks">
+      <div class="card-icon">📋</div>
+      <div class="card-title">Manage Tasks</div>
+      <div class="card-desc">View background tasks, status history, and process logs.</div>
+    </div>
   </div>
 </div>`;
   }
@@ -193,11 +215,11 @@ function render(): void {
   <div class="chat-input-bar">
     <div class="attach-pills" id="attach-pills">${renderAttachPills()}</div>
     <div class="input-box">
-      <textarea id="chat-textarea" class="chat-textarea" rows="1" placeholder="${S.auth ? "Message AmpAI…" : "Login to chat"}" ${S.auth ? "" : "disabled"}></textarea>
       <label class="attach-btn" title="Attach file">
         📎
         <input type="file" id="file-input" multiple style="display:none"/>
       </label>
+      <textarea id="chat-textarea" class="chat-textarea" rows="1" placeholder="${S.auth ? "Message AmpAI…" : "Login to chat"}" ${S.auth ? "" : "disabled"}></textarea>
       <button class="chat-send-btn" id="btn-send" ${S.auth && !S.busy ? "" : "disabled"}>${S.busy ? "…" : "Send"}</button>
     </div>
   </div>
@@ -327,27 +349,39 @@ function chatTopbar(): string {
     <div class="chat-topbar-sub">${esc(S.sessionId.slice(0, 20))}…</div>
   </div>
   <span class="ai-name-badge">${esc(S.configs.chat_agent_name || "AmpAI")}</span>
-  <select class="chat-topbar-select" id="sel-provider">
-    ${providers
-      .map(
-        (provider) =>
-          `<option value="${esc(provider.value)}"${S.modelType === provider.value ? " selected" : ""}>${esc(provider.label)}</option>`
-      )
-      .join("")}
-  </select>
-  <select class="chat-topbar-select" id="sel-model" style="max-width:180px">
-    ${modelOptions}
-  </select>
-  <select class="chat-topbar-select" id="sel-memory">
-    ${["full", "indexed", "context_only", "none"]
-      .map(
-        (mode) =>
-          `<option value="${mode}"${S.memoryMode === mode ? " selected" : ""}>${esc(mode)}</option>`
-      )
-      .join("")}
-  </select>
-  <label class="chat-topbar-check"><input type="checkbox" id="chk-websearch" ${S.useWebSearch ? "checked" : ""}/> Web</label>
-  <button class="sm" id="btn-new-session">New</button>
+  <div class="chat-topbar-select-wrapper">
+    <span class="wrapper-icon">🔌</span>
+    <select class="chat-topbar-select" id="sel-provider">
+      ${providers
+        .map(
+          (provider) =>
+            `<option value="${esc(provider.value)}"${S.modelType === provider.value ? " selected" : ""}>${esc(provider.label)}</option>`
+        )
+        .join("")}
+    </select>
+  </div>
+  <div class="chat-topbar-select-wrapper">
+    <span class="wrapper-icon">🤖</span>
+    <select class="chat-topbar-select" id="sel-model" style="max-width:180px">
+      ${modelOptions}
+    </select>
+  </div>
+  <div class="chat-topbar-select-wrapper">
+    <span class="wrapper-icon">🧠</span>
+    <select class="chat-topbar-select" id="sel-memory">
+      ${["full", "indexed", "context_only", "none"]
+        .map(
+          (mode) =>
+            `<option value="${mode}"${S.memoryMode === mode ? " selected" : ""}>${esc(mode)}</option>`
+        )
+        .join("")}
+    </select>
+  </div>
+  <label class="chat-topbar-check-btn ${S.useWebSearch ? "active" : ""}">
+    <input type="checkbox" id="chk-websearch" ${S.useWebSearch ? "checked" : ""} style="display: none;"/>
+    🌐 Web Search
+  </label>
+  <button class="chat-topbar-btn primary" id="btn-new-session">New</button>
 </div>`;
 }
 
@@ -614,9 +648,9 @@ function switchTab(tab: string): void {
 }
 
 function bind(): void {
-  // Navigation: nav bar items and more menu
+  // Navigation: nav bar items, more menu, and dashboard cards
   document
-    .querySelectorAll<HTMLButtonElement>("[data-nav]")
+    .querySelectorAll<HTMLElement>("[data-nav]")
     .forEach((button) => {
       button.addEventListener("click", () => {
         const target = button.dataset.nav || "server";
@@ -741,6 +775,7 @@ function bind(): void {
   });
   document.getElementById("chk-websearch")?.addEventListener("change", (event) => {
     S.useWebSearch = (event.currentTarget as HTMLInputElement).checked;
+    render();
   });
   document.getElementById("btn-new-session")?.addEventListener("click", () => {
     newSessionId();
