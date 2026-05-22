@@ -182,6 +182,7 @@ export const S={
   enableTerminalTools:false,
   attachments:[] as Attach[],
   busy:false,
+  fetchingModels:false,
   browserState:{
     enabled:false,
     allowlist:[],

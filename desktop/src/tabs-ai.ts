@@ -4,17 +4,23 @@ import { esc } from "./tabs-a";
 /**
  * AI Models & Providers tab — dedicated page for model selection and provider config.
  * Shows all providers, their API keys, and dynamically fetched model lists.
+ *
+ * Event delegation attributes rendered here (bound in bindAI() in main.ts):
+ * - data-select-provider="{value}" — click sets S.modelType and triggers model fetch
+ * - data-fetch-models="{value}" — click calls api(/api/models/fetch/{provider}) and stores result
+ * - data-select-model="{id}" — click sets S.modelName
  */
 export function aiTab(): string {
   const cfg = S.configs;
   const currentProvider = S.modelType || cfg.default_model_provider || "ollama";
   const currentModel = S.modelName || cfg.default_model || "";
 
-  // Build provider cards
+  // Build provider cards — show model count from S.providerModels
   const providerCards = ALL_PROVIDERS.map(p => {
     const isActive = currentProvider === p.value;
     const hasKey = p.keyField ? !!(cfg[p.keyField] || "").trim() : true;
-    const models = (S as any)[`${p.value}Models`] || S.providerModels?.[p.value] || [];
+    const models = S.providerModels[p.value] || [];
+    const modelCount = models.length;
     const statusBadge = p.local
       ? `<span class="badge ok" style="font-size:.65rem">Local</span>`
       : hasKey
@@ -27,8 +33,8 @@ export function aiTab(): string {
     ${statusBadge}
   </div>
   <div class="provider-card-models">
-    ${models.length
-      ? `<span style="font-size:.72rem;color:var(--muted)">${models.length} model${models.length > 1 ? "s" : ""} available</span>`
+    ${modelCount
+      ? `<span style="font-size:.72rem;color:var(--muted)">${modelCount} model${modelCount > 1 ? "s" : ""}</span>`
       : `<button class="sm" data-fetch-models="${esc(p.value)}" style="font-size:.72rem">🔍 Fetch Models</button>`
     }
   </div>
@@ -37,7 +43,7 @@ export function aiTab(): string {
 
   // Build model list for current provider
   const providerModels: Array<{id: string; name: string; free?: boolean; context_length?: number}> =
-    S.providerModels?.[currentProvider] || [];
+    S.providerModels[currentProvider] || [];
 
   const modelListHtml = providerModels.length
     ? providerModels.map(m => {

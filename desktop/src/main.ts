@@ -2,6 +2,7 @@ import "./styles.css";
 import {
   ACCENT_K,
   AK,
+  ALL_PROVIDERS,
   APP_VERSION,
   GITHUB,
   S,
@@ -85,12 +86,7 @@ function setThemeAccent(color: string): void {
   localStorage.setItem(ACCENT_K, color);
 }
 
-function applySidebarState(): void {
-  const sidebar = document.querySelector(".sidebar");
-  if (sidebar) {
-    sidebar.classList.toggle("collapsed", !!S.sidebarCollapsed);
-  }
-}
+
 
 function toast(message: string, type: "ok" | "err" | "info" = "info"): void {
   const container = document.getElementById("toast-container");
@@ -181,7 +177,8 @@ function render(): void {
   }
 
   // Page-based layout: Chat is default, other tabs open as full-page overlays
-  const isPageOpen = S.tab !== "server";
+  // "more" is treated as part of the chat view (overlay menu)
+  const isPageOpen = S.tab !== "server" && S.tab !== "more";
 
   if (isPageOpen) {
     // Full-page view for non-chat tabs
@@ -297,33 +294,22 @@ function getPageContent(tab: string): string {
   }
 }
 
-function tabButton(id: string, label: string): string {
-  return `<button class="tab-btn${S.tab === id ? " active" : ""}" data-tab="${id}">${esc(label)}</button>`;
-}
-
-function tabPanel(id: string, content: string): string {
-  return `<div class="tab-panel${S.tab === id ? " active" : ""}">${content}</div>`;
-}function chatTopbar(): string {
-  const providers = S.providers.length
-    ? S.providers
-    : [
-        { value: "ollama", label: "Ollama" },
-        { value: "generic", label: "LM Studio" },
-        { value: "anythingllm", label: "AnythingLLM" },
-        { value: "openrouter", label: "OpenRouter" },
-        { value: "openai", label: "OpenAI" },
-        { value: "gemini", label: "Gemini" },
-        { value: "anthropic", label: "Anthropic" },
-      ];
+function chatTopbar(): string {
+  const providers = ALL_PROVIDERS.map(p => ({ value: p.value, label: p.label }));
   const session = S.sessions.find((item) => item.session_id === S.sessionId);
 
   // Build model options for the current provider
   const currentModels = S.providerModels[S.modelType] || [];
-  const modelOptions = currentModels.length
-    ? currentModels.map(m =>
-        `<option value="${esc(m.id)}"${S.modelName === m.id ? " selected" : ""}>${esc(m.name || m.id)}${m.free ? " ✦" : ""}</option>`
-      ).join("")
-    : `<option value="${esc(S.modelName)}">${esc(S.modelName || "default")}</option>`;
+  let modelOptions: string;
+  if (S.fetchingModels) {
+    modelOptions = `<option value="" disabled selected>Loading models…</option>`;
+  } else if (currentModels.length) {
+    modelOptions = currentModels.map(m =>
+      `<option value="${esc(m.id)}"${S.modelName === m.id ? " selected" : ""}>${esc(m.name || m.id)}${m.free ? " ✦" : ""}</option>`
+    ).join("");
+  } else {
+    modelOptions = `<option value="${esc(S.modelName)}">${esc(S.modelName || "default")}</option>`;
+  }
 
   return `
 <div class="chat-topbar">
@@ -658,12 +644,7 @@ function bind(): void {
       }
     });
 
-  // Legacy tab buttons (keep for backward compat)
-  document
-    .querySelectorAll<HTMLButtonElement>(".tab-btn[data-tab]")
-    .forEach((button) => {
-      button.addEventListener("click", () => switchTab(button.dataset.tab || "server"));
-    });
+
 
   document
     .querySelectorAll<HTMLButtonElement>(".quick-url[data-url]")
@@ -729,19 +710,20 @@ function bind(): void {
   document.getElementById("sel-provider")?.addEventListener("change", (event) => {
     S.modelType = (event.currentTarget as HTMLSelectElement).value;
     S.modelName = ""; // Reset model when provider changes
-    // Try to fetch models for the new provider
-    if (!S.providerModels[S.modelType]?.length) {
-      void (async () => {
-        try {
-          const data = await api<any>(`/api/models/fetch/${S.modelType}`);
-          if (data.models?.length) {
-            S.providerModels[S.modelType] = data.models;
-            render();
-          }
-        } catch { /* provider may not be reachable */ }
-      })();
-    }
+    // Always fetch models for the new provider
+    S.fetchingModels = true;
     render();
+    void (async () => {
+      try {
+        const data = await api<any>(`/api/models/fetch/${S.modelType}`);
+        S.providerModels[S.modelType] = data.models || [];
+      } catch (err: any) {
+        toast(err.message || `Failed to fetch models for ${S.modelType}`, "err");
+      } finally {
+        S.fetchingModels = false;
+        render();
+      }
+    })();
   });
   document.getElementById("sel-model")?.addEventListener("change", (event) => {
     S.modelName = (event.currentTarget as HTMLSelectElement).value;
@@ -843,7 +825,7 @@ function bindHistory(): void {
     void loadTabData("history");
   });
 
-  // New chat button in sidebar
+  // New chat button in history view
   document.getElementById("btn-new-chat-sidebar")?.addEventListener("click", () => {
     newSessionId();
     S.msgs = [];
@@ -1568,11 +1550,6 @@ function bindPersonalise(): void {
     setThemeAccent(value);
     render();
   });
-  document.getElementById("btn-toggle-sidebar")?.addEventListener("click", () => {
-    S.sidebarCollapsed = !S.sidebarCollapsed;
-    localStorage.setItem("ampai.sidebarCollapsed", S.sidebarCollapsed ? "1" : "0");
-    render();
-  });
 }
 
 function bindTelegram(): void {
@@ -1649,11 +1626,25 @@ function bindAI(): void {
       const provider = el.dataset.selectProvider || "";
       if (!provider) return;
       S.modelType = provider;
-      render();
-      // Auto-fetch models if not already loaded
+      // Fetch models for the selected provider if not already cached
       if (!S.providerModels[provider]?.length) {
-        void loadTabData("ai");
+        void (async () => {
+          try {
+            const data = await api<any>(`/api/models/fetch/${encodeURIComponent(provider)}`);
+            if (data.models?.length) {
+              S.providerModels[provider] = data.models;
+              toast(`Loaded ${data.count || data.models.length} models from ${provider}`, "ok");
+            } else {
+              toast(`No models found for ${provider}`, "info");
+            }
+          } catch (error: any) {
+            toast(error.message || `Failed to fetch models from ${provider}`, "err");
+          } finally {
+            render();
+          }
+        })();
       }
+      render();
     });
   });
 
@@ -1680,15 +1671,16 @@ function bindAI(): void {
     }
   });
 
-  // Refresh all models
+  // Refresh all models for providers with keys configured (or local providers)
   document.getElementById("btn-refresh-all-models")?.addEventListener("click", async () => {
-    toast("Fetching models from all providers...", "info");
-    const providers = ["ollama", "openrouter", "openai", "gemini", "generic"];
-    for (const prov of providers) {
+    toast("Fetching models from all configured providers...", "info");
+    for (const p of ALL_PROVIDERS) {
+      // Local providers don't need keys; cloud providers need their keyField configured
+      if (!p.local && p.keyField && !S.configs[p.keyField]) continue;
       try {
-        const data = await api<any>(`/api/models/fetch/${prov}`);
+        const data = await api<any>(`/api/models/fetch/${encodeURIComponent(p.value)}`);
         if (data.models?.length) {
-          S.providerModels[prov] = data.models;
+          S.providerModels[p.value] = data.models;
         }
       } catch { /* skip unavailable providers */ }
     }
@@ -1944,6 +1936,47 @@ function bindAdmin(): void {
   });
 }
 
+let updatePollTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopUpdatePolling(): void {
+  if (updatePollTimer !== null) {
+    clearInterval(updatePollTimer);
+    updatePollTimer = null;
+  }
+}
+
+function startUpdatePolling(): void {
+  stopUpdatePolling();
+  updatePollTimer = setInterval(async () => {
+    try {
+      const result = await api<any>("/api/admin/update/status");
+      S.updateStatus = result;
+      S.updateLog = result.log_lines || [];
+      render();
+      if (result.state === "success" || result.state === "error") {
+        stopUpdatePolling();
+        // Re-enable the button after polling stops
+        const btn = document.getElementById("btn-trigger-update") as HTMLButtonElement | null;
+        if (btn) {
+          btn.disabled = false;
+        }
+        if (result.state === "success") {
+          toast("Update completed successfully!", "ok");
+        } else if (result.state === "error") {
+          toast(result.error || "Update failed.", "err");
+        }
+      }
+    } catch (error: any) {
+      toast(error.message || "Failed to poll update status", "err");
+      stopUpdatePolling();
+      const btn = document.getElementById("btn-trigger-update") as HTMLButtonElement | null;
+      if (btn) {
+        btn.disabled = false;
+      }
+    }
+  }, 3000);
+}
+
 function bindUpdate(): void {
   document.getElementById("btn-check-version")?.addEventListener("click", async () => {
     try {
@@ -1959,11 +1992,25 @@ function bindUpdate(): void {
     if (!confirm("Pull latest code from GitHub and restart the server?")) {
       return;
     }
+    const btn = document.getElementById("btn-trigger-update") as HTMLButtonElement | null;
     try {
+      // Disable button to prevent duplicate triggers
+      if (btn) {
+        btn.disabled = true;
+      }
       const result = await api<any>("/api/admin/update/trigger", { method: "POST" });
       toast(result.message || "Update started.", "ok");
+      // Set initial running state and start polling
+      S.updateStatus = { state: "running", started_at: new Date().toISOString(), finished_at: null, error: null, log_lines: [] };
+      S.updateLog = [];
+      render();
+      startUpdatePolling();
     } catch (error: any) {
       toast(error.message, "err");
+      // Re-enable button on trigger failure
+      if (btn) {
+        btn.disabled = false;
+      }
     }
   });
 
@@ -1979,6 +2026,15 @@ function bindUpdate(): void {
         toast(error.message, "err");
       }
     });
+
+  // If the page loads and update is already running, start polling and disable button
+  if (S.updateStatus?.state === "running") {
+    const btn = document.getElementById("btn-trigger-update") as HTMLButtonElement | null;
+    if (btn) {
+      btn.disabled = true;
+    }
+    startUpdatePolling();
+  }
 }
 
 async function doSend(): Promise<void> {
