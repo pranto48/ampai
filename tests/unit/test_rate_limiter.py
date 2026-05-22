@@ -31,6 +31,10 @@ _spec.loader.exec_module(_module)
 RateLimiter = _module.RateLimiter
 RateLimitResult = _module.RateLimitResult
 
+@pytest.fixture(autouse=True)
+def clean_redis_env(monkeypatch):
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
 
 class TestRateLimiterBasic:
     """Basic rate limiting behavior."""

@@ -7,7 +7,7 @@ a{color:inherit;text-decoration:none}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--bg-4);border-radius:99px}
-#app{height:100vh;display:flex;flex-direction:column;overflow:hidden}
+#app{height:100vh;display:flex;flex-direction:column;overflow:hidden;position:relative;}
 .update-banner{display:flex;align-items:center;gap:10px;padding:9px 18px;background:linear-gradient(90deg,rgba(245,158,11,0.18),rgba(245,158,11,0.08));border-bottom:1px solid rgba(245,158,11,0.3);font-size:0.82rem;color:var(--yellow);flex-shrink:0;}
 .update-banner a{color:#fcd34d;font-weight:700;text-decoration:underline;margin-left:6px;}
 .update-banner-close{margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;padding:0;height:auto;}
@@ -232,12 +232,13 @@ code{display:block;background:rgba(0,0,0,0.4);border:1px solid var(--border);bor
 
 /* Page-based navigation layout */
 .chat-fullscreen{display:flex;flex-direction:column;height:100vh;overflow:hidden;}
-.page-overlay{display:flex;flex-direction:column;height:100vh;background:var(--bg);overflow:hidden;}
-.page-header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg-2);flex-shrink:0;}
+.page-overlay{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;height:100%;background:rgba(8,12,24,0.65);backdrop-filter:blur(28px) saturate(190%);-webkit-backdrop-filter:blur(28px) saturate(190%);overflow:hidden;z-index:100;}
+.page-header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);background:rgba(15,23,42,0.45);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);flex-shrink:0;}
 .page-back-btn{background:transparent;border:1px solid var(--border);color:var(--text);padding:6px 14px;border-radius:8px;font-size:.85rem;cursor:pointer;font-family:inherit;transition:all .15s;}
 .page-back-btn:hover{background:var(--bg-3);border-color:rgba(255,255,255,0.15)}
 .page-title{font-size:1rem;font-weight:700;}
 .page-body{flex:1;overflow-y:auto;padding:16px;}
+.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;}
 
 /* Bottom navigation bar */
 .nav-bar {

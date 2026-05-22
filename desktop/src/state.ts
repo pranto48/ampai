@@ -167,6 +167,7 @@ export const S={
   editingPersona:null as Persona|null,
   personaModal:false,
   adminSubTab:"dashboard" as "dashboard"|"users"|"agent"|"backup"|"retention",
+  settingsSubTab:"provider" as "provider"|"api"|"memory"|"backup",
   adminStats:null as any,
   desktopUpdate:null as any,
   themeAccent:localStorage.getItem(ACCENT_K)||"#6366f1",

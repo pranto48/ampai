@@ -20,7 +20,9 @@ def _override_admin():
     return DummyUser()
 
 
+from core.deps import require_admin_user as require_admin_user_dep
 main.app.dependency_overrides[main.require_admin_user] = _override_admin
+main.app.dependency_overrides[require_admin_user_dep] = _override_admin
 client = TestClient(main.app)
 
 

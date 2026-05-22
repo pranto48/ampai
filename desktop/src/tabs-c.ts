@@ -5,54 +5,125 @@ export function settingsTab():string{
   if(S.auth?.role!=="admin")return`<div class="section-empty">🛡️ Admin access required.</div>`;
   const cfg=S.configs;
   const provList=ALL_PROVIDERS.map(p=>({value:p.value,label:p.label}));
-  return`<div class="panel">
-  <div class="panel-title">AI Provider &amp; Model</div>
-  <form class="stack" id="cfg-model-form">
-    <label class="field">Default Provider
-      <select name="default_model_provider">
-        ${provList.map(p=>`<option value="${esc(p.value)}"${cfg.default_model_provider===p.value?" selected":""}>${esc(p.label)}</option>`).join("")}
-      </select>
-    </label>
-    <label class="field">Default Model<input name="default_model" value="${esc(cfg.default_model||"")}" placeholder="e.g. llama3.2, gpt-4o"/></label>
-    <label class="field">AI Agent Name<input name="chat_agent_name" value="${esc(cfg.chat_agent_name||"AmpAI")}" placeholder="AmpAI"/></label>
-    <div class="divider"></div>
-    <div class="panel-title">API Keys &amp; Endpoints</div>
-    <label class="field">Ollama URL<input name="ollama_base_url" value="${esc(cfg.ollama_base_url||"")}" placeholder="http://host.docker.internal:11434"/>
-    </label>
-    ${S.ollamaModels.length?`<div style="font-size:.75rem;color:var(--muted)">Ollama models: ${S.ollamaModels.slice(0,6).join(", ")}</div>`:""}
-    <button type="button" id="btn-fetch-ollama-models" class="sm">🔍 Fetch Ollama Models</button>
-    <label class="field">OpenRouter Key<input name="openrouter_api_key" value="${esc(cfg.openrouter_api_key||"")}" type="password" placeholder="sk-or-…"/></label>
-    <label class="field">OpenAI Key<input name="openai_api_key" value="${esc(cfg.openai_api_key||"")}" type="password" placeholder="sk-…"/></label>
-    <label class="field">Gemini Key<input name="gemini_api_key" value="${esc(cfg.gemini_api_key||"")}" type="password"/></label>
-    <label class="field">Anthropic Key<input name="anthropic_api_key" value="${esc(cfg.anthropic_api_key||"")}" type="password"/></label>
-    <label class="field">Groq Key<input name="groq_api_key" value="${esc(cfg.groq_api_key||"")}" type="password" placeholder="gsk_…"/></label>
-    <label class="field">Mistral Key<input name="mistral_api_key" value="${esc(cfg.mistral_api_key||"")}" type="password"/></label>
-    <label class="field">Cohere Key<input name="cohere_api_key" value="${esc(cfg.cohere_api_key||"")}" type="password"/></label>
-    <label class="field">LM Studio / Generic URL<input name="generic_base_url" value="${esc(cfg.generic_base_url||"")}" placeholder="http://localhost:1234"/></label>
-    <label class="field">Generic API Key<input name="generic_api_key" value="${esc(cfg.generic_api_key||"")}" type="password"/></label>
-    <label class="field">AnythingLLM URL<input name="anythingllm_base_url" value="${esc(cfg.anythingllm_base_url||"")}" placeholder="http://localhost:3001"/></label>
-    <label class="field">AnythingLLM Key<input name="anythingllm_api_key" value="${esc(cfg.anythingllm_api_key||"")}" type="password"/></label>
-    <label class="field">AnythingLLM Workspace<input name="anythingllm_workspace" value="${esc(cfg.anythingllm_workspace||"")}" placeholder="my-workspace"/></label>
-    <div class="divider"></div>
-    <div class="panel-title">Memory Defaults</div>
-    <label class="field">Memory Mode<select name="memory_mode">
-      ${["full","indexed","context_only","none"].map(m=>`<option${cfg.memory_mode===m?" selected":""}>${m}</option>`).join("")}
-    </select></label>
-    <label class="field">Memory Top-K<input name="memory_top_k" value="${esc(cfg.memory_top_k||"5")}" type="number" min="1" max="30"/></label>
-    <label class="field">SerpAPI Key (Web Search)<input name="serpapi_api_key" value="${esc(cfg.serpapi_api_key||"")}" type="password"/></label>
-    <button class="primary" type="submit">💾 Save AI Settings</button>
+
+  const subBtns = [
+    { id: "provider", label: "🤖 AI Provider" },
+    { id: "api", label: "🔑 API Credentials" },
+    { id: "memory", label: "🧠 Memory Defaults" },
+    { id: "backup", label: "💾 Backup & Import" }
+  ].map(t => `<button type="button" class="sub-tab-btn${S.settingsSubTab === t.id ? " active" : ""}" data-settings-sub="${t.id}">${t.label}</button>`).join("");
+
+  return `<div class="sub-tabs">${subBtns}</div>
+  <form class="stack" id="cfg-model-form" style="margin-top: 10px;">
+    <!-- 1. AI Provider -->
+    <div class="settings-sub-group" data-group="provider" style="display: ${S.settingsSubTab === "provider" ? "flex" : "none"}; flex-direction: column; gap: 14px;">
+      <div class="panel">
+        <div class="panel-title">Default Provider & Agent</div>
+        <div class="form-grid">
+          <label class="field">Default Provider
+            <select name="default_model_provider">
+              ${provList.map(p=>`<option value="${esc(p.value)}"${cfg.default_model_provider===p.value?" selected":""}>${esc(p.label)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="field">Default Model
+            <input name="default_model" value="${esc(cfg.default_model||"")}" placeholder="e.g. llama3.2, gpt-4o"/>
+          </label>
+          <label class="field">AI Agent Name
+            <input name="chat_agent_name" value="${esc(cfg.chat_agent_name||"AmpAI")}" placeholder="AmpAI"/>
+          </label>
+          <label class="field">Ollama URL
+            <input name="ollama_base_url" value="${esc(cfg.ollama_base_url||"")}" placeholder="http://host.docker.internal:11434"/>
+          </label>
+        </div>
+        <div style="margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+          <button type="button" id="btn-fetch-ollama-models" class="sm">🔍 Fetch Ollama Models</button>
+          ${S.ollamaModels.length?`<div style="font-size:.75rem;color:var(--muted);flex:1">Ollama models: ${S.ollamaModels.slice(0,6).join(", ")}</div>`:""}
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. API Credentials -->
+    <div class="settings-sub-group" data-group="api" style="display: ${S.settingsSubTab === "api" ? "flex" : "none"}; flex-direction: column; gap: 14px;">
+      <div class="panel">
+        <div class="panel-title">API Keys & Endpoints</div>
+        <div class="form-grid">
+          <label class="field">OpenRouter Key
+            <input name="openrouter_api_key" value="${esc(cfg.openrouter_api_key||"")}" type="password" placeholder="sk-or-…"/>
+          </label>
+          <label class="field">OpenAI Key
+            <input name="openai_api_key" value="${esc(cfg.openai_api_key||"")}" type="password" placeholder="sk-…"/>
+          </label>
+          <label class="field">Gemini Key
+            <input name="gemini_api_key" value="${esc(cfg.gemini_api_key||"")}" type="password" placeholder="AIzaSy…"/>
+          </label>
+          <label class="field">Anthropic Key
+            <input name="anthropic_api_key" value="${esc(cfg.anthropic_api_key||"")}" type="password" placeholder="sk-ant-…"/>
+          </label>
+          <label class="field">Groq Key
+            <input name="groq_api_key" value="${esc(cfg.groq_api_key||"")}" type="password" placeholder="gsk_…"/>
+          </label>
+          <label class="field">Mistral Key
+            <input name="mistral_api_key" value="${esc(cfg.mistral_api_key||"")}" type="password" placeholder="Mistral Key"/>
+          </label>
+          <label class="field">Cohere Key
+            <input name="cohere_api_key" value="${esc(cfg.cohere_api_key||"")}" type="password" placeholder="Cohere Key"/>
+          </label>
+          <label class="field">LM Studio / Generic URL
+            <input name="generic_base_url" value="${esc(cfg.generic_base_url||"")}" placeholder="http://localhost:1234"/>
+          </label>
+          <label class="field">Generic API Key
+            <input name="generic_api_key" value="${esc(cfg.generic_api_key||"")}" type="password" placeholder="Generic Key"/>
+          </label>
+          <label class="field">AnythingLLM URL
+            <input name="anythingllm_base_url" value="${esc(cfg.anythingllm_base_url||"")}" placeholder="http://localhost:3001"/>
+          </label>
+          <label class="field">AnythingLLM Key
+            <input name="anythingllm_api_key" value="${esc(cfg.anythingllm_api_key||"")}" type="password" placeholder="AnythingLLM Key"/>
+          </label>
+          <label class="field">AnythingLLM Workspace
+            <input name="anythingllm_workspace" value="${esc(cfg.anythingllm_workspace||"")}" placeholder="my-workspace"/>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. Memory Defaults -->
+    <div class="settings-sub-group" data-group="memory" style="display: ${S.settingsSubTab === "memory" ? "flex" : "none"}; flex-direction: column; gap: 14px;">
+      <div class="panel">
+        <div class="panel-title">Memory & Web Search</div>
+        <div class="form-grid">
+          <label class="field">Memory Mode
+            <select name="memory_mode">
+              ${["full","indexed","context_only","none"].map(m=>`<option${cfg.memory_mode===m?" selected":""}>${m}</option>`).join("")}
+            </select>
+          </label>
+          <label class="field">Memory Top-K
+            <input name="memory_top_k" value="${esc(cfg.memory_top_k||"5")}" type="number" min="1" max="30"/>
+          </label>
+          <label class="field">SerpAPI Key (Web Search)
+            <input name="serpapi_api_key" value="${esc(cfg.serpapi_api_key||"")}" type="password" placeholder="SerpAPI Key"/>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Save button (shown for provider, api, memory) -->
+    <button class="primary" type="submit" id="btn-save-settings" style="display: ${S.settingsSubTab !== "backup" ? "block" : "none"}; width: 100%; margin-top: 10px;">💾 Save AI Settings</button>
   </form>
-</div>
-<div class="panel">
-  <div class="panel-title">Settings Backup</div>
-  <div class="row">
-    <button id="btn-settings-export">📥 Export JSON</button>
-    <label style="flex:1;cursor:pointer">
-      <button type="button" onclick="this.parentElement.querySelector('input').click()" style="width:100%">📤 Import JSON</button>
-      <input type="file" id="settings-import-file" accept=".json" style="display:none"/>
-    </label>
-  </div>
-</div>`;
+
+  <!-- 4. Backup & Import -->
+  <div class="settings-sub-group" data-group="backup" style="display: ${S.settingsSubTab === "backup" ? "block" : "none"}; margin-top: 10px;">
+    <div class="panel">
+      <div class="panel-title">Settings Backup</div>
+      <div class="row">
+        <button id="btn-settings-export">📥 Export JSON</button>
+        <label style="flex:1;cursor:pointer">
+          <button type="button" onclick="this.parentElement.querySelector('input').click()" style="width:100%">📤 Import JSON</button>
+          <input type="file" id="settings-import-file" accept=".json" style="display:none"/>
+        </label>
+      </div>
+    </div>
+  </div>`;
 }
 
 export function personaliseTab():string{

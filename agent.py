@@ -367,7 +367,7 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None, genera
                 )
         
         if fallback_llms:
-            return primary_llm.with_fallbacks(fallback_llms)
+            return primary_llm.with_fallbacks(fallback_llms, exceptions_to_handle=(Exception,))
         return primary_llm
     elif model_type == "anythingllm":
         base_url = get_config("anythingllm_base_url")
@@ -393,15 +393,7 @@ def chat_with_agent(
     use_web_search: bool = False,
     attachments: List[Dict] = None,
     chat_output_mode: str = None,
-    force_save: bool = False,
-    **kwargs,
-):
-    if attachments is None:
-        attachments = []
-    generation_options = _resolve_generation_options(model_type=model_type, chat_output_mode=chat_output_mode or "normal")
-    llm = get_llm(model_type, api_key, model_name=model_name, generation_options=generation_options)
-
-    username = kwargs.get("username", "system")
+    force_sa    username = kwargs.get("username", "system")
     is_admin = kwargs.get("is_admin", False)
     allowed_memory_categories = kwargs.get("allowed_memory_categories", [])
     persist_memory = kwargs.get("persist_memory", True)
@@ -409,208 +401,261 @@ def chat_with_agent(
     pii_strict_mode = kwargs.get("pii_strict_mode", False)
     persona_prompt_override = kwargs.get("persona_prompt_override")
 
-    core_mems = get_core_memories()
-    core_facts_str = "\n".join([f"- {m['fact']}" for m in core_mems]) if core_mems else "None yet."
+    try:
+        core_mems = get_core_memories()
+    except Exception:
+        core_mems = []
 
-    # ── Cross-session recall injection (AmpAI / hermes-agent style) ─────────
-    recall_context = ""
-    cross_session_enabled = str(
-        get_config("cross_session_recall_enabled", "true")
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    if cross_session_enabled and message:
-        try:
-            recall_context = search_and_summarize(
-                query=message,
-                username=username or None,
-                model_type=model_type,
-                limit=12,
-                use_llm=True,
-            )
-        except Exception as _recall_err:
-            logger.debug("Cross-session recall failed: %s", _recall_err)
+    try:
+        generation_options = _resolve_generation_options(model_type=model_type, chat_output_mode=chat_output_mode or "normal")
+        llm = get_llm(model_type, api_key, model_name=model_name, generation_options=generation_options)
 
-    web_context = ""
-    web_search = {"enabled": use_web_search, "provider": None, "status": "disabled", "error": None}
-    if use_web_search:
-        try:
-            from langchain_community.tools import DuckDuckGoSearchRun
-            search = DuckDuckGoSearchRun()
-            search_results = search.run(message)
-            web_search = {"enabled": True, "provider": "duckduckgo-langchain", "status": "ok", "error": None}
-            web_context = f"\n\n--- LIVE WEB SEARCH RESULTS FOR '{message}' ---\n{search_results}\nUse this real-time information to answer accurately.\n"
-        except Exception as e:
-            first_error = str(e)
+        core_facts_str = "\n".join([f"- {m['fact']}" for m in core_mems]) if core_mems else "None yet."
+
+        # ── Cross-session recall injection (AmpAI / hermes-agent style) ─────────
+        recall_context = ""
+        cross_session_enabled = str(
+            get_config("cross_session_recall_enabled", "true")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if cross_session_enabled and message:
             try:
-                from ddgs import DDGS
-                with DDGS() as ddgs:
-                    results = list(ddgs.text(message, max_results=5))
-                search_results = "\n".join([f"- {r.get('title','')} | {r.get('href','')} | {r.get('body','')}" for r in results])
-                web_search = {"enabled": True, "provider": "ddgs-direct", "status": "ok", "error": first_error}
-                web_context = f"\n\n--- LIVE WEB SEARCH RESULTS FOR '{message}' ---\n{search_results}\nUse this real-time information to answer accurately.\n"
-            except Exception as e2:
-                error_msg = f"{first_error}; fallback_error={e2}"
-                print(f"Web search error: {error_msg}")
-                web_search = {"enabled": True, "provider": "none", "status": "failed", "error": error_msg}
-                web_context = (
-                    "\n\n--- LIVE WEB SEARCH STATUS ---\n"
-                    f"Web search failed with error: {error_msg}\n"
-                    "If results are unavailable, say that clearly instead of inventing web facts.\n"
+                recall_context = search_and_summarize(
+                    query=message,
+                    username=username or None,
+                    model_type=model_type,
+                    limit=12,
+                    use_llm=True,
                 )
+            except Exception as _recall_err:
+                logger.debug("Cross-session recall failed: %s", _recall_err)
 
-    file_context = ""
-    image_contents = []
-
-    for attachment in attachments:
-        if attachment.get("extracted_text"):
-            file_context += f"\n--- Attached Document: {attachment['filename']} ---\n{attachment['extracted_text']}\n"
-        elif attachment.get("type", "").startswith("image/"):
-            import base64
-            file_path = os.path.join(os.path.dirname(__file__), "..", "data", attachment['url'].strip("/"))
+        web_context = ""
+        web_search = {"enabled": use_web_search, "provider": None, "status": "disabled", "error": None}
+        if use_web_search:
             try:
-                with open(file_path, "rb") as image_file:
-                    encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-                    image_contents.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{attachment['type']};base64,{encoded_string}"}
-                    })
+                from langchain_community.tools import DuckDuckGoSearchRun
+                search = DuckDuckGoSearchRun()
+                search_results = search.run(message)
+                web_search = {"enabled": True, "provider": "duckduckgo-langchain", "status": "ok", "error": None}
+                web_context = f"\n\n--- LIVE WEB SEARCH RESULTS FOR '{message}' ---\n{search_results}\nUse this real-time information to answer accurately.\n"
             except Exception as e:
-                logger.exception("Image read error", exc_info=e)
+                first_error = str(e)
+                try:
+                    from ddgs import DDGS
+                    with DDGS() as ddgs:
+                        results = list(ddgs.text(message, max_results=5))
+                    search_results = "\n".join([f"- {r.get('title','')} | {r.get('href','')} | {r.get('body','')}" for r in results])
+                    web_search = {"enabled": True, "provider": "ddgs-direct", "status": "ok", "error": first_error}
+                    web_context = f"\n\n--- LIVE WEB SEARCH RESULTS FOR '{message}' ---\n{search_results}\nUse this real-time information to answer accurately.\n"
+                except Exception as e2:
+                    error_msg = f"{first_error}; fallback_error={e2}"
+                    print(f"Web search error: {error_msg}")
+                    web_search = {"enabled": True, "provider": "none", "status": "failed", "error": error_msg}
+                    web_context = (
+                        "\n\n--- LIVE WEB SEARCH STATUS ---\n"
+                        f"Web search failed with error: {error_msg}\n"
+                        "If results are unavailable, say that clearly instead of inventing web facts.\n"
+                    )
 
-    # ── AmpAI identity system prompt ─────────────────────────────────────────
-    persona_prompt = (persona_prompt_override or "").strip()
-    agent_directives = get_ampai_system_prompt(
-        core_facts=core_facts_str,
-        recall_context=recall_context,
-        username=username,
-        persona_override=persona_prompt,
-    )
-    # Append web and file context
-    agent_directives += f"{web_context}{file_context}"
+        file_context = ""
+        image_contents = []
 
-    requested_mode = (chat_output_mode or get_config("chat_output_mode", "normal") or "normal").strip().lower()
-    if requested_mode not in {"compact", "normal"}:
-        requested_mode = "normal"
-    if requested_mode == "compact":
-        compact_token_cap = (
-            generation_options.get("max_tokens")
-            or generation_options.get("max_output_tokens")
-            or generation_options.get("num_predict")
-            or 120
-        )
-        agent_directives += f"\nAnswer in <= {compact_token_cap} tokens, concise bullets, no extra explanation unless asked.\n"
+        for attachment in attachments:
+            if attachment.get("extracted_text"):
+                file_context += f"\n--- Attached Document: {attachment['filename']} ---\n{attachment['extracted_text']}\n"
+            elif attachment.get("type", "").startswith("image/"):
+                import base64
+                file_path = os.path.join(os.path.dirname(__file__), "..", "data", attachment['url'].strip("/"))
+                try:
+                    with open(file_path, "rb") as image_file:
+                        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                        image_contents.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{attachment['type']};base64,{encoded_string}"}
+                        })
+                except Exception as e:
+                    logger.exception("Image read error", exc_info=e)
 
-    retrieval_meta = {
-        "enabled": memory_mode == "indexed",
-        "top_k": None,
-        "recency_bias": None,
-        "category_filter": None,
-        "retrieved_count": 0,
-        "truncated_count": 0,
-        "context_chars": 0,
-        "pipeline": "vector_only",
-        "latency_ms": 0,
-        "prefilter_count": 0,
-        "cache_hits": 0,
-        "cache_misses": 0,
-    }
-
-    if memory_mode == "indexed":
-        indexer = MemoryIndexer(model_type)
-        k = max(1, min(int(memory_top_k or 5), INDEXED_TOP_K_MAX))
-        effective_recency_bias = max(0.0, min(1.0, float(recency_bias if recency_bias is not None else 0.6)))
-        use_low_token_cap = (chat_output_mode or "").strip().lower() == "compact"
-        if use_low_token_cap:
-            k = min(k, INDEXED_LOW_TOKEN_TOP_K_MAX)
-        relevant_memories = indexer.search_facts(
-            message,
-            k=k,
-            recency_bias=effective_recency_bias,
-            category_filter=(category_filter or None),
+        # ── AmpAI identity system prompt ─────────────────────────────────────────
+        persona_prompt = (persona_prompt_override or "").strip()
+        agent_directives = get_ampai_system_prompt(
+            core_facts=core_facts_str,
+            recall_context=recall_context,
             username=username,
-            status="approved",
+            persona_override=persona_prompt,
+        )
+        # Append web and file context
+        agent_directives += f"{web_context}{file_context}"
+
+        requested_mode = (chat_output_mode or get_config("chat_output_mode", "normal") or "normal").strip().lower()
+        if requested_mode not in {"compact", "normal"}:
+            requested_mode = "normal"
+        if requested_mode == "compact":
+            compact_token_cap = (
+                generation_options.get("max_tokens")
+                or generation_options.get("max_output_tokens")
+                or generation_options.get("num_predict")
+                or 120
+            )
+            agent_directives += f"\nAnswer in <= {compact_token_cap} tokens, concise bullets, no extra explanation unless asked.\n"
+
+        retrieval_meta = {
+            "enabled": memory_mode == "indexed",
+            "top_k": None,
+            "recency_bias": None,
+            "category_filter": None,
+            "retrieved_count": 0,
+            "truncated_count": 0,
+            "context_chars": 0,
+            "pipeline": "vector_only",
+            "latency_ms": 0,
+            "prefilter_count": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+        }
+
+        if memory_mode == "indexed":
+            indexer = MemoryIndexer(model_type)
+            k = max(1, min(int(memory_top_k or 5), INDEXED_TOP_K_MAX))
+            effective_recency_bias = max(0.0, min(1.0, float(recency_bias if recency_bias is not None else 0.6)))
+            use_low_token_cap = (chat_output_mode or "").strip().lower() == "compact"
+            if use_low_token_cap:
+                k = min(k, INDEXED_LOW_TOKEN_TOP_K_MAX)
+            relevant_memories = indexer.search_facts(
+                message,
+                k=k,
+                recency_bias=effective_recency_bias,
+                category_filter=(category_filter or None),
+                username=username,
+                status="approved",
+            )
+
+            query_terms = {w for w in re.findall(r"\w+", (message or "").lower()) if len(w) > 2}
+
+            def _score_snippet(snippet: str, idx: int) -> float:
+                words = {w for w in re.findall(r"\w+", snippet.lower()) if len(w) > 2}
+                overlap = len(query_terms.intersection(words))
+                date_hits = len(re.findall(r"\b20\d{2}-\d{2}-\d{2}\b", snippet))
+                rank_decay = max(0.0, 1.0 - (0.05 * idx))
+                return (overlap * 2.0) + (date_hits * effective_recency_bias) + rank_decay
+
+            ranked_memories = sorted(
+                [(snippet, _score_snippet(snippet, idx)) for idx, snippet in enumerate(relevant_memories or [])],
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            context_snippets: List[str] = []
+            context_chars = 0
+            truncated_count = 0
+            for snippet, _score in ranked_memories:
+                normalized = (snippet or "").strip()
+                if not normalized:
+                    continue
+                if len(normalized) > INDEXED_CONTEXT_CHAR_BUDGET:
+                    normalized = normalized[:INDEXED_CONTEXT_CHAR_BUDGET].rstrip() + "…"
+                    truncated_count += 1
+                separator_chars = 5 if context_snippets else 0  # "\n---\n"
+                remaining = INDEXED_CONTEXT_CHAR_BUDGET - context_chars - separator_chars
+                if remaining <= 0:
+                    truncated_count += 1
+                    continue
+                if len(normalized) > remaining:
+                    normalized = normalized[:remaining].rstrip() + "…"
+                    truncated_count += 1
+                context_snippets.append(normalized)
+                context_chars += len(normalized) + separator_chars
+                if context_chars >= INDEXED_CONTEXT_CHAR_BUDGET:
+                    break
+
+            context_str = "\n---\n".join(context_snippets) if context_snippets else "No previous relevant facts found."
+            retrieval_meta.update({
+                "top_k": k,
+                "recency_bias": effective_recency_bias,
+                "category_filter": category_filter or None,
+                "retrieved_count": len(context_snippets),
+                "truncated_count": truncated_count,
+                "context_chars": len(context_str),
+            })
+            retrieval_meta.update(indexer.last_retrieval_stats or {})
+            system_msg = (
+                agent_directives +
+                "FAST INDEXED MEMORY MODE: Instead of full history, here are the most relevant distilled facts retrieved for this query:\n"
+                f"{context_str}\n\n"
+                f"Retrieval tuning: top_k={k}, recency_bias={effective_recency_bias}, category_filter={category_filter or 'none'}, context_char_budget={INDEXED_CONTEXT_CHAR_BUDGET}.\n"
+                "Use these to provide highly contextual answers."
+            )
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", system_msg),
+                MessagesPlaceholder(variable_name="history"),
+                ("human", "{input}")
+            ])
+        else:
+            system_msg = agent_directives + "Use the conversation memory to provide contextual answers. Be concise and clear."
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", system_msg),
+                MessagesPlaceholder(variable_name="history"),
+                ("human", "{input}")
+            ])
+
+        chain = prompt | llm
+        history_factory = get_short_redis_history if memory_mode == "indexed" else get_redis_history
+
+        chain_with_history = RunnableWithMessageHistory(
+            chain,
+            history_factory,
+            input_messages_key="input",
+            history_messages_key="history",
         )
 
-        query_terms = {w for w in re.findall(r"\w+", (message or "").lower()) if len(w) > 2}
+        human_input = [{"type": "text", "text": message}] + image_contents if image_contents else message
 
-        def _score_snippet(snippet: str, idx: int) -> float:
-            words = {w for w in re.findall(r"\w+", snippet.lower()) if len(w) > 2}
-            overlap = len(query_terms.intersection(words))
-            date_hits = len(re.findall(r"\b20\d{2}-\d{2}-\d{2}\b", snippet))
-            rank_decay = max(0.0, 1.0 - (0.05 * idx))
-            return (overlap * 2.0) + (date_hits * effective_recency_bias) + rank_decay
+        response = chain_with_history.invoke({"input": human_input}, config={"configurable": {"session_id": session_id}})
+        content = response.content
+    except Exception as e:
+        logger.warning("LLM execution failed, falling back to ampai_default_chat. Error: %s", e)
+        from ampai_default_engine import ampai_default_chat
+        
+        pii_redaction_enabled = pii_strict_mode or str(get_config("pii_redaction_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        msg_to_send = message
+        if pii_redaction_enabled:
+            msg_to_send = redact_pii_text(msg_to_send)
+            
+        if 'retrieval_meta' not in locals():
+            retrieval_meta = {
+                "enabled": memory_mode == "indexed",
+                "top_k": memory_top_k,
+                "recency_bias": recency_bias,
+                "category_filter": category_filter,
+                "retrieved_count": 0,
+                "context_chars": 0,
+            }
+        if 'web_search' not in locals():
+            web_search = {"enabled": use_web_search, "provider": None, "status": "disabled", "error": None}
 
-        ranked_memories = sorted(
-            [(snippet, _score_snippet(snippet, idx)) for idx, snippet in enumerate(relevant_memories or [])],
-            key=lambda item: item[1],
-            reverse=True,
+        default_res = ampai_default_chat(
+            message=msg_to_send,
+            session_id=session_id,
+            username=username,
+            core_mems=core_mems,
         )
-        context_snippets: List[str] = []
-        context_chars = 0
-        truncated_count = 0
-        for snippet, _score in ranked_memories:
-            normalized = (snippet or "").strip()
-            if not normalized:
-                continue
-            if len(normalized) > INDEXED_CONTEXT_CHAR_BUDGET:
-                normalized = normalized[:INDEXED_CONTEXT_CHAR_BUDGET].rstrip() + "…"
-                truncated_count += 1
-            separator_chars = 5 if context_snippets else 0  # "\n---\n"
-            remaining = INDEXED_CONTEXT_CHAR_BUDGET - context_chars - separator_chars
-            if remaining <= 0:
-                truncated_count += 1
-                continue
-            if len(normalized) > remaining:
-                normalized = normalized[:remaining].rstrip() + "…"
-                truncated_count += 1
-            context_snippets.append(normalized)
-            context_chars += len(normalized) + separator_chars
-            if context_chars >= INDEXED_CONTEXT_CHAR_BUDGET:
-                break
-
-        context_str = "\n---\n".join(context_snippets) if context_snippets else "No previous relevant facts found."
-        retrieval_meta.update({
-            "top_k": k,
-            "recency_bias": effective_recency_bias,
-            "category_filter": category_filter or None,
-            "retrieved_count": len(context_snippets),
-            "truncated_count": truncated_count,
-            "context_chars": len(context_str),
-        })
-        retrieval_meta.update(indexer.last_retrieval_stats or {})
-        system_msg = (
-            agent_directives +
-            "FAST INDEXED MEMORY MODE: Instead of full history, here are the most relevant distilled facts retrieved for this query:\n"
-            f"{context_str}\n\n"
-            f"Retrieval tuning: top_k={k}, recency_bias={effective_recency_bias}, category_filter={category_filter or 'none'}, context_char_budget={INDEXED_CONTEXT_CHAR_BUDGET}.\n"
-            "Use these to provide highly contextual answers."
-        )
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_msg),
-            MessagesPlaceholder(variable_name="history"),
-            ("human", "{input}")
-        ])
-    else:
-        system_msg = agent_directives + "Use the conversation memory to provide contextual answers. Be concise and clear."
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_msg),
-            MessagesPlaceholder(variable_name="history"),
-            ("human", "{input}")
-        ])
-
-    chain = prompt | llm
-    history_factory = get_short_redis_history if memory_mode == "indexed" else get_redis_history
-
-    chain_with_history = RunnableWithMessageHistory(
-        chain,
-        history_factory,
-        input_messages_key="input",
-        history_messages_key="history",
-    )
-
-    human_input = [{"type": "text", "text": message}] + image_contents if image_contents else message
-
-    response = chain_with_history.invoke({"input": human_input}, config={"configurable": {"session_id": session_id}})
-    content = response.content
+        if pii_redaction_enabled:
+            default_res["response"] = redact_pii_text(default_res["response"])
+        default_res["response"] = "⚠️ **[Rate Limit / Provider Error]** I fell back to my built-in engine:\n\n" + default_res["response"]
+        
+        return {
+            "response": default_res["response"],
+            "web_search": default_res.get("web_search") or web_search,
+            "task_suggestions": [],
+            "has_task_cues": False,
+            "retrieval": default_res.get("retrieval") or retrieval_meta,
+            "memory_action": default_res.get("memory_action"),
+            "memory_fact": default_res.get("memory_fact"),
+            "memory_category": None,
+            "skill_opportunity": None,
+            "recall_used": False,
+        }t_pii_text(default_res["response"])
+        default_res["response"] = "⚠️ **[Rate Limit / Provider Error]** I fell back to my built-in engine:\n\n" + default_res["response"]
+        return default_res
 
     # Capture memory candidates using the persistence manager
     memory_persistence_manager.capture_memory_candidate(

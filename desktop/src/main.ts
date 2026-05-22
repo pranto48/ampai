@@ -186,24 +186,7 @@ function render(): void {
   // "more" is treated as part of the chat view (overlay menu)
   const isPageOpen = S.tab !== "server" && S.tab !== "more";
 
-  if (isPageOpen) {
-    // Full-page view for non-chat tabs
-    const pageContent = getPageContent(S.tab);
-    app.innerHTML = `
-<div class="page-overlay">
-  <div class="page-header">
-    <button class="page-back-btn" id="btn-back-to-chat">← Back to Chat</button>
-    <span class="page-title">${esc(getPageTitle(S.tab))}</span>
-  </div>
-  <div class="page-body">${pageContent}</div>
-</div>
-<div id="toast-container"></div>`;
-    bind();
-    return;
-  }
-
-  // Default: Chat view with nav bar
-  app.innerHTML = `
+  const chatHtml = `
 <div class="chat-fullscreen">
   ${chatTopbar()}
   <div class="chat-messages" id="msgs">${renderMsgs()}</div>
@@ -227,8 +210,28 @@ function render(): void {
     ${navItem("more", "☰", "More")}
   </nav>
   ${S.tab === "more" ? renderMoreMenu() : ""}
+</div>`;
+
+  if (isPageOpen) {
+    // Full-page view for non-chat tabs
+    const pageContent = getPageContent(S.tab);
+    app.innerHTML = `
+${chatHtml}
+<div class="page-overlay">
+  <div class="page-header">
+    <button class="page-back-btn" id="btn-back-to-chat">← Back to Chat</button>
+    <span class="page-title">${esc(getPageTitle(S.tab))}</span>
+  </div>
+  <div class="page-body">${pageContent}</div>
 </div>
 <div id="toast-container"></div>`;
+  } else {
+    // Default: Chat view with nav bar
+    app.innerHTML = `
+${chatHtml}
+<div id="toast-container"></div>`;
+  }
+
   const msgBox = document.getElementById("msgs");
   if (msgBox) {
     msgBox.scrollTop = msgBox.scrollHeight;
@@ -1438,6 +1441,15 @@ function bindPersonas(): void {
 }
 
 function bindSettings(): void {
+  document
+    .querySelectorAll<HTMLButtonElement>("[data-settings-sub]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        S.settingsSubTab = (button.dataset.settingsSub as any) || "provider";
+        render();
+      });
+    });
+
   document
     .getElementById("cfg-model-form")
     ?.addEventListener("submit", async (event) => {
