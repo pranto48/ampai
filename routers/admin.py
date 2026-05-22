@@ -410,7 +410,7 @@ def admin_settings_health(_: UserContext = Depends(require_admin_user)):
             {"key": key, "status": status, "message": message, "fix_hint": fix_hint}
         )
 
-    local_only_mode = _to_bool(configs.get("local_only_mode", "true"))
+    local_only_mode = _to_bool(configs.get("local_only_mode", "false"))
     default_provider = (
         (
             configs.get("default_model_provider")

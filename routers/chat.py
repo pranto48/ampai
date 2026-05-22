@@ -56,7 +56,7 @@ def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated
         )
 
         local_only_mode = str(
-            get_config("local_only_mode", "true")
+            get_config("local_only_mode", "false")
         ).strip().lower() in {"1", "true", "yes", "on"}
         if local_only_mode and (request.model_type or "").strip().lower() not in {
             "",

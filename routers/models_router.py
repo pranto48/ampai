@@ -56,7 +56,7 @@ def _timed_probe(
 @router.get("/api/models/options")
 def get_model_options(_: UserContext = Depends(require_authenticated_user)):
     configs = get_all_configs()
-    local_only_mode = str(configs.get("local_only_mode", "true")).strip().lower() in {
+    local_only_mode = str(configs.get("local_only_mode", "false")).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -93,9 +93,9 @@ def get_model_options(_: UserContext = Depends(require_authenticated_user)):
             "openrouter": _parse_config_list(
                 configs.get("openrouter_model_list"),
                 [
-                    "meta-llama/llama-3.3-8b-instruct:free",
-                    "qwen/qwen3-4b:free",
-                    "deepseek/deepseek-r1-0528:free",
+                    "meta-llama/llama-3.3-70b-instruct:free",
+                    "deepseek/deepseek-v4-flash:free",
+                    "qwen/qwen3-coder:free",
                 ],
             ),
         },
@@ -328,7 +328,7 @@ def get_model_health(_: UserContext = Depends(require_authenticated_user)):
     Cloud providers without configured API keys are skipped.
     """
     configs = get_all_configs()
-    local_only_mode = str(configs.get("local_only_mode", "true")).strip().lower() in {
+    local_only_mode = str(configs.get("local_only_mode", "false")).strip().lower() in {
         "1", "true", "yes", "on",
     }
 
@@ -450,7 +450,7 @@ def resolve_fallback_provider(configs: Optional[Dict[str, Any]] = None) -> str:
     if configs is None:
         configs = get_all_configs()
 
-    local_only_mode = str(configs.get("local_only_mode", "true")).strip().lower() in {
+    local_only_mode = str(configs.get("local_only_mode", "false")).strip().lower() in {
         "1", "true", "yes", "on",
     }
 

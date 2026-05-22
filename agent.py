@@ -349,9 +349,9 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None, genera
         configured_models = _parse_model_list(
             get_config("openrouter_model_list"),
             [
-                "meta-llama/llama-3.3-8b-instruct:free",
-                "qwen/qwen3-4b:free",
-                "deepseek/deepseek-r1-0528:free",
+                "meta-llama/llama-3.3-70b-instruct:free",
+                "deepseek/deepseek-v4-flash:free",
+                "qwen/qwen3-coder:free",
             ],
         )
         selected_model = (model_name or get_config("openrouter_model") or configured_models[0]).strip()

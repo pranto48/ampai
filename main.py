@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import gzip
 import hashlib
 import json
@@ -2587,7 +2587,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
         )
 
         local_only_mode = str(
-            get_config("local_only_mode", "true")
+            get_config("local_only_mode", "false")
         ).strip().lower() in {"1", "true", "yes", "on"}
         if local_only_mode and (request.model_type or "").strip().lower() not in {
             "",
@@ -5531,7 +5531,7 @@ def get_configs_status(user=Depends(require_authenticated_user)):
         "notification_default_digest_interval_minutes": configs.get(
             "notification_default_digest_interval_minutes", "30"
         ),
-        "local_only_mode": configs.get("local_only_mode", "true"),
+        "local_only_mode": configs.get("local_only_mode", "false"),
         "curator_nudges_enabled": configs.get("curator_nudges_enabled", "true"),
         "memory_embedding_enabled": configs.get("memory_embedding_enabled", "false"),
         "memory_embedding_provider": configs.get("memory_embedding_provider", "ollama"),
@@ -5773,7 +5773,7 @@ def _parse_config_list(raw_value: Optional[str], defaults: List[str]) -> List[st
 @app.get("/api/models/options")
 def get_model_options(_: UserContext = Depends(require_authenticated_user)):
     configs = get_all_configs()
-    local_only_mode = str(configs.get("local_only_mode", "true")).strip().lower() in {
+    local_only_mode = str(configs.get("local_only_mode", "false")).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -5810,9 +5810,9 @@ def get_model_options(_: UserContext = Depends(require_authenticated_user)):
             "openrouter": _parse_config_list(
                 configs.get("openrouter_model_list"),
                 [
-                    "meta-llama/llama-3.3-8b-instruct:free",
-                    "qwen/qwen3-4b:free",
-                    "deepseek/deepseek-r1-0528:free",
+                    "meta-llama/llama-3.3-70b-instruct:free",
+                    "deepseek/deepseek-v4-flash:free",
+                    "qwen/qwen3-coder:free",
                 ],
             ),
         },
@@ -6312,7 +6312,7 @@ def _build_admin_settings_health_checks() -> List[Dict[str, str]]:
     configs = get_all_configs()
     checks: List[Dict[str, str]] = []
 
-    local_only_mode = _to_bool(configs.get("local_only_mode", "true"))
+    local_only_mode = _to_bool(configs.get("local_only_mode", "false"))
     default_provider = (
         (
             configs.get("default_model_provider")
