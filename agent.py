@@ -350,12 +350,25 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None, genera
             get_config("openrouter_model_list"),
             [
                 "meta-llama/llama-3.3-70b-instruct:free",
-                "deepseek/deepseek-v4-flash:free",
-                "qwen/qwen3-coder:free",
+                "google/gemini-2.5-flash:free",
+                "deepseek/deepseek-r1:free",
+                "qwen/qwen-2.5-coder-32b:free",
             ],
         )
         selected_model = (model_name or get_config("openrouter_model") or configured_models[0]).strip()
-        return ChatOpenAI(model=selected_model, api_key=key, base_url="https://openrouter.ai/api/v1", **generation_options)
+        primary_llm = ChatOpenAI(model=selected_model, api_key=key, base_url="https://openrouter.ai/api/v1", **generation_options)
+        
+        fallback_llms = []
+        for model in configured_models:
+            model_clean = model.strip()
+            if model_clean and model_clean != selected_model:
+                fallback_llms.append(
+                    ChatOpenAI(model=model_clean, api_key=key, base_url="https://openrouter.ai/api/v1", **generation_options)
+                )
+        
+        if fallback_llms:
+            return primary_llm.with_fallbacks(fallback_llms)
+        return primary_llm
     elif model_type == "anythingllm":
         base_url = get_config("anythingllm_base_url")
         key = api_key or get_config("anythingllm_api_key") or "not-needed"

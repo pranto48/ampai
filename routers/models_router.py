@@ -94,8 +94,9 @@ def get_model_options(_: UserContext = Depends(require_authenticated_user)):
                 configs.get("openrouter_model_list"),
                 [
                     "meta-llama/llama-3.3-70b-instruct:free",
-                    "deepseek/deepseek-v4-flash:free",
-                    "qwen/qwen3-coder:free",
+                    "google/gemini-2.5-flash:free",
+                    "deepseek/deepseek-r1:free",
+                    "qwen/qwen-2.5-coder-32b:free",
                 ],
             ),
         },
