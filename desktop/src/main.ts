@@ -1445,10 +1445,31 @@ function bindSettings(): void {
     .querySelectorAll<HTMLButtonElement>("[data-settings-sub]")
     .forEach((button) => {
       button.addEventListener("click", () => {
+        // Collect current values from the form before switching tabs
+        const formEl = document.getElementById("cfg-model-form") as HTMLFormElement | null;
+        if (formEl) {
+          const form = new FormData(formEl);
+          for (const [key, value] of form.entries()) {
+            S.configs[key] = String(value || "");
+          }
+        }
         S.settingsSubTab = (button.dataset.settingsSub as any) || "provider";
         render();
       });
     });
+
+  // Track real-time typing/changes on #cfg-model-form to keep S.configs updated in draft state
+  const formEl = document.getElementById("cfg-model-form");
+  if (formEl) {
+    const handleInput = (event: Event) => {
+      const target = event.target as HTMLInputElement | HTMLSelectElement | null;
+      if (target && target.name) {
+        S.configs[target.name] = target.value;
+      }
+    };
+    formEl.addEventListener("input", handleInput);
+    formEl.addEventListener("change", handleInput);
+  }
 
   document
     .getElementById("cfg-model-form")

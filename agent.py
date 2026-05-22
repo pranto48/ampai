@@ -393,7 +393,10 @@ def chat_with_agent(
     use_web_search: bool = False,
     attachments: List[Dict] = None,
     chat_output_mode: str = None,
-    force_sa    username = kwargs.get("username", "system")
+    force_save: bool = False,
+    **kwargs
+) -> Dict[str, Any]:
+    username = kwargs.get("username", "system")
     is_admin = kwargs.get("is_admin", False)
     allowed_memory_categories = kwargs.get("allowed_memory_categories", [])
     persist_memory = kwargs.get("persist_memory", True)
@@ -652,10 +655,7 @@ def chat_with_agent(
             "memory_fact": default_res.get("memory_fact"),
             "memory_category": None,
             "skill_opportunity": None,
-            "recall_used": False,
-        }t_pii_text(default_res["response"])
-        default_res["response"] = "⚠️ **[Rate Limit / Provider Error]** I fell back to my built-in engine:\n\n" + default_res["response"]
-        return default_res
+        }
 
     # Capture memory candidates using the persistence manager
     memory_persistence_manager.capture_memory_candidate(
