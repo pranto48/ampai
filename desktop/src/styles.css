@@ -31,7 +31,8 @@ button.sm{height:26px;padding:0 9px;font-size:0.76rem}
 input,textarea,select{width:100%;padding:8px 11px;border-radius:8px;background:rgba(0,0,0,0.25);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:0.87rem;outline:none;transition:border-color .2s,box-shadow .2s;}
 input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(99,102,241,0.18);}
 input::placeholder,textarea::placeholder{color:var(--muted)}
-select{cursor:pointer}
+select{cursor:pointer;color-scheme:dark}
+select option{background:var(--bg-2);color:var(--text)}
 textarea{resize:vertical;min-height:50px;line-height:1.45;padding:9px 11px}
 label.field{display:flex;flex-direction:column;gap:5px;font-size:0.79rem;color:var(--muted);font-weight:500;}
 .stack{display:flex;flex-direction:column;gap:10px}
@@ -116,7 +117,8 @@ code{display:block;background:rgba(0,0,0,0.4);border:1px solid var(--border);bor
 .chat-topbar-info{flex:1;min-width:0}
 .chat-topbar-title{font-weight:700;font-size:0.92rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chat-topbar-sub{font-size:0.69rem;color:var(--muted);margin-top:2px}
-.chat-topbar-select{width:auto;padding:4px 8px;border-radius:7px;font-size:0.78rem;background:rgba(0,0,0,0.3);border:1px solid var(--border);color:var(--text);cursor:pointer;height:28px;}
+.chat-topbar-select{width:auto;padding:4px 8px;border-radius:7px;font-size:0.78rem;background:rgba(0,0,0,0.3);border:1px solid var(--border);color:var(--text);cursor:pointer;height:28px;color-scheme:dark;}
+.chat-topbar-select option{background:var(--bg-2);color:var(--text)}
 .chat-topbar-check{display:flex;align-items:center;gap:5px;font-size:0.78rem;color:var(--muted);cursor:pointer;white-space:nowrap;user-select:none;}
 .chat-topbar-check input{width:auto;accent-color:var(--accent)}
 .ai-name-badge{font-size:0.72rem;background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.3);color:#a5b4fc;padding:3px 9px;border-radius:999px;white-space:nowrap;}

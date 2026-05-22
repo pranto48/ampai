@@ -613,13 +613,12 @@ function bind(): void {
         const target = button.dataset.nav || "server";
         if (target === "more") {
           // Toggle more menu
-          const menu = document.getElementById("more-menu");
-          if (menu) {
-            menu.remove();
+          if (S.tab === "more") {
+            S.tab = "server";
           } else {
             S.tab = "more";
-            render();
           }
+          render();
           return;
         }
         switchTab(target);
