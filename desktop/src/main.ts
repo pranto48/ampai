@@ -58,13 +58,19 @@ function headers(extra?: HeadersInit): Headers {
   return out;
 }
 
-async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+interface ExtendedRequestInit extends RequestInit {
+  timeout?: number;
+}
+
+async function api<T>(path: string, init: ExtendedRequestInit = {}): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 25000);
+  const timeoutMs = init.timeout !== undefined ? init.timeout : (path.includes("/chat") ? 180000 : 30000);
+  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
   try {
+    const { timeout, ...fetchInit } = init;
     const response = await fetch(`${S.serverUrl}${path}`, {
-      ...init,
-      headers: headers(init.headers),
+      ...fetchInit,
+      headers: headers(fetchInit.headers),
       signal: controller.signal,
     });
     const text = await response.text();
@@ -74,7 +80,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
     return data as T;
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
 }
 
