@@ -27,7 +27,10 @@ client = TestClient(main.app)
 
 
 def test_restore_upload_valid_zip(monkeypatch):
-    monkeypatch.setattr(main, "restore_full_backup", lambda path, opts: {"ok": True, "summary": {"chats": 1}, "errors": []})
+    mock_restore = lambda path, opts: {"ok": True, "summary": {"chats": 1}, "errors": []}
+    import full_backup
+    monkeypatch.setattr(full_backup, "restore_full_backup", mock_restore)
+    monkeypatch.setattr(main, "restore_full_backup", mock_restore)
     files = {"backup_file": ("backup.zip", b"PK\x03\x04fake", "application/zip")}
     resp = client.post("/api/admin/fullbackup/restore-upload", files=files)
     assert resp.status_code == 200
@@ -60,7 +63,10 @@ def test_restore_upload_preflight_only():
 
 
 def test_restore_upload_dry_run(monkeypatch):
-    monkeypatch.setattr(main, "restore_full_backup", lambda path, opts: {"ok": False})
+    mock_restore = lambda path, opts: {"ok": False}
+    import full_backup
+    monkeypatch.setattr(full_backup, "restore_full_backup", mock_restore)
+    monkeypatch.setattr(main, "restore_full_backup", mock_restore)
     files = {"backup_file": ("backup.zip", b"PK\x03\x04fake", "application/zip")}
     resp = client.post("/api/admin/fullbackup/restore-upload", files=files, data={"dry_run": "true"})
     assert resp.status_code == 200
@@ -70,6 +76,12 @@ def test_restore_upload_dry_run(monkeypatch):
 def test_update_version_check_ok_false(monkeypatch):
     monkeypatch.setattr(main, "_get_current_git_commit", lambda: "unknown")
     monkeypatch.setattr(main, "_fetch_remote_commit", lambda: "abc123")
+    try:
+        from routers import admin as routers_admin
+        monkeypatch.setattr(routers_admin, "_get_current_git_commit", lambda: "unknown")
+        monkeypatch.setattr(routers_admin, "_fetch_remote_commit", lambda: "abc123")
+    except ImportError:
+        pass
     resp = client.get("/api/admin/update/version")
     assert resp.status_code == 200
     data = resp.json()
@@ -80,6 +92,12 @@ def test_update_version_check_ok_false(monkeypatch):
 def test_update_version_check_ok_true(monkeypatch):
     monkeypatch.setattr(main, "_get_current_git_commit", lambda: "abc123")
     monkeypatch.setattr(main, "_fetch_remote_commit", lambda: "abc123999")
+    try:
+        from routers import admin as routers_admin
+        monkeypatch.setattr(routers_admin, "_get_current_git_commit", lambda: "abc123")
+        monkeypatch.setattr(routers_admin, "_fetch_remote_commit", lambda: "abc123999")
+    except ImportError:
+        pass
     resp = client.get("/api/admin/update/version")
     assert resp.status_code == 200
     data = resp.json()
@@ -88,7 +106,13 @@ def test_update_version_check_ok_true(monkeypatch):
 
 
 def test_settings_export_default_redacts_secrets(monkeypatch):
-    monkeypatch.setattr(main, "get_all_configs", lambda: {"openai_api_key": "secret", "chat_agent_name": "Amp"})
+    mock_get = lambda: {"openai_api_key": "secret", "chat_agent_name": "Amp"}
+    monkeypatch.setattr(main, "get_all_configs", mock_get)
+    try:
+        from routers import admin as routers_admin
+        monkeypatch.setattr(routers_admin, "get_all_configs", mock_get)
+    except ImportError:
+        pass
     resp = client.get("/api/admin/settings/export")
     assert resp.status_code == 200
     body = resp.json()
@@ -102,9 +126,17 @@ def test_settings_export_secrets_requires_confirmation():
 
 
 def test_settings_import_dry_run_skip_conflicts(monkeypatch):
-    monkeypatch.setattr(main, "get_all_configs", lambda: {"a": "1", "b": "2"})
+    mock_get = lambda: {"a": "1", "b": "2"}
     set_calls = []
-    monkeypatch.setattr(main, "set_config", lambda key, value: set_calls.append((key, value)))
+    mock_set = lambda key, value: set_calls.append((key, value))
+    monkeypatch.setattr(main, "get_all_configs", mock_get)
+    monkeypatch.setattr(main, "set_config", mock_set)
+    try:
+        from routers import admin as routers_admin
+        monkeypatch.setattr(routers_admin, "get_all_configs", mock_get)
+        monkeypatch.setattr(routers_admin, "set_config", mock_set)
+    except ImportError:
+        pass
     payload = {"configs": {"a": "9", "b": "2", "c": "3"}, "dry_run": True, "conflict_strategy": "skip"}
     resp = client.post("/api/admin/settings/import", json=payload)
     assert resp.status_code == 200
@@ -116,9 +148,17 @@ def test_settings_import_dry_run_skip_conflicts(monkeypatch):
 
 
 def test_settings_import_apply_overwrite(monkeypatch):
-    monkeypatch.setattr(main, "get_all_configs", lambda: {"a": "1"})
+    mock_get = lambda: {"a": "1"}
     set_calls = []
-    monkeypatch.setattr(main, "set_config", lambda key, value: set_calls.append((key, value)))
+    mock_set = lambda key, value: set_calls.append((key, value))
+    monkeypatch.setattr(main, "get_all_configs", mock_get)
+    monkeypatch.setattr(main, "set_config", mock_set)
+    try:
+        from routers import admin as routers_admin
+        monkeypatch.setattr(routers_admin, "get_all_configs", mock_get)
+        monkeypatch.setattr(routers_admin, "set_config", mock_set)
+    except ImportError:
+        pass
     payload = {"configs": {"a": "2", "b": "3"}, "dry_run": False, "conflict_strategy": "overwrite"}
     resp = client.post("/api/admin/settings/import", json=payload)
     assert resp.status_code == 200
@@ -127,6 +167,7 @@ def test_settings_import_apply_overwrite(monkeypatch):
     assert data["summary"]["created"] == 1
     assert ("a", "2") in set_calls
     assert ("b", "3") in set_calls
+
 
 
 # ── Audit Logs Endpoint Tests ─────────────────────────────────────────────────
