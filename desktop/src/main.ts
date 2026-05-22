@@ -1820,6 +1820,25 @@ function bindBrowser(): void {
       toast(error.message || "Failed to update allowlist", "err");
     }
   });
+
+  document.querySelectorAll("[data-del-allowlist]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const domain = btn.getAttribute("data-del-allowlist");
+      if (!domain) return;
+      try {
+        const updated = S.browserState.allowlist.filter(d => d !== domain);
+        await api("/api/browser/allowlist", {
+          method: "POST",
+          body: JSON.stringify({ domains: updated }),
+        });
+        S.browserState.allowlist = updated;
+        toast(`Domain "${domain}" removed.`, "ok");
+        render();
+      } catch (error: any) {
+        toast(error.message || "Failed to remove domain", "err");
+      }
+    });
+  });
 }
 
 function bindTerminal(): void {

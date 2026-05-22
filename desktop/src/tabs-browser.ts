@@ -10,7 +10,7 @@ export function browserTab(): string {
   const bs = S.browserState;
 
   const allowlistItems = bs.allowlist.length
-    ? bs.allowlist.map(d => `<div class="allowlist-item"><code>${esc(d)}</code></div>`).join("")
+    ? bs.allowlist.map(d => `<div class="allowlist-item" style="display:flex;justify-content:space-between;align-items:center"><code>${esc(d)}</code><button class="sm danger" data-del-allowlist="${esc(d)}" style="padding:0 6px;height:20px;font-size:0.7rem;line-height:1;margin-left:8px;">✕</button></div>`).join("")
     : `<div class="hint">No domains configured. All navigation is blocked.</div>`;
 
   const recentJobs = bs.jobs.slice(0, 200);
