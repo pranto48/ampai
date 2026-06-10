@@ -154,6 +154,7 @@ export default function App() {
   const [updateVersion, setUpdateVersion] = useState<any>(null);
   const [updateStatus, setUpdateStatus] = useState<any>(null);
   const [updateLogs, setUpdateLogs] = useState<string[]>([]);
+  const [personas, setPersonas] = useState<Persona[]>([]);
 
   // UI States
   const [themeAccent, setThemeAccent] = useState<string>(() => localStorage.getItem("ampai.accent") || "#6366f1");
@@ -2359,7 +2360,7 @@ export default function App() {
                           </span>
                           
                           {/* Screenshot button */}
-                          {job.result?.screenshot && (
+                          {typeof job.result?.screenshot === "string" && (
                             <button
                               onClick={() => setSelectedJobScreenshot(String(job.result?.screenshot))}
                               className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg text-[10px] font-semibold transition-all border border-slate-700/60 cursor-pointer"
@@ -2557,7 +2558,7 @@ export default function App() {
                   <h3 className="font-bold text-slate-200 text-sm">System Personas ({personas.length})</h3>
                   
                   <div className="space-y-3.5 max-h-[400px] overflow-y-auto pr-1">
-                    {personas.map(p => (
+                    {personas.map((p: Persona) => (
                       <div key={p.id} className="p-3 rounded-xl bg-slate-900/40 border border-slate-855 space-y-2">
                         <div className="flex justify-between items-start">
                           <span className="font-bold text-xs text-slate-200 block">{p.name}</span>
@@ -2567,7 +2568,7 @@ export default function App() {
                         </div>
                         <p className="text-[11px] text-slate-455 font-mono truncate">{p.system_prompt}</p>
                         <div className="flex flex-wrap gap-1">
-                          {p.tags?.map(t => (
+                          {p.tags?.map((t: string) => (
                             <span key={t} className="px-1.5 py-0.2 rounded bg-slate-950 text-slate-500 text-[8px] font-semibold">{t}</span>
                           ))}
                         </div>
