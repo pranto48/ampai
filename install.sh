@@ -4,6 +4,7 @@
 # =============================================================================
 
 set -e
+set -x
 
 # ANSI Color Codes for beautiful terminal styling
 RED='\033[0;31m'
