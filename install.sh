@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # =============================================================================
 # AmpAI Easy Install Script
 # Usage:  bash install.sh
@@ -68,7 +68,7 @@ done
 echo -e "\n${GREEN}[OK] Backend healthy.${NC}"
 
 # --- 7. Summary ---
-HOST_IP=$(hostname -I 2>/dev/null | awk '\''{print $1}'\'' || echo "localhost")
+HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 echo -e "\n${BOLD}========================================\n  AmpAI is running!\n========================================${NC}"
 echo -e "  Web UI   : ${GREEN}http://${HOST_IP}:8080${NC}"
 echo -e "  API      : ${GREEN}http://${HOST_IP}:8000${NC}"
