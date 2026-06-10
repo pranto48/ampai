@@ -1,19 +1,17 @@
 # =============================================================================
 # Stage 1: Build Dependencies
 # =============================================================================
-FROM python:3.11-alpine AS builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Install compilation dependencies required for packages like cryptography, bcrypt, and psycopg2
-RUN apk add --no-cache \
-    build-base \
-    libffi-dev \
-    openssl-dev \
-    postgresql-dev \
+# Install compilation dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
     git \
-    cargo \
-    rust
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -29,7 +27,7 @@ RUN pip install --no-cache-dir -U pip setuptools wheel && \
 # =============================================================================
 # Stage 2: Minimal Runtime Image
 # =============================================================================
-FROM python:3.11-alpine
+FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -38,8 +36,12 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
 
-# Install runtime system dependencies (libpq for postgresql, git and curl)
-RUN apk add --no-cache libpq git curl
+# Install runtime system dependencies (libpq, git and curl)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy virtual environment from builder stage
 COPY --from=builder /opt/venv /opt/venv
@@ -53,3 +55,4 @@ RUN sed -i 's/\r$//' /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoin
 EXPOSE 8000
 
 CMD ["sh", "/app/docker-entrypoint.sh"]
+
