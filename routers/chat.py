@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from queue import Queue
 from typing import Any, Dict, List
 
-from agent import _extract_explicit_memory_request, chat_with_agent
+from agent import _extract_explicit_memory_request, chat_with_agent, chat_with_agent_stream
 from core.deps import UserContext, require_authenticated_user
 from core.helpers import (
     _append_session_suggestions,
@@ -463,3 +463,272 @@ def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated
     except Exception as e:
         logger.exception("chat failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/chat/stream")
+async def chat_stream(request: ChatRequest, user: UserContext = Depends(require_authenticated_user)):
+    from fastapi.responses import StreamingResponse
+    import json
+    import asyncio
+
+    logger.info(
+        "CHAT STREAM REQUEST model_type=%s, model_name=%s, memory_mode=%s, user=%s",
+        request.model_type,
+        request.model_name,
+        request.memory_mode,
+        user.username,
+    )
+
+    _ensure_session_owner_for_user(request.session_id, user)
+    
+    # Check local_only_mode
+    local_only_mode = str(
+        get_config("local_only_mode", "false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if local_only_mode and (request.model_type or "").strip().lower() not in {
+        "",
+        "ollama",
+        "generic",
+        "anythingllm",
+        "ampai_default",
+    }:
+        requested = (request.model_type or "").strip().lower() or "unknown"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Provider '{requested}' is blocked by local_only_mode=true. "
+                "Disable local_only_mode in Admin Configs to use cloud providers like OpenRouter."
+            ),
+        )
+
+    # Auto-resolve model_type
+    effective_model_type = (request.model_type or "ollama").strip().lower()
+    if effective_model_type == "ollama":
+        configured_default = (get_config("default_model") or "").strip().lower()
+        if (
+            configured_default
+            and configured_default != "ollama"
+            and not local_only_mode
+        ):
+            effective_model_type = configured_default
+        else:
+            ollama_url = get_config("ollama_base_url") or os.getenv(
+                "OLLAMA_BASE_URL", "http://host.docker.internal:11434"
+            )
+            ollama_alive = False
+            try:
+                import urllib.request as _ur
+                _ur.urlopen(ollama_url, timeout=2)
+                ollama_alive = True
+            except Exception:
+                pass
+            if not ollama_alive:
+                if local_only_mode:
+                    effective_model_type = "ampai_default"
+                else:
+                    provider_keys = [
+                        ("openrouter", "openrouter_api_key"),
+                        ("openai", "openai_api_key"),
+                        ("gemini", "gemini_api_key"),
+                        ("anthropic", "anthropic_api_key"),
+                        ("generic", "generic_api_key"),
+                    ]
+                    resolved = False
+                    for prov, key_name in provider_keys:
+                        if get_config(key_name):
+                            effective_model_type = prov
+                            resolved = True
+                            break
+                    if not resolved:
+                        effective_model_type = "ampai_default"
+    request.model_type = effective_model_type
+
+    # If ampai_default, we run the built-in default engine
+    if effective_model_type == "ampai_default":
+        from ampai_default_engine import ampai_default_chat
+        from database import get_core_memories
+        
+        async def default_stream_generator():
+            core_mems = get_core_memories()
+            default_result = ampai_default_chat(
+                message=request.message,
+                session_id=request.session_id,
+                username=user.username,
+                core_mems=core_mems,
+            )
+            
+            # Persist and audit tasks
+            if default_result.get("memory_action") == "pending_approval" and default_result.get("memory_fact"):
+                _create_memory_candidate(
+                    user.username,
+                    request.session_id,
+                    default_result["memory_fact"],
+                    confidence=0.75,
+                )
+            
+            response_text = default_result.get("response", "")
+            # Yield initial token chunk to client
+            chunk_size = 8
+            for i in range(0, len(response_text), chunk_size):
+                chunk = response_text[i:i+chunk_size]
+                yield f"data: {json.dumps({'type': 'token', 'token': chunk})}\n\n"
+                await asyncio.sleep(0.01)
+
+            # Persist chat metadata
+            try:
+                tool_action_meta = {
+                    "enable_browser_tools": request.enable_browser_tools,
+                    "enable_terminal_tools": request.enable_terminal_tools,
+                    "persona_id": request.persona_id,
+                    "memory_mode": request.memory_mode,
+                    "memory_top_k": request.memory_top_k,
+                    "memory_recency_bias": request.memory_recency_bias,
+                    "memory_category_filter": request.memory_category_filter or "",
+                    "chat_output_mode": request.chat_output_mode,
+                    "attachments_count": len(request.attachments),
+                }
+                persist_chat_message_metadata(
+                    session_id=request.session_id,
+                    username=user.username,
+                    user_message=request.message or "",
+                    assistant_response=str(default_result.get("response") or ""),
+                    model_provider="ampai_default",
+                    model_name=None,
+                    memory_retrieval_metadata=default_result.get("retrieval") or {},
+                    web_search_metadata=default_result.get("web_search") or {},
+                    tool_action_metadata=tool_action_meta,
+                )
+            except Exception:
+                pass
+
+            default_task_suggestions = []
+            default_has_task_cues = False
+            try:
+                from services.task_intent_service import process_chat_for_task_intent
+                existing_suggestions = _load_session_suggestions(request.session_id)
+                intent_suggestions = process_chat_for_task_intent(
+                    message=request.message,
+                    session_id=request.session_id,
+                    username=user.username,
+                    response_text=str(default_result.get("response") or ""),
+                    existing_suggestions=existing_suggestions,
+                )
+                if intent_suggestions:
+                    default_task_suggestions = _append_session_suggestions(
+                        request.session_id, intent_suggestions
+                    )
+                    default_has_task_cues = True
+            except Exception:
+                pass
+
+            final_meta = {
+                "web_search": default_result.get("web_search", {}),
+                "task_suggestions": default_task_suggestions,
+                "has_task_cues": default_has_task_cues,
+                "retrieval": default_result.get("retrieval", {}),
+                "memory_action": default_result.get("memory_action"),
+                "memory_fact": default_result.get("memory_fact"),
+                "memory_category": None,
+                "skill_opportunity": None,
+                "recall_used": False,
+                "ampai_default_mode": True,
+                "intent": default_result.get("intent_detected", "general"),
+                "model_used": "AmpAI Built-in",
+            }
+            yield f"data: {json.dumps({'type': 'done', 'metadata': final_meta})}\n\n"
+
+        return StreamingResponse(
+            default_stream_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        )
+
+    # Otherwise stream using the langchain agent
+    persona_prompt = ""
+    if request.persona_id:
+        personas = _load_config_list("personas_library")
+        persona = next(
+            (p for p in personas if p.get("id") == request.persona_id), None
+        )
+        if persona and persona.get("system_prompt"):
+            persona_prompt = str(persona.get("system_prompt")).strip()
+    
+    message_for_agent = request.message
+    if persona_prompt:
+        message_for_agent = f"[Persona Instructions]\n{persona_prompt}\n\n[User Message]\n{request.message}"
+
+    effective_chat_prefs = get_effective_chat_preferences(user.username)
+    requested_mode = (request.chat_output_mode or "").strip().lower()
+    if requested_mode not in {"compact", "normal"}:
+        requested_mode = (
+            str(effective_chat_prefs.get("chat_output_mode") or "normal")
+            .strip()
+            .lower()
+        )
+    if requested_mode not in {"compact", "normal"}:
+        requested_mode = "normal"
+    low_token_mode = bool(effective_chat_prefs.get("low_token_mode"))
+
+    requested_memory_mode = (request.memory_mode or "").strip().lower()
+    if requested_memory_mode not in {"indexed", "full"}:
+        requested_memory_mode = "indexed"
+    effective_memory_mode = (
+        requested_memory_mode if user.role == "admin" else "indexed"
+    )
+    requested_top_k = (
+        request.memory_top_k if request.memory_top_k is not None else 5
+    )
+    max_top_k = 3 if low_token_mode else 5
+    clamped_top_k = max(1, min(max_top_k, int(requested_top_k or 5)))
+    raw_recency_bias = (
+        request.recency_bias
+        if request.recency_bias is not None
+        else request.memory_recency_bias
+    )
+    effective_recency_bias = float(
+        raw_recency_bias if raw_recency_bias is not None else 0.6
+    )
+    effective_recency_bias = max(0.0, min(1.0, effective_recency_bias))
+    category_filter_value = (
+        request.category_filter or request.memory_category_filter or ""
+    ).strip()
+
+    policy = _get_memory_policy(user.username)
+    explicit_save_fact = _extract_explicit_memory_request(request.message)
+
+    async def stream_generator():
+        try:
+            async for chunk in chat_with_agent_stream(
+                session_id=request.session_id,
+                message=message_for_agent,
+                model_type=request.model_type,
+                api_key=request.api_key,
+                model_name=request.model_name,
+                memory_mode=effective_memory_mode,
+                memory_top_k=clamped_top_k,
+                recency_bias=effective_recency_bias,
+                category_filter=category_filter_value,
+                use_web_search=request.use_web_search,
+                attachments=[a.dict() for a in request.attachments],
+                chat_output_mode=requested_mode,
+                username=user.username,
+                is_admin=(user.role == "admin"),
+                allowed_memory_categories=policy.get("allowed_categories") or [],
+                persist_memory=bool(policy.get("auto_capture_enabled", True)),
+                require_memory_approval=bool(policy.get("require_approval", False)),
+                pii_strict_mode=bool(policy.get("pii_strict_mode", False)),
+                force_save=bool(explicit_save_fact),
+                enable_browser_tools=request.enable_browser_tools,
+                enable_terminal_tools=request.enable_terminal_tools,
+            ):
+                yield f"data: {json.dumps(chunk)}\n\n"
+        except Exception as err:
+            logger.exception("Error in SSE streaming generator")
+            yield f"data: {json.dumps({'type': 'token', 'token': f'⚠️ Error during streaming: {str(err)}'})}\n\n"
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
+

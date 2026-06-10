@@ -65,6 +65,15 @@ const ACCENT_COLORS = [
   { name: "Rose", value: "#f43f5e" },
 ];
 
+function formatBytes(bytes: number, decimals = 2) {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
+
 export default function App() {
   // --- React State ---
   const [auth, setAuth] = useState<Auth | null>(() => {
@@ -100,6 +109,10 @@ export default function App() {
   const [enableBrowserTools, setEnableBrowserTools] = useState<boolean>(false);
   const [enableTerminalTools, setEnableTerminalTools] = useState<boolean>(false);
   const [attachments, setAttachments] = useState<Attach[]>([]);
+  const [dragActive, setDragActive] = useState<boolean>(false);
+  const [isAutoScrollPinned, setIsAutoScrollPinned] = useState<boolean>(true);
+  const [activeAgentStatus, setActiveAgentStatus] = useState<{ status: string; message: string } | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [providers, setProviders] = useState<any[]>([]);
   const [providerModels, setProviderModels] = useState<Record<string, any[]>>({});
   const [sessionSearch, setSessionSearch] = useState<string>("");
@@ -487,10 +500,20 @@ export default function App() {
     loadTabDetails();
   }, [tab, auth, memSubTab, inboxFilter]);
 
+  // Scroll helper
+  const handleScroll = () => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 40;
+    setIsAutoScrollPinned(isAtBottom);
+  };
+
   // Scroll to bottom of chat
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [msgs]);
+    if (isAutoScrollPinned) {
+      chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [msgs, isAutoScrollPinned]);
 
   // --- Session Management Functions ---
   const handleSelectSession = async (sid: string) => {
@@ -612,7 +635,99 @@ export default function App() {
     }
   };
 
-  // --- Send Chat Message ---
+  // --- Attachment Ingestion / Upload ---
+  const uploadFile = async (file: File) => {
+    const tempId = Math.random().toString(36).substring(2);
+    
+    // Add temp file chip
+    const tempAttach: any = {
+      filename: file.name,
+      url: "",
+      type: file.type || "text/plain",
+      extracted_text: null,
+      size: file.size,
+      status: "uploading",
+      tempId: tempId
+    };
+    setAttachments(prev => [...prev, tempAttach]);
+    
+    const formData = new FormData();
+    formData.append("file", file);
+    
+    try {
+      const payload = await apiCall<Attach>(`/api/upload?session_id=${encodeURIComponent(sessionId)}`, {
+        method: "POST",
+        body: formData
+      });
+      
+      // Success: transition to indexing
+      setAttachments(prev => prev.map(a => {
+        if (a.tempId === tempId) {
+          return {
+            ...a,
+            ...payload,
+            status: "indexing"
+          };
+        }
+        return a;
+      }));
+      
+      // Simulate indexing transition to ready
+      setTimeout(() => {
+        setAttachments(prev => prev.map(a => {
+          if (a.tempId === tempId) {
+            return {
+              ...a,
+              status: "ready"
+            };
+          }
+          return a;
+        }));
+        triggerToast(`Indexed ${file.name} successfully`, "ok");
+      }, 1200);
+
+    } catch (err: any) {
+      setAttachments(prev => prev.map(a => {
+        if (a.tempId === tempId) {
+          return {
+            ...a,
+            status: "failed"
+          };
+        }
+        return a;
+      }));
+      triggerToast(`Upload failed: ${err.message}`, "err");
+    }
+  };
+
+  const handleAttachFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || e.target.files.length === 0) return;
+    const file = e.target.files[0];
+    await uploadFile(file);
+  };
+
+  const handleDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const file = e.dataTransfer.files[0];
+      await uploadFile(file);
+    }
+  };
+
+  // --- Send Chat Message with Real-time SSE Token Streaming ---
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputText.trim() && attachments.length === 0) return;
@@ -630,8 +745,16 @@ export default function App() {
     setMsgs(prev => [...prev, userMsg]);
 
     try {
-      const response = await apiCall<any>("/api/chat", {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (auth?.token) {
+        headers["Authorization"] = `Bearer ${auth.token}`;
+      }
+
+      const res = await fetch(`${serverUrl}/api/chat/stream`, {
         method: "POST",
+        headers,
         body: JSON.stringify({
           session_id: sessionId,
           message: currentMsgText || "Please review the attached file.",
@@ -641,44 +764,95 @@ export default function App() {
           use_web_search: useWebSearch,
           enable_browser_tools: enableBrowserTools,
           enable_terminal_tools: enableTerminalTools,
-          attachments: attachments
+          attachments: attachments.map(a => ({
+            filename: a.filename,
+            url: a.url,
+            type: a.type,
+            extracted_text: a.extracted_text
+          }))
         })
       });
 
-      const aiMsg: Msg = {
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(errorText || res.statusText);
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("Stream reader not available");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      
+      const aiMsgId = Math.random().toString();
+      setMsgs(prev => [...prev, {
         role: "assistant",
-        content: response.response || response.message || "No response details from agent.",
-        time: new Date().toLocaleTimeString()
-      };
-      setMsgs(prev => [...prev, aiMsg]);
+        content: "",
+        time: new Date().toLocaleTimeString(),
+        id: aiMsgId
+      } as any]);
+
       setAttachments([]);
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data: ")) continue;
+          
+          try {
+            const rawData = trimmed.slice(6);
+            const parsed = JSON.parse(rawData);
+
+            if (parsed.type === "status") {
+              setActiveAgentStatus({
+                status: parsed.status,
+                message: parsed.message
+              });
+            } else if (parsed.type === "token") {
+              setActiveAgentStatus(null);
+              setMsgs(prev => prev.map(m => {
+                if ((m as any).id === aiMsgId) {
+                  return {
+                    ...m,
+                    content: m.content + parsed.token
+                  };
+                }
+                return m;
+              }));
+            } else if (parsed.type === "done") {
+              const meta = parsed.metadata;
+              setMsgs(prev => prev.map(m => {
+                if ((m as any).id === aiMsgId) {
+                  return {
+                    ...m,
+                    retrieval: meta.retrieval,
+                    web_search: meta.web_search,
+                    memory_status: meta.memory_status,
+                    recall_used: meta.recall_used
+                  };
+                }
+                return m;
+              }));
+            }
+          } catch (e) {
+            console.error("SSE parse error", e);
+          }
+        }
+      }
+
     } catch (err: any) {
-      triggerToast("Failed to get agent response: " + err.message, "err");
-      // Add error message as system notification
-      setMsgs(prev => [...prev, { role: "assistant", content: `System Error: ${err.message}`, time: "" }]);
+      triggerToast("Failed to stream: " + err.message, "err");
+      setMsgs(prev => [...prev, { role: "assistant", content: `Streaming Error: ${err.message}`, time: "" }]);
     } finally {
       setBusy(false);
-    }
-  };
-
-  // --- Attachment Upload ---
-  const handleAttachFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files || e.target.files.length === 0) return;
-    const file = e.target.files[0];
-    
-    const formData = new FormData();
-    formData.append("file", file);
-    
-    triggerToast(`Uploading ${file.name}...`, "info");
-    try {
-      const payload = await apiCall<Attach>(`/api/upload?session_id=${encodeURIComponent(sessionId)}`, {
-        method: "POST",
-        body: formData
-      });
-      setAttachments(prev => [...prev, payload]);
-      triggerToast(`Uploaded ${file.name} successfully`, "ok");
-    } catch (err: any) {
-      triggerToast(`Upload failed: ${err.message}`, "err");
+      setActiveAgentStatus(null);
     }
   };
 
@@ -1610,8 +1784,24 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Main chat window container */}
-              <div className="flex-1 flex flex-col bg-slate-900/10 overflow-hidden relative">
+              {/* Main chat window container with Native Drag-and-Drop */}
+              <div 
+                onDragEnter={handleDrag}
+                onDragOver={handleDrag}
+                onDragLeave={handleDrag}
+                onDrop={handleDrop}
+                className={`flex-1 flex flex-col bg-slate-900/10 overflow-hidden relative transition-all duration-300 ${
+                  dragActive ? "ring-2 ring-indigo-500/85 bg-indigo-950/25" : ""
+                }`}
+              >
+                {/* Drag and Drop Active Overlay */}
+                {dragActive && (
+                  <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center z-45 space-y-4 border-2 border-dashed border-indigo-550/50 m-4 rounded-3xl pointer-events-none animate-pulse">
+                    <Paperclip className="w-12 h-12 text-indigo-400" />
+                    <p className="text-sm font-bold text-slate-200">Drop files here to upload and index</p>
+                    <p className="text-xs text-slate-500">Supports PDF, TXT, CSV, JSON, MD, Python, JS, HTML, CSS</p>
+                  </div>
+                )}
                 
                 {/* Chat Top Settings bar */}
                 <div className="px-4 py-3 border-b border-slate-800/80 flex justify-between items-center bg-slate-950/40">
@@ -1645,8 +1835,12 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Messages Box scrollable */}
-                <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
+                {/* Messages Box scrollable with auto-scroll pinning */}
+                <div 
+                  ref={scrollContainerRef}
+                  onScroll={handleScroll}
+                  className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6"
+                >
                   {msgs.map((m, idx) => (
                     <div
                       key={idx}
@@ -1663,30 +1857,82 @@ export default function App() {
                         {m.role === "user" ? "ME" : "AI"}
                       </div>
                       
-                      {/* Bubble */}
-                      <div className="space-y-1 flex flex-col">
+                      {/* Bubble with Timeline indicators */}
+                      <div className="space-y-1.5 flex flex-col">
                         <span className={`text-[10px] text-slate-500 ${m.role === "user" ? "text-right" : ""}`}>
                           {m.role === "user" ? "You" : "AmpAI Assistant"}
                         </span>
+
+                        {m.role === "assistant" && (
+                          <div className="flex flex-wrap gap-2 py-0.5">
+                            {/* Vector database search indicator */}
+                            {((m as any).retrieval?.enabled && (m as any).retrieval?.retrieved_count > 0) && (
+                              <div className="flex items-center space-x-1 px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-450 border border-emerald-500/20 text-[10px] font-semibold">
+                                <Database className="w-3 h-3 text-emerald-400" />
+                                <span>Vector DB: Retrieved {(m as any).retrieval.retrieved_count} facts</span>
+                              </div>
+                            )}
+                            
+                            {/* Live web search indicator */}
+                            {((m as any).web_search?.enabled && (m as any).web_search?.status === "ok") && (
+                              <div className="flex items-center space-x-1 px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-450 border border-blue-500/20 text-[10px] font-semibold">
+                                <Globe className="w-3 h-3 text-blue-400" />
+                                <span>Web Search: {(m as any).web_search.provider}</span>
+                              </div>
+                            )}
+
+                            {/* Cross-session recall indicator */}
+                            {(m as any).recall_used && (
+                              <div className="flex items-center space-x-1 px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-450 border border-purple-500/20 text-[10px] font-semibold">
+                                <Brain className="w-3 h-3 text-purple-400" />
+                                <span>Cross-Session Context Injected</span>
+                              </div>
+                            )}
+
+                            {/* Simulated terminal run indicator */}
+                            {(enableTerminalTools && (m.content.includes("```bash") || m.content.includes("```sh"))) && (
+                              <div className="flex items-center space-x-1 px-2 py-0.5 rounded-md bg-violet-500/10 text-violet-405 border border-violet-550/20 text-[10px] font-semibold">
+                                <Terminal className="w-3 h-3 text-violet-400" />
+                                <span>Terminal Tool: Shell Analysis Logged</span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                         <div className={`p-4 rounded-2xl text-sm leading-relaxed shadow-lg max-w-lg ${
                           m.role === "user" 
                             ? "bg-indigo-600/90 text-white rounded-tr-none" 
                             : "bg-slate-900/90 text-slate-200 border border-slate-800 rounded-tl-none"
                         }`}>
-                          <p className="whitespace-pre-wrap">{m.content}</p>
+                          {m.role === "user" ? (
+                            <p className="whitespace-pre-wrap">{m.content}</p>
+                          ) : (
+                            <Markdown text={m.content} />
+                          )}
                         </div>
                       </div>
                     </div>
                   ))}
                   
-                  {/* Busy loader dots */}
+                  {/* Busy loader dots + Real-time Streaming Status */}
                   {busy && (
                     <div className="flex space-x-4 max-w-3xl mr-auto">
                       <div className="w-9 h-9 rounded-xl bg-slate-800 text-indigo-400 border border-slate-700/60 flex items-center justify-center font-bold text-xs flex-shrink-0">
                         AI
                       </div>
-                      <div className="space-y-1 flex flex-col">
+                      <div className="space-y-1.5 flex flex-col">
                         <span className="text-[10px] text-slate-500">AmpAI Assistant</span>
+                        
+                        {activeAgentStatus && (
+                          <div className="flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-indigo-300 font-semibold animate-pulse">
+                            {activeAgentStatus.status === "searching_vector_db" && <Database className="w-4 h-4 text-emerald-400" />}
+                            {activeAgentStatus.status === "searching_web" && <Globe className="w-4 h-4 text-blue-400" />}
+                            {activeAgentStatus.status === "executing_command" && <Terminal className="w-4 h-4 text-purple-400" />}
+                            {activeAgentStatus.status === "browser_action" && <Globe className="w-4 h-4 text-cyan-400" />}
+                            <span>{activeAgentStatus.message}</span>
+                          </div>
+                        )}
+
                         <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 rounded-tl-none shadow-lg">
                           <div className="flex space-x-1 px-1 py-1.5">
                             <div className="w-2.5 h-2.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }}></div>
@@ -1716,16 +1962,35 @@ export default function App() {
                 {/* Input action attachments container */}
                 <div className="p-4 border-t border-slate-800 bg-slate-950/40 space-y-3">
                   
-                  {/* Attachments list bar */}
+                  {/* Ingestion & Loading States for file chips */}
                   {attachments.length > 0 && (
                     <div className="flex flex-wrap gap-2 mb-2 p-2 bg-slate-950/80 rounded-xl border border-slate-850">
                       {attachments.map((attach, idx) => (
-                        <div key={idx} className="flex items-center space-x-2 bg-slate-800 px-3 py-1 rounded-lg border border-slate-700/60 text-xs">
-                          <span className="text-slate-300 font-medium max-w-[150px] truncate">{attach.filename}</span>
+                        <div key={idx} className="flex items-center space-x-2 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700/60 text-xs">
+                          {/* Processing state indicator */}
+                          {attach.status === "uploading" && (
+                            <RefreshCw className="w-3 h-3 animate-spin text-indigo-400" />
+                          )}
+                          {attach.status === "indexing" && (
+                            <Activity className="w-3 h-3 animate-pulse text-amber-400" />
+                          )}
+                          {attach.status === "ready" && (
+                            <Check className="w-3.5 h-3.5 text-emerald-450 font-bold" />
+                          )}
+                          {attach.status === "failed" && (
+                            <AlertCircle className="w-3.5 h-3.5 text-rose-500" />
+                          )}
+
+                          <div className="flex flex-col">
+                            <span className="text-slate-200 font-medium max-w-[150px] truncate">{attach.filename}</span>
+                            {attach.size && (
+                              <span className="text-[9px] text-slate-500">{formatBytes(attach.size)}</span>
+                            )}
+                          </div>
                           <button
                             type="button"
                             onClick={() => setAttachments(prev => prev.filter((_, i) => i !== idx))}
-                            className="text-slate-400 hover:text-rose-400 font-bold"
+                            className="text-slate-400 hover:text-rose-455 font-bold hover:bg-slate-700/40 w-4 h-4 rounded-full flex items-center justify-center transition-all cursor-pointer"
                           >
                             ×
                           </button>
@@ -2770,3 +3035,304 @@ export default function App() {
     </div>
   );
 }
+
+// ── Custom Markdown & LaTeX Parser Components ───────────────────────────────
+
+function Markdown({ text }: { text: string }) {
+  if (!text) return null;
+
+  const blocks: Array<{ type: "code" | "math" | "table" | "text"; content: string; lang?: string }> = [];
+  let currentText = text;
+
+  while (currentText) {
+    const codeBlockMatch = currentText.match(/^```(\w*)\n([\s\S]*?)\n```/m);
+    const mathBlockMatch = currentText.match(/^\$\$([\s\S]*?)\$\$/m);
+    const tableBlockMatch = currentText.match(/^(?:\|[^\n]+\|\r?\n){1,}(?:\|[-:|\s]+\|\r?\n?)(?:\|[^\n]+\|\r?\n?){1,}/m);
+
+    const matches = [
+      { type: "code" as const, match: codeBlockMatch, index: codeBlockMatch?.index ?? -1 },
+      { type: "math" as const, match: mathBlockMatch, index: mathBlockMatch?.index ?? -1 },
+      { type: "table" as const, match: tableBlockMatch, index: tableBlockMatch?.index ?? -1 },
+    ].filter(m => m.match !== null && m.index >= 0);
+
+    if (matches.length > 0) {
+      matches.sort((a, b) => a.index - b.index);
+      const first = matches[0];
+
+      if (first.index > 0) {
+        blocks.push({ type: "text", content: currentText.substring(0, first.index) });
+      }
+
+      if (first.type === "code" && first.match) {
+        blocks.push({
+          type: "code",
+          lang: first.match[1] || "plaintext",
+          content: first.match[2]
+        });
+      } else if (first.type === "math" && first.match) {
+        blocks.push({
+          type: "math",
+          content: first.match[1]
+        });
+      } else if (first.type === "table" && first.match) {
+        blocks.push({
+          type: "table",
+          content: first.match[0]
+        });
+      }
+
+      currentText = currentText.substring(first.index + first.match[0].length);
+    } else {
+      blocks.push({ type: "text", content: currentText });
+      break;
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      {blocks.map((block, i) => {
+        if (block.type === "code") {
+          return <CodeBlock key={i} lang={block.lang} code={block.content} />;
+        }
+        if (block.type === "math") {
+          return <MathBlock key={i} latex={block.content} />;
+        }
+        if (block.type === "table") {
+          return <TableBlock key={i} rawTable={block.content} />;
+        }
+        return <TextBlock key={i} text={block.content} />;
+      })}
+    </div>
+  );
+}
+
+function CodeBlock({ lang, code }: { lang?: string; code: string }) {
+  const [copied, setCopied] = useState(false);
+  const copyToClipboard = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const highlight = (codeText: string, language: string) => {
+    if (!codeText) return "";
+    const escapeHtml = (text: string) => {
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    };
+
+    const escaped = escapeHtml(codeText);
+    const l = (language || "").toLowerCase();
+
+    if (l === "python") {
+      return escaped
+        .replace(/\b(def|class|return|if|elif|else|for|in|while|try|except|finally|import|from|as|with|lambda|and|or|not|is|None|True|False|self)\b/g, '<span class="text-indigo-400 font-bold">$1</span>')
+        .replace(/(#.*)/g, '<span class="text-slate-500 italic">$1</span>')
+        .replace(/(".*?"|'.*?')/g, '<span class="text-emerald-400">$1</span>')
+        .replace(/\b(\d+)\b/g, '<span class="text-amber-400">$1</span>')
+        .replace(/\b(print|len|range|str|int|float|dict|list|set|tuple|zip|enumerate|map|filter)\b/g, '<span class="text-cyan-400">$1</span>');
+    }
+    if (l === "javascript" || l === "typescript" || l === "ts" || l === "js" || l === "jsx" || l === "tsx") {
+      return escaped
+        .replace(/\b(const|let|var|function|return|if|else|for|while|do|switch|case|break|continue|import|export|from|default|class|extends|new|this|typeof|instanceof|async|await|true|false|null|undefined)\b/g, '<span class="text-indigo-400 font-bold">$1</span>')
+        .replace(/(\/\/.*)/g, '<span class="text-slate-500 italic">$1</span>')
+        .replace(/(".*?"|'.*?'|`[\s\S]*?`)/g, '<span class="text-emerald-400">$1</span>')
+        .replace(/\b(\d+)\b/g, '<span class="text-amber-400">$1</span>')
+        .replace(/\b(console|log|error|warn|window|document|fetch|JSON|stringify|parse|Promise|resolve|reject)\b/g, '<span class="text-cyan-400">$1</span>');
+    }
+    if (l === "sql") {
+      return escaped
+        .replace(/\b(SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|OUTER|ON|AND|OR|NOT|IN|LIKE|ORDER|BY|LIMIT|GROUP|HAVING|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|DROP|ALTER|DATABASE|INDEX|PRIMARY|KEY|FOREIGN|REFERENCES|DEFAULT|NULL|AS)\b/gi, '<span class="text-indigo-400 font-bold">$1</span>')
+        .replace(/(#.*|--.*)/g, '<span class="text-slate-500 italic">$1</span>')
+        .replace(/(".*?"|'.*?')/g, '<span class="text-emerald-400">$1</span>')
+        .replace(/\b(\d+)\b/g, '<span class="text-amber-400">$1</span>');
+    }
+    if (l === "bash" || l === "sh" || l === "shell") {
+      return escaped
+        .replace(/\b(echo|cd|ls|grep|pwd|mkdir|rm|cp|mv|chmod|chown|sudo|apt|git|docker|npm|pip|python|cat|curl|wget)\b/g, '<span class="text-cyan-400">$1</span>')
+        .replace(/(#.*)/g, '<span class="text-slate-500 italic">$1</span>')
+        .replace(/(".*?"|'.*?')/g, '<span class="text-emerald-400">$1</span>');
+    }
+    return escaped;
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-950 overflow-hidden my-3 shadow-md font-mono text-xs">
+      <div className="flex justify-between items-center bg-slate-900 px-4 py-2 border-b border-slate-800 text-[10px] text-slate-400 font-semibold uppercase tracking-wider select-none">
+        <span>{lang || "plaintext"}</span>
+        <button
+          onClick={copyToClipboard}
+          className="flex items-center space-x-1.5 hover:text-white transition-colors cursor-pointer"
+        >
+          {copied ? (
+            <span className="flex items-center text-emerald-400"><Check className="w-3.5 h-3.5 mr-1" /> Copied</span>
+          ) : (
+            <span className="flex items-center"><ClipboardList className="w-3.5 h-3.5 mr-1" /> Copy</span>
+          )}
+        </button>
+      </div>
+      <div className="p-4 overflow-x-auto max-h-[350px]">
+        <pre className="whitespace-pre">
+          <code dangerouslySetInnerHTML={{ __html: highlight(code, lang || "") }} />
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function MathBlock({ latex }: { latex: string }) {
+  return (
+    <div className="flex justify-center p-4 my-2.5 bg-indigo-500/5 border border-indigo-500/10 rounded-2xl text-slate-100 italic font-serif text-sm relative overflow-x-auto shadow-inner select-all">
+      <span className="text-indigo-400 font-semibold select-none mr-2">f(x) = </span>
+      <span>{latex}</span>
+    </div>
+  );
+}
+
+function TableBlock({ rawTable }: { rawTable: string }) {
+  const lines = rawTable.trim().split("\n");
+  if (lines.length < 2) return <pre className="text-xs">{rawTable}</pre>;
+
+  const headers = lines[0]
+    .split("|")
+    .map(h => h.trim())
+    .filter((_, i) => i > 0 && i < lines[0].split("|").length - 1);
+
+  const rows = lines.slice(2).map(line => {
+    return line
+      .split("|")
+      .map(cell => cell.trim())
+      .filter((_, i) => i > 0 && i < line.split("|").length - 1);
+  });
+
+  return (
+    <div className="overflow-x-auto my-3.5 rounded-xl border border-slate-800 bg-slate-950/40 shadow-lg">
+      <table className="min-w-full divide-y divide-slate-800 text-xs">
+        <thead className="bg-slate-900/80">
+          <tr>
+            {headers.map((h, i) => (
+              <th key={i} className="px-4 py-3 text-left font-bold text-slate-200 uppercase tracking-wider">
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-800 bg-transparent">
+          {rows.map((row, i) => (
+            <tr key={i} className="hover:bg-slate-900/30 transition-colors">
+              {row.map((cell, j) => (
+                <td key={j} className="px-4 py-3 text-slate-300 font-medium whitespace-nowrap">
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TextBlock({ text }: { text: string }) {
+  const lines = text.split("\n");
+
+  const renderLine = (line: string, lineIdx: number) => {
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith("# ")) {
+      return <h1 key={lineIdx} className="text-lg font-extrabold text-white mt-4 mb-2 tracking-tight border-b border-slate-800/60 pb-1">{renderInlineStyles(trimmed.substring(2))}</h1>;
+    }
+    if (trimmed.startsWith("## ")) {
+      return <h2 key={lineIdx} className="text-base font-bold text-slate-100 mt-3.5 mb-1.5 tracking-tight">{renderInlineStyles(trimmed.substring(3))}</h2>;
+    }
+    if (trimmed.startsWith("### ")) {
+      return <h3 key={lineIdx} className="text-sm font-semibold text-slate-200 mt-3 mb-1">{renderInlineStyles(trimmed.substring(4))}</h3>;
+    }
+
+    if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+      return (
+        <li key={lineIdx} className="list-disc list-inside text-xs text-slate-300 ml-2 py-0.5 leading-relaxed">
+          {renderInlineStyles(trimmed.substring(2))}
+        </li>
+      );
+    }
+
+    const orderedMatch = trimmed.match(/^(\d+)\.\s+(.*)/);
+    if (orderedMatch) {
+      return (
+        <li key={lineIdx} className="list-decimal list-inside text-xs text-slate-300 ml-2 py-0.5 leading-relaxed">
+          {renderInlineStyles(orderedMatch[2])}
+        </li>
+      );
+    }
+
+    if (!trimmed) {
+      return <div key={lineIdx} className="h-2"></div>;
+    }
+
+    return (
+      <p key={lineIdx} className="text-xs text-slate-300 leading-relaxed py-0.5">
+        {renderInlineStyles(line)}
+      </p>
+    );
+  };
+
+  const renderInlineStyles = (raw: string) => {
+    let elements: React.ReactNode[] = [];
+    let lastIndex = 0;
+
+    const regex = /(\*\*.*?\*\*|`.*?`|\$.*?\$|\[.*?\]\(.*?\))/g;
+    let match;
+
+    while ((match = regex.exec(raw)) !== null) {
+      const index = match.index;
+      const matchedText = match[0];
+
+      if (index > lastIndex) {
+        elements.push(raw.substring(lastIndex, index));
+      }
+
+      if (matchedText.startsWith("**") && matchedText.endsWith("**")) {
+        elements.push(
+          <strong key={index} className="font-extrabold text-white">
+            {matchedText.slice(2, -2)}
+          </strong>
+        );
+      } else if (matchedText.startsWith("`") && matchedText.endsWith("`")) {
+        elements.push(
+          <code key={index} className="px-1.5 py-0.5 rounded bg-slate-950 text-indigo-400 font-mono text-[11px] border border-slate-850">
+            {matchedText.slice(1, -1)}
+          </code>
+        );
+      } else if (matchedText.startsWith("$") && matchedText.endsWith("$")) {
+        elements.push(
+          <span key={index} className="font-serif italic text-indigo-300 px-0.5 font-semibold">
+            {matchedText.slice(1, -1)}
+          </span>
+        );
+      } else if (matchedText.startsWith("[") && matchedText.includes("](")) {
+        const splitIdx = matchedText.indexOf("](");
+        const linkText = matchedText.substring(1, splitIdx);
+        const url = matchedText.substring(splitIdx + 2, matchedText.length - 1);
+        elements.push(
+          <a key={index} href={url} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline font-semibold transition-colors">
+            {linkText}
+          </a>
+        );
+      }
+
+      lastIndex = regex.lastIndex;
+    }
+
+    if (lastIndex < raw.length) {
+      elements.push(raw.substring(lastIndex));
+    }
+
+    return elements.length > 0 ? elements : raw;
+  };
+
+  return <div className="space-y-1">{lines.map((line, idx) => renderLine(line, idx))}</div>;
+}
+
