@@ -1,1 +1,8 @@
 sentence-transformers
+pgvector
+chromadb
+pypdf2
+textract
+pytest
+pytest-asyncio
+pytest-cov
