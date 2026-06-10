@@ -407,6 +407,11 @@ persona_presets = Table(
 try:
     engine = create_engine(DATABASE_URL)
     metadata.create_all(engine)
+    # Ensure pgvector extension is available for vector similarity (PostgreSQL only)
+    if engine.dialect.name == "postgresql":
+        with engine.connect() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+            conn.commit()
 except Exception:
     pass
 
