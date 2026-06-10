@@ -354,9 +354,14 @@ class BrowserAutomationService:
             from playwright.async_api import async_playwright
 
             pw = await async_playwright().start()
-            self._browser = await pw.chromium.launch(
-                headless=self.config.headless
-            )
+            ws_endpoint = os.getenv("BROWSER_WS_ENDPOINT")
+            if ws_endpoint:
+                logger.info(f"Connecting to remote browser at: {ws_endpoint}")
+                self._browser = await pw.chromium.connect(ws_endpoint)
+            else:
+                self._browser = await pw.chromium.launch(
+                    headless=self.config.headless
+                )
             self._context = await self._browser.new_context()
             self._page = await self._context.new_page()
         except Exception as exc:

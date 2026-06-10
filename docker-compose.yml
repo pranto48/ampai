@@ -1,20 +1,51 @@
+version: '3.8'
+
 services:
-  agent_postgres:
-    image: pgvector/pgvector:pg16
-    container_name: ampai-agent-postgres
+  # =============================================================================
+  # 1. Relational Database Service (Standard Structured Data)
+  # =============================================================================
+  relational-db:
+    image: postgres:16-alpine
+    container_name: ampai-relational-db
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ampai}
       POSTGRES_USER: ${POSTGRES_USER:-ampai}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
     volumes:
-      - agent_postgres_data:/var/lib/postgresql/data
+      - relational_db_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ampai} -d ${POSTGRES_DB:-ampai}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-ampai} -d $${POSTGRES_DB:-ampai}"]
       interval: 5s
       timeout: 5s
       retries: 20
+    networks:
+      - ampai-network
 
+  # =============================================================================
+  # 2. Vector Database Service (Semantic Memory Indexing)
+  # =============================================================================
+  vector-memory-db:
+    image: pgvector/pgvector:pg16
+    container_name: ampai-vector-memory-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ampai}
+      POSTGRES_USER: ${POSTGRES_USER:-ampai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+    volumes:
+      - vector_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-ampai} -d $${POSTGRES_DB:-ampai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - ampai-network
+
+  # =============================================================================
+  # 3. Redis Cache Service
+  # =============================================================================
   agent_redis:
     image: redis:7-alpine
     container_name: ampai-agent-redis
@@ -26,13 +57,36 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    networks:
+      - ampai-network
 
-  ampai:
-    build: .
+  # =============================================================================
+  # 4. Web Automation Browser Node
+  # =============================================================================
+  browser-node:
+    image: browserless/chrome:latest
+    container_name: ampai-browser-node
+    restart: unless-stopped
+    environment:
+      - MAX_CONCURRENT_SESSIONS=10
+      - CONNECTION_TIMEOUT=60000
+    # No port exposed to host for security, accessed internally by core-backend
+    networks:
+      - ampai-network
+
+  # =============================================================================
+  # 5. Core Backend API Service (FastAPI)
+  # =============================================================================
+  core-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: ampai-server
     restart: unless-stopped
     depends_on:
-      agent_postgres:
+      relational-db:
+        condition: service_healthy
+      vector-memory-db:
         condition: service_healthy
       agent_redis:
         condition: service_healthy
@@ -46,8 +100,15 @@ services:
       retries: 10
       start_period: 30s
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-ampai}:${POSTGRES_PASSWORD}@agent_postgres:5432/${POSTGRES_DB:-ampai}
+      # Database Connections
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ampai}:${POSTGRES_PASSWORD}@relational-db:5432/${POSTGRES_DB:-ampai}
+      VECTOR_DATABASE_URL: postgresql://${POSTGRES_USER:-ampai}:${POSTGRES_PASSWORD}@vector-memory-db:5432/${POSTGRES_DB:-ampai}
       REDIS_URL: redis://agent_redis:6379/0
+      
+      # Browser Automation Remote Connection
+      BROWSER_WS_ENDPOINT: ws://browser-node:3000
+      
+      # Credentials and Security
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET required}
       AMPAI_ENV: ${AMPAI_ENV:-development}
       AMPAI_DEFAULT_ADMIN_USERNAME: ${AMPAI_DEFAULT_ADMIN_USERNAME:-admin}
@@ -55,8 +116,10 @@ services:
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       SESSION_RECALL_DB_PATH: /data/agent_data/session_recall.db
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:1420,http://127.0.0.1:1420,tauri://localhost}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      
+      # Origins allowing requests (includes desktop and the frontend port)
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:1420,http://127.0.0.1:1420,tauri://localhost,http://localhost:8080,http://127.0.0.1:8080}
+      
       WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-duckduckgo}
       BROWSER_AUTOMATION_ENABLED: ${BROWSER_AUTOMATION_ENABLED:-false}
       BROWSER_HEADLESS: ${BROWSER_HEADLESS:-false}
@@ -66,8 +129,34 @@ services:
       - ampai_data:/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - ampai-network
 
+  # =============================================================================
+  # 6. Frontend UI Service (Nginx serving React/Vite built files)
+  # =============================================================================
+  frontend-ui:
+    build:
+      context: .
+      dockerfile: frontend.Dockerfile
+    container_name: ampai-frontend
+    restart: unless-stopped
+    depends_on:
+      - core-backend
+    ports:
+      - "8080:80"
+    networks:
+      - ampai-network
+
+# =============================================================================
+# Volumes and Network Configuration
+# =============================================================================
 volumes:
-  agent_postgres_data:
+  relational_db_data:
+  vector_db_data:
   agent_redis_data:
   ampai_data:
+
+networks:
+  ampai-network:
+    driver: bridge

@@ -132,7 +132,7 @@ class MemoryIndexer:
             self.vectorstore = PGVector(
                 embeddings=self.embedding_model,
                 collection_name="chat_memory",
-                connection=DATABASE_URL,
+                connection=os.getenv("VECTOR_DATABASE_URL", DATABASE_URL),
                 use_jsonb=True,
             )
             self.enabled = True
