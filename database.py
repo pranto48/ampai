@@ -156,6 +156,8 @@ memory_embeddings = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("memory_id", Integer, nullable=False),
     # Note: vector(768) column is managed via raw SQL / pgvector extension
+    Column("source_file", String, nullable=True),
+    Column("chunk_index", Integer, nullable=True),
     Column("created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)),
 )
 
@@ -431,6 +433,27 @@ def migrate_session_metadata_schema():
 
 
 migrate_session_metadata_schema()
+
+
+def migrate_memory_embeddings_schema():
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            inspector = inspect(engine)
+            if not inspector.has_table("memory_embeddings"):
+                return
+            columns = {col["name"] for col in inspector.get_columns("memory_embeddings")}
+            if "source_file" not in columns:
+                conn.execute(text("ALTER TABLE memory_embeddings ADD COLUMN IF NOT EXISTS source_file VARCHAR"))
+            if "chunk_index" not in columns:
+                conn.execute(text("ALTER TABLE memory_embeddings ADD COLUMN IF NOT EXISTS chunk_index INTEGER"))
+            conn.commit()
+    except Exception as e:
+        print(f"Error migrating memory_embeddings schema: {e}")
+
+
+migrate_memory_embeddings_schema()
 
 
 def migrate_memory_retrieval_indexes():
