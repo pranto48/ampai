@@ -15,7 +15,7 @@ from logging_utils import get_logger
 
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from database import DATABASE_URL, get_config, get_core_memories, add_core_memory, redact_pii_text
 from memory_persistence import memory_persistence_manager
