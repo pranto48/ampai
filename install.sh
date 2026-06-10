@@ -4,7 +4,6 @@
 # =============================================================================
 
 set -e
-set -x
 
 # ANSI Color Codes for beautiful terminal styling
 RED='\033[0;31m'
@@ -17,7 +16,7 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Clear screen and show premium header
-clear
+clear 2>/dev/null || true
 echo -e "${BLUE}${BOLD}=====================================================================${NC}"
 echo -e "${CYAN}${BOLD}                 AmpAI Auto-Installer & DB Setup                     ${NC}"
 echo -e "${BLUE}${BOLD}=====================================================================${NC}"
