@@ -7,17 +7,16 @@ A personal AI agent with long-term memory, web search, browser automation, termi
 ```bash
 git clone https://github.com/pranto48/ampai.git
 cd ampai
-chmod +x setup.sh && ./setup.sh
-docker compose up -d --build
+chmod +x install.sh && ./install.sh
 ```
 
-That's it. The `setup.sh` script generates a `.env` file with secure random secrets.
+That's it! The `install.sh` script generates a `.env` file with secure random secrets, builds the containers, starts the services, and verifies database health automatically.
 
 **Access:**
 - API: http://localhost:8000/docs
 - Health: http://localhost:8000/healthz
 
-**Admin credentials** are printed by `setup.sh`. Default username is `admin`.
+**Admin credentials** are printed at the end of the installation. Default username is `admin`.
 
 ## Manual Setup
 
