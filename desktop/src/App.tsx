@@ -3081,7 +3081,7 @@ function Markdown({ text }: { text: string }) {
         });
       }
 
-      currentText = currentText.substring(first.index + first.match[0].length);
+      currentText = currentText.substring(first.index + first.match![0].length);
     } else {
       blocks.push({ type: "text", content: currentText });
       break;
