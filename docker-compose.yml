@@ -1,9 +1,6 @@
 version: '3.8'
 
 services:
-  # =============================================================================
-  # 1. Relational Database Service (Standard Structured Data)
-  # =============================================================================
   relational-db:
     image: postgres:16-alpine
     container_name: ampai-relational-db
@@ -22,9 +19,6 @@ services:
     networks:
       - ampai-network
 
-  # =============================================================================
-  # 2. Vector Database Service (Semantic Memory Indexing)
-  # =============================================================================
   vector-memory-db:
     image: pgvector/pgvector:pg16
     container_name: ampai-vector-memory-db
@@ -43,9 +37,6 @@ services:
     networks:
       - ampai-network
 
-  # =============================================================================
-  # 3. Redis Cache Service
-  # =============================================================================
   agent_redis:
     image: redis:7-alpine
     container_name: ampai-agent-redis
@@ -60,9 +51,6 @@ services:
     networks:
       - ampai-network
 
-  # =============================================================================
-  # 4. Web Automation Browser Node
-  # =============================================================================
   browser-node:
     image: browserless/chrome:latest
     container_name: ampai-browser-node
@@ -70,17 +58,26 @@ services:
     environment:
       - MAX_CONCURRENT_SESSIONS=10
       - CONNECTION_TIMEOUT=60000
-    # No port exposed to host for security, accessed internally by core-backend
     networks:
       - ampai-network
 
-  # =============================================================================
-  # 5. Core Backend API Service (FastAPI)
-  # =============================================================================
+  chromadb:
+    image: chromadb/chroma
+    container_name: ampai-chromadb
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    volumes:
+      - chromadb_data:/chroma
+    environment:
+      - CHROMA_DB_IMPL=duckdb
+    networks:
+      - ampai-network
+
   core-backend:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: backend/Dockerfile
     container_name: ampai-server
     restart: unless-stopped
     depends_on:
@@ -90,9 +87,10 @@ services:
         condition: service_healthy
       agent_redis:
         condition: service_healthy
+      chromadb:
+        condition: service_healthy
     ports:
       - "8000:8000"
-      - "8001:8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 10s
@@ -100,15 +98,11 @@ services:
       retries: 10
       start_period: 30s
     environment:
-      # Database Connections
       DATABASE_URL: postgresql://${POSTGRES_USER:-ampai}:${POSTGRES_PASSWORD}@relational-db:5432/${POSTGRES_DB:-ampai}
       VECTOR_DATABASE_URL: postgresql://${POSTGRES_USER:-ampai}:${POSTGRES_PASSWORD}@vector-memory-db:5432/${POSTGRES_DB:-ampai}
       REDIS_URL: redis://agent_redis:6379/0
-      
-      # Browser Automation Remote Connection
-      BROWSER_WS_ENDPOINT: ws://browser-node:3000
-      
-      # Credentials and Security
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: 8000
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET required}
       AMPAI_ENV: ${AMPAI_ENV:-development}
       AMPAI_DEFAULT_ADMIN_USERNAME: ${AMPAI_DEFAULT_ADMIN_USERNAME:-admin}
@@ -116,10 +110,7 @@ services:
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       SESSION_RECALL_DB_PATH: /data/agent_data/session_recall.db
-      
-      # Origins allowing requests (includes desktop and the frontend port)
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:1420,http://127.0.0.1:1420,tauri://localhost,http://localhost:8080,http://127.0.0.1:8080}
-      
       WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-duckduckgo}
       BROWSER_AUTOMATION_ENABLED: ${BROWSER_AUTOMATION_ENABLED:-false}
       BROWSER_HEADLESS: ${BROWSER_HEADLESS:-false}
@@ -132,13 +123,10 @@ services:
     networks:
       - ampai-network
 
-  # =============================================================================
-  # 6. Frontend UI Service (Nginx serving React/Vite built files)
-  # =============================================================================
   frontend-ui:
     build:
       context: .
-      dockerfile: frontend.Dockerfile
+      dockerfile: frontend/Dockerfile
     container_name: ampai-frontend
     restart: unless-stopped
     depends_on:
@@ -148,14 +136,12 @@ services:
     networks:
       - ampai-network
 
-# =============================================================================
-# Volumes and Network Configuration
-# =============================================================================
 volumes:
   relational_db_data:
   vector_db_data:
   agent_redis_data:
   ampai_data:
+  chromadb_data:
 
 networks:
   ampai-network:
