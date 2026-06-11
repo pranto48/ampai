@@ -87,6 +87,7 @@ def _do_update_in_thread(actor: str) -> None:
     try:
         # Step 1: Git Fetch & Reset
         _log("--- Step 1: Fetching and resetting to latest code ---")
+        subprocess.run(["git", "config", "--global", "--add", "safe.directory", "/app"], cwd="/app")
         fetch_res = subprocess.run(["git", "fetch", "--all"], cwd="/app", capture_output=True, text=True, timeout=45)
         if fetch_res.returncode != 0:
             raise RuntimeError(f"git fetch failed: {fetch_res.stderr.strip()}")
