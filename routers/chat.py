@@ -77,7 +77,7 @@ def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated
         # Auto-resolve model_type
         effective_model_type = (request.model_type or "ollama").strip().lower()
         if effective_model_type == "ollama":
-            configured_default = (get_config("default_model") or "").strip().lower()
+            configured_default = (get_config("default_model_provider") or get_config("model_provider") or "").strip().lower()
             if (
                 configured_default
                 and configured_default != "ollama"
@@ -504,7 +504,7 @@ async def chat_stream(request: ChatRequest, user: UserContext = Depends(require_
     # Auto-resolve model_type
     effective_model_type = (request.model_type or "ollama").strip().lower()
     if effective_model_type == "ollama":
-        configured_default = (get_config("default_model") or "").strip().lower()
+        configured_default = (get_config("default_model_provider") or get_config("model_provider") or "").strip().lower()
         if (
             configured_default
             and configured_default != "ollama"

@@ -853,14 +853,14 @@ async def chat_with_agent_stream(
                     )
 
         # Terminal command execution check
-        if kwargs.get("enable_terminal_tools") or enable_terminal_tools:
+        if kwargs.get("enable_terminal_tools"):
             terminal_keywords = ["run", "execute", "install", "deploy", "build", "npm", "pip", "python", "docker", "git", "bash", "sh", "cmd", "systemctl"]
             msg_lower = (message or "").lower()
             if any(kw in msg_lower for kw in terminal_keywords):
                 yield {"type": "status", "status": "executing_command", "message": "Analyzing system environment for terminal execution..."}
 
         # Browser active check
-        if kwargs.get("enable_browser_tools") or enable_browser_tools:
+        if kwargs.get("enable_browser_tools"):
             yield {"type": "status", "status": "browser_action", "message": "Browser node active: Navigating to resource..."}
 
         file_context = ""
@@ -1064,6 +1064,21 @@ async def chat_with_agent_stream(
             chunk = accumulated_response[i:i+chunk_size]
             yield {"type": "token", "token": chunk}
             await asyncio.sleep(0.01)
+
+        # Yield final metadata and return early to avoid post-exception fallback errors
+        final_meta = {
+            "web_search": web_search,
+            "task_suggestions": [],
+            "has_task_cues": False,
+            "retrieval": retrieval_meta,
+            "memory_action": default_res.get("memory_action"),
+            "memory_fact": default_res.get("memory_fact"),
+            "memory_category": None,
+            "skill_opportunity": None,
+            "recall_used": False,
+        }
+        yield {"type": "done", "metadata": final_meta}
+        return
 
     # Capture memory candidates using the persistence manager
     await asyncio.to_thread(
