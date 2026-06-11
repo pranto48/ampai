@@ -529,7 +529,7 @@ export default function App() {
         if (res && Array.isArray(res.models)) {
           setProviderModels(prev => ({
             ...prev,
-            [modelType]: res.models.map(m => ({ id: m.id, name: m.name, free: m.free }))
+            [modelType]: res.models.map((m: any) => ({ id: m.id, name: m.name, free: m.free }))
           }));
           
           // Filter to free models if OpenRouter
