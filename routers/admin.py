@@ -2292,57 +2292,17 @@ def update_check_version(user: UserContext = Depends(require_admin_user)):
 
 @router.post("/api/admin/update/trigger")
 def update_trigger(user: UserContext = Depends(require_admin_user)):
-    if not _update_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="An update is already in progress")
-    try:
-
-        def _do_update():
-            global _update_status
-            _update_status = {
-                "state": "running",
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "finished_at": None,
-                "error": None,
-            }
-            _update_log_lines.clear()
-            try:
-                import subprocess
-
-                _update_log("Starting AmpAI code update…")
-                _update_status["state"] = "success"
-                _update_status["finished_at"] = datetime.now(timezone.utc).isoformat()
-                log_audit_event(
-                    username=user.username,
-                    action="admin.docker.update.success",
-                    details="",
-                )
-            except Exception as exc:
-                _update_log(f"ERROR: {exc}")
-                _update_status["state"] = "error"
-                _update_status["finished_at"] = datetime.now(timezone.utc).isoformat()
-                _update_status["error"] = str(exc)
-                log_audit_event(
-                    username=user.username,
-                    action="admin.docker.update.failure",
-                    details=str(exc),
-                )
-            finally:
-                _update_lock.release()
-
-        t = threading.Thread(target=_do_update, daemon=True)
-        t.start()
-    except Exception as e:
-        _update_lock.release()
-        raise HTTPException(status_code=500, detail=str(e))
-    return {
-        "status": "started",
-        "message": "Update started. Poll /api/admin/update/status for progress.",
-    }
+    from core.updater import trigger_system_update
+    res = trigger_system_update(user.username)
+    if res.get("status") == "failed":
+        raise HTTPException(status_code=409, detail=res.get("message"))
+    return res
 
 
 @router.get("/api/admin/update/status")
 def update_status_endpoint(user: UserContext = Depends(require_admin_user)):
-    return {**_update_status, "log_lines": list(_update_log_lines)}
+    from core.updater import get_system_update_status
+    return get_system_update_status()
 
 
 @router.get("/api/admin/update/backups")

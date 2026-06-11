@@ -643,7 +643,7 @@ def chat_with_agent(
         )
         if pii_redaction_enabled:
             default_res["response"] = redact_pii_text(default_res["response"])
-        default_res["response"] = "⚠️ **[Rate Limit / Provider Error]** I fell back to my built-in engine:\n\n" + default_res["response"]
+        default_res["response"] = f"⚠️ **[Provider / Connection Error: {str(e)}]** I fell back to my built-in offline engine:\n\n" + default_res["response"]
         
         return {
             "response": default_res["response"],
@@ -1055,7 +1055,7 @@ async def chat_with_agent_stream(
         )
         if pii_redaction_enabled:
             default_res["response"] = redact_pii_text(default_res["response"])
-        default_res["response"] = "⚠️ **[Rate Limit / Provider Error]** I fell back to my built-in engine:\n\n" + default_res["response"]
+        default_res["response"] = f"⚠️ **[Provider / Connection Error: {str(e)}]** I fell back to my built-in offline engine:\n\n" + default_res["response"]
         
         accumulated_response = default_res["response"]
         # Stream it in chunks

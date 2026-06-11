@@ -120,6 +120,8 @@ services:
       TERMINAL_REQUIRE_CONFIRMATION: ${TERMINAL_REQUIRE_CONFIRMATION:-true}
     volumes:
       - ampai_data:/data
+      - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

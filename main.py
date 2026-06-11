@@ -7685,30 +7685,18 @@ def update_check_version(user: UserContext = Depends(require_admin_user)):
 @app.post("/api/admin/update/trigger")
 def update_trigger(user: UserContext = Depends(require_admin_user)):
     """Kick off the update process in a background thread (admin only)."""
-    if not _update_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="An update is already in progress")
-    try:
-        t = threading.Thread(
-            target=_do_update_in_thread, args=(user.username,), daemon=True
-        )
-        t.start()
-        # Lock is released inside _do_update_in_thread's finally block
-    except Exception as e:
-        _update_lock.release()
-        raise HTTPException(status_code=500, detail=str(e))
-    return {
-        "status": "started",
-        "message": "Update started. Poll /api/admin/update/status for progress.",
-    }
+    from core.updater import trigger_system_update
+    res = trigger_system_update(user.username)
+    if res.get("status") == "failed":
+        raise HTTPException(status_code=409, detail=res.get("message"))
+    return res
 
 
 @app.get("/api/admin/update/status")
 def update_status_endpoint(user: UserContext = Depends(require_admin_user)):
     """Return current update state and recent log lines."""
-    return {
-        **_update_status,
-        "log_lines": list(_update_log_lines),
-    }
+    from core.updater import get_system_update_status
+    return get_system_update_status()
 
 
 @app.get("/api/admin/update/backups")
