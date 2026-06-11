@@ -861,6 +861,39 @@ def _bootstrap_default_users() -> None:
     )
 
 
+def _bootstrap_default_admin_by_email() -> None:
+    """
+    Seed a superuser admin account on startup using DEFAULT_ADMIN_EMAIL and DEFAULT_ADMIN_PASSWORD env vars.
+    Degrades gracefully if variables are not set or database operations fail.
+    """
+    email = os.getenv("DEFAULT_ADMIN_EMAIL")
+    password = os.getenv("DEFAULT_ADMIN_PASSWORD")
+    
+    if not email or not password:
+        logger.info("DEFAULT_ADMIN_EMAIL or DEFAULT_ADMIN_PASSWORD not configured. Skipping superuser seeding.")
+        return
+
+    email = email.strip()
+    password = password.strip()
+
+    try:
+        existing_user = get_user(email)
+        if existing_user:
+            logger.info("Superuser '%s' already exists. Skipping database seeding.", email)
+            return
+
+        # Hash securely using pwd_context
+        hashed_password = pwd_context.hash(password)
+        
+        success = db_create_user(username=email, role="admin", password_hash=hashed_password)
+        if success:
+            logger.info("Successfully seeded superuser admin '%s'.", email)
+        else:
+            logger.warning("Failed to seed superuser admin '%s'.", email)
+    except Exception as e:
+        logger.exception("Error during default admin seeding for '%s': %s", email, e)
+
+
 def _load_integration_credentials(provider: str) -> Dict[str, str]:
     raw = get_config(f"integration_email_{provider}_credentials", "{}")
     try:
@@ -1861,6 +1894,12 @@ def startup_event():
         _bootstrap_default_users()
     except Exception as exc:
         logger.warning("Skipping default-user bootstrap due to startup error: %s", exc)
+    
+    try:
+        _bootstrap_default_admin_by_email()
+    except Exception as exc:
+        logger.warning("Skipping admin email bootstrap due to startup error: %s", exc)
+
     bootstrap_default_admin()
     start_scheduler()
     # Initialize memory persistence manager
