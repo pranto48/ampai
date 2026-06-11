@@ -220,6 +220,28 @@ async def upload_file(
         ]:
             with open(file_path, "r", encoding="utf-8") as text_file:
                 extracted_text = text_file.read()
+        elif file_ext.lower() == ".docx":
+            try:
+                import docx2txt
+                extracted_text = docx2txt.process(file_path)
+            except Exception as e:
+                logger.warning("DOCX parsing error: %s", e)
+        elif file_ext.lower() == ".xlsx":
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+                sheets_text = []
+                for sheet in wb.worksheets:
+                    sheet_lines = []
+                    for row in sheet.iter_rows(values_only=True):
+                        row_values = [str(val).strip() for val in row if val is not None]
+                        if row_values:
+                            sheet_lines.append(" | ".join(row_values))
+                    if sheet_lines:
+                        sheets_text.append(f"--- Sheet: {sheet.title} ---\n" + "\n".join(sheet_lines))
+                extracted_text = "\n\n".join(sheets_text)
+            except Exception as e:
+                logger.warning("XLSX parsing error: %s", e)
         payload = {
             "filename": file.filename,
             "url": f"/uploads/{unique_filename}",

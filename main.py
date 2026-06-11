@@ -4479,6 +4479,7 @@ def get_admin_configs(user=Depends(require_admin_user)):
     return result
 
 
+@app.patch("/api/admin/configs")
 @app.post("/api/admin/configs")
 def update_admin_configs(
     request: ConfigUpdateRequest, user=Depends(require_admin_user)

@@ -31,3 +31,6 @@ textract
 pytest
 pytest-asyncio
 pytest-cov
+docx2txt
+openpyxl
+

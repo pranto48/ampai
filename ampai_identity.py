@@ -104,6 +104,19 @@ def get_memory_curation_prompt(transcript: str, username: str = "") -> str:
     )
 
 
+def get_file_memory_curation_prompt(text_content: str, username: str = "") -> str:
+    """Prompt used to extract facts from arbitrary text content (like uploaded documents)."""
+    user_ref = f"'{username}'" if username else "the user"
+    return (
+        "You are AmpAI's memory curator. Review the following text extracted from a file uploaded by the user and extract key facts worth remembering long-term.\n\n"
+        f"EXTRACTED TEXT:\n{text_content[:3000]}\n\n"
+        f"Extract 3-8 CONCRETE, SPECIFIC facts about {user_ref} or relevant knowledge that should be stored in memory — info, preferences, project details, decisions, references.\n"
+        'Return ONLY a JSON array of strings. Example: ["User prefers dark mode", "The main server IP is 192.168.20.5"]\n'
+        "If nothing is worth saving, return: []\n"
+        "Return ONLY valid JSON, no explanation."
+    )
+
+
 def get_skill_improvement_prompt(
     skill_name: str,
     current_prompt: str,

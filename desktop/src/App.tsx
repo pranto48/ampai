@@ -16,6 +16,7 @@ import {
   X,
   Check,
   Plus,
+  Upload,
   Trash2,
   Edit2,
   Send,
@@ -116,6 +117,11 @@ export default function App() {
   const [providers, setProviders] = useState<any[]>([]);
   const [providerModels, setProviderModels] = useState<Record<string, any[]>>({});
   const [sessionSearch, setSessionSearch] = useState<string>("");
+
+  // Curation text-file import states
+  const [curatedFacts, setCuratedFacts] = useState<string[]>([]);
+  const [selectedFacts, setSelectedFacts] = useState<Record<number, boolean>>({});
+  const [memoryFileLoading, setMemoryFileLoading] = useState<boolean>(false);
   const [sessionCategoryFilter, setSessionCategoryFilter] = useState<string>("");
   
   // Modals / Renaming states
@@ -508,12 +514,44 @@ export default function App() {
     setIsAutoScrollPinned(isAtBottom);
   };
 
-  // Scroll to bottom of chat
   useEffect(() => {
     if (isAutoScrollPinned) {
       chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
   }, [msgs, isAutoScrollPinned]);
+
+  // Dynamic model fetching when provider changes
+  useEffect(() => {
+    if (!auth) return;
+    const fetchModels = async () => {
+      try {
+        const res = await apiCall<any>(`/api/models/fetch/${modelType}`);
+        if (res && Array.isArray(res.models)) {
+          setProviderModels(prev => ({
+            ...prev,
+            [modelType]: res.models.map(m => ({ id: m.id, name: m.name, free: m.free }))
+          }));
+          
+          // Filter to free models if OpenRouter
+          const list = modelType === "openrouter"
+            ? res.models.filter((m: any) => m.free)
+            : res.models;
+            
+          if (list.length > 0) {
+            const exists = list.some((m: any) => m.id === modelName);
+            if (!exists) {
+              setModelName(list[0].id);
+            }
+          } else {
+            setModelName("");
+          }
+        }
+      } catch (err) {
+        console.error("Error fetching models for " + modelType, err);
+      }
+    };
+    fetchModels();
+  }, [modelType, auth]);
 
   // --- Session Management Functions ---
   const handleSelectSession = async (sid: string) => {
@@ -947,6 +985,94 @@ export default function App() {
       triggerToast("Core memory updated", "ok");
     } catch (err: any) {
       triggerToast(err.message || "Failed to update memory fact", "err");
+    }
+  };
+
+  const handleMemoryFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || e.target.files.length === 0) return;
+    const file = e.target.files[0];
+    const formData = new FormData();
+    formData.append("file", file);
+    
+    setMemoryFileLoading(true);
+    setCuratedFacts([]);
+    setSelectedFacts({});
+    
+    try {
+      const uploadRes = await apiCall<any>("/api/upload", {
+        method: "POST",
+        body: formData
+      });
+      
+      const extractedText = uploadRes.extracted_text || "";
+      if (!extractedText.trim()) {
+        triggerToast("Failed to extract text from file or file is empty.", "err");
+        setMemoryFileLoading(false);
+        return;
+      }
+      
+      const curateRes = await apiCall<any>("/api/memory/curate-text", {
+        method: "POST",
+        body: JSON.stringify({
+          text: extractedText,
+          model_type: modelType
+        })
+      });
+      
+      const facts = curateRes.facts || [];
+      if (facts.length === 0) {
+        triggerToast("No memory facts could be extracted from this document.", "info");
+      } else {
+        setCuratedFacts(facts);
+        const initialSelections: Record<number, boolean> = {};
+        facts.forEach((_: any, idx: number) => {
+          initialSelections[idx] = true;
+        });
+        setSelectedFacts(initialSelections);
+        triggerToast(`Extracted ${facts.length} candidate facts.`, "ok");
+      }
+    } catch (err: any) {
+      triggerToast(err.message || "Failed to process file.", "err");
+    } finally {
+      setMemoryFileLoading(false);
+    }
+  };
+
+  const handleToggleFactSelection = (idx: number) => {
+    setSelectedFacts(prev => ({
+      ...prev,
+      [idx]: !prev[idx]
+    }));
+  };
+
+  const handleSaveSelectedFacts = async () => {
+    const factsToSave = curatedFacts.filter((_, idx) => selectedFacts[idx]);
+    if (factsToSave.length === 0) {
+      triggerToast("No facts selected to save.", "info");
+      return;
+    }
+    
+    setBusy(true);
+    let savedCount = 0;
+    try {
+      for (const fact of factsToSave) {
+        await apiCall("/api/memory/core", {
+          method: "POST",
+          body: JSON.stringify({ text: fact })
+        });
+        savedCount++;
+      }
+      
+      triggerToast(`Saved ${savedCount} facts to Core Memory successfully.`, "ok");
+      setCuratedFacts([]);
+      setSelectedFacts({});
+      
+      const memoriesRes = await apiCall<any>("/api/core-memories");
+      setMemories(memoriesRes.core_memories || []);
+    } catch (err: any) {
+      triggerToast(err.message || "Failed to save some facts.", "err");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -1825,6 +1951,27 @@ export default function App() {
                       <option value="openrouter">🔀 OpenRouter</option>
                     </select>
 
+                    <select
+                      value={modelName}
+                      onChange={(e) => setModelName(e.target.value)}
+                      className="bg-slate-900 border border-slate-800 px-2.5 py-1.5 rounded-xl text-xs text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 max-w-[200px]"
+                    >
+                      {(modelType === "openrouter" 
+                        ? (providerModels[modelType] || []).filter((m: any) => m.free) 
+                        : (providerModels[modelType] || [])
+                      ).map((m: any) => (
+                        <option key={m.id} value={m.id}>
+                          {m.name || m.id}
+                        </option>
+                      ))}
+                      {(!providerModels[modelType] || (modelType === "openrouter" 
+                        ? (providerModels[modelType] || []).filter((m: any) => m.free).length === 0 
+                        : (providerModels[modelType] || []).length === 0
+                      )) && (
+                        <option value="">No models available</option>
+                      )}
+                    </select>
+
                     <button
                       onClick={() => handleCreateNewSession()}
                       className="lg:hidden p-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-all"
@@ -2150,12 +2297,73 @@ export default function App() {
                       />
                       <button
                         type="submit"
-                        className="w-full py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors flex items-center justify-center space-x-2"
+                        className="w-full py-2 rounded-xl bg-indigo-650 hover:bg-indigo-600 text-white font-semibold text-xs transition-colors flex items-center justify-center space-x-2"
                       >
                         <Plus className="w-4 h-4" />
                         <span>Insert Fact</span>
                       </button>
                     </form>
+                  </div>
+
+                  {/* Import Memory from File */}
+                  <div className="glass-panel p-5 rounded-2xl border border-slate-800 space-y-4 h-fit">
+                    <h3 className="font-bold text-slate-200 text-sm">Import Memory from File</h3>
+                    <p className="text-[11px] text-slate-500">
+                      Upload a PDF, TXT, DOCX, or XLSX file to extract facts into memory.
+                    </p>
+                    
+                    <div className="space-y-3">
+                      <input
+                        type="file"
+                        accept=".pdf,.txt,.docx,.xlsx"
+                        onChange={handleMemoryFileUpload}
+                        className="hidden"
+                        id="memory-file-input"
+                      />
+                      <label
+                        htmlFor="memory-file-input"
+                        className="w-full py-2.5 rounded-xl border border-dashed border-slate-800 hover:border-indigo-500 bg-slate-950/50 hover:bg-slate-950 text-slate-400 hover:text-slate-200 font-semibold text-xs transition-all flex items-center justify-center space-x-2 cursor-pointer"
+                      >
+                        <Upload className="w-4 h-4" />
+                        <span>Choose Document</span>
+                      </label>
+                      
+                      {memoryFileLoading && (
+                        <div className="text-center text-xs text-indigo-400 font-semibold animate-pulse py-2">
+                          Extracting and curating facts...
+                        </div>
+                      )}
+                      
+                      {curatedFacts.length > 0 && (
+                        <div className="space-y-3 pt-3 border-t border-slate-800/80">
+                          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">
+                            Extracted Facts
+                          </span>
+                          <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                            {curatedFacts.map((fact, idx) => (
+                              <div key={idx} className="flex items-start space-x-2 p-2 rounded bg-slate-900/40 border border-slate-850">
+                                <input
+                                  type="checkbox"
+                                  checked={!!selectedFacts[idx]}
+                                  onChange={() => handleToggleFactSelection(idx)}
+                                  className="mt-0.5 rounded border-slate-800 bg-slate-950 text-indigo-650 focus:ring-indigo-500/50"
+                                />
+                                <span className="text-xs text-slate-300">{fact}</span>
+                              </div>
+                            ))}
+                          </div>
+                          
+                          <button
+                            type="button"
+                            onClick={handleSaveSelectedFacts}
+                            className="w-full py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors flex items-center justify-center space-x-2 cursor-pointer shadow active:scale-95"
+                          >
+                            <Check className="w-4 h-4" />
+                            <span>Save Selected ({Object.values(selectedFacts).filter(Boolean).length})</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {/* Right: Facts list */}
@@ -2895,6 +3103,8 @@ export default function App() {
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {[
+                    { key: "default_model_provider", label: "Default Model Provider", placeholder: "e.g. ollama, openrouter, openai" },
+                    { key: "default_model", label: "Default Model Name", placeholder: "e.g. google/gemma-4-31b-it:free" },
                     { key: "openai_api_key", label: "OpenAI API Key", placeholder: "sk-proj-..." },
                     { key: "gemini_api_key", label: "Gemini API Key", placeholder: "AIzaSy..." },
                     { key: "anthropic_api_key", label: "Anthropic API Key", placeholder: "sk-ant-..." },
@@ -2906,7 +3116,7 @@ export default function App() {
                     <div key={field.key} className="space-y-1">
                       <label className="block text-xs font-semibold text-slate-400 uppercase">{field.label}</label>
                       <input
-                        type="password"
+                        type={field.key.includes("api_key") || field.key.includes("password") ? "password" : "text"}
                         value={configs[field.key] || ""}
                         onChange={(e) => setConfigs(prev => ({ ...prev, [field.key]: e.target.value }))}
                         placeholder={field.placeholder}
@@ -2921,7 +3131,7 @@ export default function App() {
                     onClick={async () => {
                       try {
                         await apiCall("/api/admin/configs", {
-                          method: "PATCH",
+                          method: "POST",
                           body: JSON.stringify({ configs })
                         });
                         triggerToast("Credentials saved successfully", "ok");

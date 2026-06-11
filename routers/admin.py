@@ -253,6 +253,7 @@ def get_admin_configs(user: UserContext = Depends(require_admin_user)):
     return result
 
 
+@router.patch("/api/admin/configs")
 @router.post("/api/admin/configs")
 def update_admin_configs(
     request: ConfigUpdateRequest, user: UserContext = Depends(require_admin_user)

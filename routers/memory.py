@@ -1259,3 +1259,44 @@ def search_memory(
             "latency_ms": search_result.metadata.latency_ms,
         },
     }
+
+
+class CurateTextRequest(BaseModel):
+    text: str
+    model_type: Optional[str] = None
+
+
+@router.post("/api/memory/curate-text")
+def api_curate_text(
+    request: CurateTextRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+):
+    """
+    Extract memory facts from arbitrary text content (e.g. from an uploaded file).
+    Uses the configured LLM or the specified model_type.
+    Returns a list of extracted candidate facts.
+    """
+    from ampai_identity import get_file_memory_curation_prompt
+    from memory_curator import _call_local_llm
+    import json
+
+    text_content = request.text.strip()
+    if not text_content:
+        return {"facts": []}
+
+    model_type = request.model_type or get_config("default_model", "ollama")
+    prompt = get_file_memory_curation_prompt(text_content, current_user.username)
+    raw_response = _call_local_llm(prompt, model_type)
+
+    facts = []
+    try:
+        cleaned = raw_response.strip()
+        start = cleaned.find("[")
+        end = cleaned.rfind("]") + 1
+        if start >= 0 and end > start:
+            facts = json.loads(cleaned[start:end])
+            facts = [f for f in facts if isinstance(f, str) and f.strip()]
+    except Exception as exc:
+        logger.debug("Failed to parse curate-text JSON from LLM: %s", exc)
+
+    return {"facts": facts}

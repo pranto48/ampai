@@ -93,6 +93,7 @@ def get_model_options(_: UserContext = Depends(require_authenticated_user)):
             "openrouter": _parse_config_list(
                 configs.get("openrouter_model_list"),
                 [
+                    "google/gemma-4-31b-it:free",
                     "meta-llama/llama-3.3-70b-instruct:free",
                     "google/gemini-2.5-flash:free",
                     "deepseek/deepseek-r1:free",
