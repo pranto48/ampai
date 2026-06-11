@@ -36,12 +36,16 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
 
-# Install runtime system dependencies (libpq, git and curl)
+# Install runtime system dependencies (libpq, git, curl, and static docker client)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     git \
     curl \
     && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-24.0.7.tgz | tar -xz -C /tmp && \
+    mv /tmp/docker/docker /usr/local/bin/docker && \
+    rm -rf /tmp/docker
 
 # Copy virtual environment from builder stage
 COPY --from=builder /opt/venv /opt/venv
