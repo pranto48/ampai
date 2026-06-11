@@ -729,7 +729,7 @@ def chat_with_agent(
         # Remove tag from displayed response
         content = _SKILL_OPPORTUNITY_RE.sub("", content).strip()
 
-    sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+    sql_history = SQLChatMessageHistory(session_id=session_id, connection=DATABASE_URL)
     message_log = message
     if attachments:
         attachment_names = [a['filename'] for a in attachments]
