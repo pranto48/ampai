@@ -316,7 +316,7 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None, genera
         key = api_key or get_config("openai_api_key") or os.getenv("OPENAI_API_KEY")
         if not key:
             raise ValueError("OpenAI API key is required")
-        return ChatOpenAI(model="gpt-3.5-turbo", api_key=key, **generation_options)
+        return ChatOpenAI(model="gpt-3.5-turbo", api_key=key, timeout=30.0, **generation_options)
     elif model_type == "gemini":
         key = api_key or get_config("gemini_api_key") or os.getenv("GOOGLE_API_KEY")
         if not key:
@@ -341,7 +341,7 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None, genera
             ["local-model", "llama-3.1-8b-instruct", "qwen2.5-7b-instruct"],
         )
         selected_model = (model_name or get_config("generic_model") or configured_models[0]).strip()
-        return ChatOpenAI(model=selected_model, api_key=key, base_url=base_url, **generation_options)
+        return ChatOpenAI(model=selected_model, api_key=key, base_url=base_url, timeout=30.0, **generation_options)
     elif model_type == "openrouter":
         key = api_key or get_config("openrouter_api_key")
         if not key:
@@ -356,14 +356,14 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None, genera
             ],
         )
         selected_model = (model_name or get_config("openrouter_model") or configured_models[0]).strip()
-        primary_llm = ChatOpenAI(model=selected_model, api_key=key, base_url="https://openrouter.ai/api/v1", **generation_options)
+        primary_llm = ChatOpenAI(model=selected_model, api_key=key, base_url="https://openrouter.ai/api/v1", timeout=30.0, **generation_options)
         
         fallback_llms = []
         for model in configured_models:
             model_clean = model.strip()
             if model_clean and model_clean != selected_model:
                 fallback_llms.append(
-                    ChatOpenAI(model=model_clean, api_key=key, base_url="https://openrouter.ai/api/v1", **generation_options)
+                    ChatOpenAI(model=model_clean, api_key=key, base_url="https://openrouter.ai/api/v1", timeout=30.0, **generation_options)
                 )
         
         if fallback_llms:
@@ -375,7 +375,7 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None, genera
         workspace = model_name or get_config("anythingllm_workspace") or "my-workspace"
         if not base_url:
             raise ValueError("AnythingLLM Base URL is required")
-        return ChatOpenAI(model=workspace, api_key=key, base_url=base_url, **generation_options)
+        return ChatOpenAI(model=workspace, api_key=key, base_url=base_url, timeout=30.0, **generation_options)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 

@@ -84,6 +84,7 @@ def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated
                 and not local_only_mode
             ):
                 effective_model_type = configured_default
+                request.model_name = None # Reset model name since we switched provider
                 logger.info(
                     "Auto-resolved model_type from 'ollama' to configured default '%s'",
                     effective_model_type,
@@ -118,6 +119,7 @@ def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated
                         for prov, key_name in provider_keys:
                             if get_config(key_name):
                                 effective_model_type = prov
+                                request.model_name = None # Reset model name since we switched provider
                                 logger.info(
                                     "Ollama unreachable; auto-resolved model_type to '%s'",
                                     prov,
@@ -511,6 +513,7 @@ async def chat_stream(request: ChatRequest, user: UserContext = Depends(require_
             and not local_only_mode
         ):
             effective_model_type = configured_default
+            request.model_name = None # Reset model name since we switched provider
         else:
             ollama_url = get_config("ollama_base_url") or os.getenv(
                 "OLLAMA_BASE_URL", "http://host.docker.internal:11434"
@@ -537,6 +540,7 @@ async def chat_stream(request: ChatRequest, user: UserContext = Depends(require_
                     for prov, key_name in provider_keys:
                         if get_config(key_name):
                             effective_model_type = prov
+                            request.model_name = None # Reset model name since we switched provider
                             resolved = True
                             break
                     if not resolved:
