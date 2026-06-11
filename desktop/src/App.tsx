@@ -173,6 +173,8 @@ export default function App() {
   const [updateVersion, setUpdateVersion] = useState<any>(null);
   const [updateStatus, setUpdateStatus] = useState<any>(null);
   const [updateLogs, setUpdateLogs] = useState<string[]>([]);
+  const [isReconnecting, setIsReconnecting] = useState<boolean>(false);
+  const [isTriggeringUpdate, setIsTriggeringUpdate] = useState<boolean>(false);
   const [personas, setPersonas] = useState<Persona[]>([]);
 
   // UI States
@@ -189,6 +191,7 @@ export default function App() {
   const [passwordStrength, setPasswordStrength] = useState<number>(0); // 0 to 5
 
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const updateLogsEndRef = useRef<HTMLDivElement>(null);
   const toastTimeoutRef = useRef<any>(null);
 
   // --- Theme Syncing ---
@@ -505,6 +508,55 @@ export default function App() {
 
     loadTabDetails();
   }, [tab, auth, memSubTab, inboxFilter]);
+
+  // --- One-Click System Updater Polling and Scrolling ---
+  useEffect(() => {
+    if (tab !== "admin" || !auth || !isAdmin()) return;
+
+    let intervalId: any = null;
+
+    const pollStatus = async () => {
+      try {
+        const statusRes = await apiCall<any>("/api/admin/update/status");
+        setUpdateStatus(statusRes);
+        setUpdateLogs(statusRes.log_lines || []);
+        setIsReconnecting(false);
+      } catch (err: any) {
+        // If we were running, a fetch failure means the uvicorn backend container went offline to rebuild/restart
+        if (updateStatus?.state === "running" || isReconnecting) {
+          setIsReconnecting(true);
+        }
+      }
+    };
+
+    if (updateStatus?.state === "running" || isReconnecting) {
+      intervalId = setInterval(pollStatus, 2000);
+    }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [tab, auth, updateStatus?.state, isReconnecting]);
+
+  useEffect(() => {
+    if (updateLogsEndRef.current) {
+      updateLogsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [updateLogs]);
+
+  const triggerSystemUpdate = async () => {
+    if (!confirm("Are you sure you want to rebuild and update the system? The server will go offline for 10-20 seconds during container recreation.")) return;
+    setIsTriggeringUpdate(true);
+    try {
+      await apiCall<any>("/api/admin/update/trigger", { method: "POST" });
+      triggerToast("Update started successfully. Monitoring progress...", "ok");
+      setUpdateStatus({ state: "running", log_lines: ["Update triggered, resetting container..."] });
+    } catch (err: any) {
+      triggerToast(err.message || "Failed to trigger update", "err");
+    } finally {
+      setIsTriggeringUpdate(false);
+    }
+  };
 
   // Scroll helper
   const handleScroll = () => {
@@ -3233,6 +3285,88 @@ export default function App() {
                   </div>
                 </div>
 
+              </div>
+
+              {/* One-Click System Update Panel */}
+              <div className="glass-panel p-5 rounded-2xl border border-slate-800 space-y-5">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <div className="flex items-center space-x-2">
+                    <RefreshCw className={`w-5 h-5 text-indigo-400 ${updateStatus?.state === "running" ? "animate-spin" : ""}`} />
+                    <h3 className="font-bold text-slate-200 text-sm">System Container Updates</h3>
+                  </div>
+                  {updateStatus && (
+                    <span className={`px-2.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider ${
+                      isReconnecting ? "bg-amber-950/40 text-amber-400 border border-amber-500/20 animate-pulse" :
+                      updateStatus.state === "running" ? "bg-indigo-950/40 text-indigo-400 border border-indigo-500/20 animate-pulse" :
+                      updateStatus.state === "success" ? "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20" :
+                      updateStatus.state === "error" ? "bg-rose-950/40 text-rose-400 border border-rose-500/20" :
+                      "bg-slate-950 text-slate-500 border border-slate-800"
+                    }`}>
+                      {isReconnecting ? "Reconnecting..." : updateStatus.state}
+                    </span>
+                  )}
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-amber-500/5 border border-amber-500/10 flex items-start space-x-3 text-xs text-amber-300/95">
+                  <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0 text-amber-500" />
+                  <div>
+                    <span className="font-bold">Important Notice:</span> Rebuilding containers pulls the latest source code from GitHub and recreates the Docker services on the host. The application will go offline for 10-20 seconds during this process, and reconnect automatically when finished.
+                  </div>
+                </div>
+
+                {isReconnecting && (
+                  <div className="p-4 rounded-xl bg-indigo-950/30 border border-indigo-500/20 flex items-center space-x-3 text-xs text-indigo-300">
+                    <WifiOff className="w-5 h-5 animate-pulse text-indigo-400" />
+                    <div className="flex-1 font-semibold">
+                      Containers recreating on host. Waiting for the FastAPI service to boot back up...
+                    </div>
+                    <div className="flex items-center space-x-1">
+                      <span className="w-2.5 h-2.5 bg-indigo-500 rounded-full animate-ping" />
+                      <span className="text-[10px] text-indigo-400">polling...</span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex justify-between items-center bg-slate-900/30 p-3 rounded-xl border border-slate-850">
+                  <div className="text-xs text-slate-400">
+                    Current branch: <span className="font-semibold text-slate-350">main</span>
+                  </div>
+                  <button
+                    disabled={isTriggeringUpdate || updateStatus?.state === "running" || isReconnecting}
+                    onClick={triggerSystemUpdate}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold transition-all active:scale-95 flex items-center space-x-1.5 cursor-pointer ${
+                      isTriggeringUpdate || updateStatus?.state === "running" || isReconnecting
+                        ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700"
+                        : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/10 hover:shadow-indigo-500/20 border border-indigo-500"
+                    }`}
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    <span>{isTriggeringUpdate ? "Starting..." : "Trigger System Rebuild & Update"}</span>
+                  </button>
+                </div>
+
+                {updateLogs.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center text-xs text-slate-400 font-semibold px-1">
+                      <span>Console Build Output Logs</span>
+                      <span className="text-[10px] text-slate-500">{updateLogs.length} lines</span>
+                    </div>
+                    <div className="h-44 overflow-y-auto bg-slate-950 p-4 rounded-xl border border-slate-850 font-mono text-[11px] text-slate-400 space-y-1.5 scrollbar-thin">
+                      {updateLogs.map((line, idx) => {
+                        let lineClass = "text-slate-400";
+                        if (line.includes("ERROR") || line.includes("failed")) lineClass = "text-rose-400 font-semibold";
+                        if (line.includes("SUCCESS") || line.includes("successful")) lineClass = "text-emerald-400 font-semibold";
+                        if (line.includes("---")) lineClass = "text-indigo-400 font-semibold mt-2 border-t border-slate-900 pt-1";
+                        return (
+                          <div key={idx} className={lineClass}>
+                            {line}
+                          </div>
+                        );
+                      })}
+                      <div ref={updateLogsEndRef} />
+                    </div>
+                  </div>
+                )}
               </div>
 
             </div>
