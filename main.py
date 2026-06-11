@@ -4393,7 +4393,7 @@ def delete_session(session_id: str, user=Depends(require_authenticated_user)):
         _enforce_session_access_or_403(session_id, user)
         delete_session_metadata(session_id)
         SQLChatMessageHistory(
-            session_id=session_id, connection_string=DATABASE_URL
+            session_id=session_id, connection=DATABASE_URL
         ).clear()
         get_redis_history(session_id).clear()
         log_audit_event(

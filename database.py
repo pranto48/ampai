@@ -537,7 +537,7 @@ def _now_iso() -> str:
 
 def get_sql_chat_history(session_id: str):
     """Compatibility helper used by older agent/main revisions."""
-    return SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+    return SQLChatMessageHistory(session_id=session_id, connection=DATABASE_URL)
 
 
 def _ensure_session_metadata_columns(conn):
@@ -626,7 +626,7 @@ def get_all_sessions(query: str = "", category: Optional[str] = None, archived: 
 def get_sql_chat_history(session_id: str) -> SQLChatMessageHistory:
     return SQLChatMessageHistory(
         session_id=session_id,
-        connection_string=DATABASE_URL,
+        connection=DATABASE_URL,
         table_name=CHAT_HISTORY_TABLE,
     )
 

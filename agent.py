@@ -1137,7 +1137,7 @@ async def chat_with_agent_stream(
         skill_opportunity = {"name": skill_name, "description": skill_desc, "session_id": session_id}
         accumulated_response = _SKILL_OPPORTUNITY_RE.sub("", accumulated_response).strip()
 
-    sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+    sql_history = SQLChatMessageHistory(session_id=session_id, connection=DATABASE_URL)
     message_log = message
     if attachments:
         attachment_names = [a['filename'] for a in attachments]

@@ -268,7 +268,7 @@ def delete_session(
 
         # Delete all chat messages from SQL store
         SQLChatMessageHistory(
-            session_id=session_id, connection_string=DATABASE_URL
+            session_id=session_id, connection=DATABASE_URL
         ).clear()
 
         # Clear Redis history

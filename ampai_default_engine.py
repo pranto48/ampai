@@ -343,7 +343,7 @@ def ampai_default_chat(
     try:
         from database import DATABASE_URL
         from langchain_community.chat_message_histories import SQLChatMessageHistory
-        sql_history = SQLChatMessageHistory(session_id=session_id, connection_string=DATABASE_URL)
+        sql_history = SQLChatMessageHistory(session_id=session_id, connection=DATABASE_URL)
         sql_history.add_user_message(message)
         sql_history.add_ai_message(response)
     except Exception:
