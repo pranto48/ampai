@@ -103,7 +103,22 @@ export const SK          = "ampai.serverUrl";
 export const AK          = "ampai.auth";
 export const SESSK       = "ampai.sessionId";
 export const ACCENT_K    = "ampai.accent";
-export const DEF_URL     = (["tauri.localhost","localhost","127.0.0.1"].includes(window.location.hostname)||window.location.protocol.startsWith("tauri"))?"http://127.0.0.1:8001":window.location.origin;
+export function getDefaultServerUrl(): string {
+  if (typeof window === "undefined") return "http://127.0.0.1:8000";
+  const { hostname, protocol, origin, port } = window.location;
+  if (protocol.startsWith("tauri")) {
+    return "http://127.0.0.1:8000";
+  }
+  if (["tauri.localhost", "localhost", "127.0.0.1"].includes(hostname)) {
+    if (port === "1420" || port === "5173" || port === "3000") {
+      return `${protocol}//${hostname}:8000`;
+    }
+    return origin;
+  }
+  return origin;
+}
+
+export const DEF_URL = getDefaultServerUrl();
 
 export const ACCENT_COLORS=[
   {name:"Indigo",value:"#6366f1"},{name:"Purple",value:"#8b5cf6"},
@@ -126,7 +141,18 @@ export const ALL_PROVIDERS=[
 ];
 
 // ── State ──────────────────────────────────────────────────────────────────
-function norm(v:string):string{const t=(v||"").trim();if(!t)return DEF_URL;const s=/^https?:\/\//i.test(t)?t:`http://${t}`;try{return new URL(s).origin;}catch{return DEF_URL;}}
+export function norm(v:string):string{
+  const t=(v||"").trim();
+  if(!t || t.includes(":8001")) return DEF_URL;
+  const s=/^https?:\/\//i.test(t)?t:`http://${t}`;
+  try{
+    const url = new URL(s);
+    if(url.port === "8001") return DEF_URL;
+    return url.origin;
+  }catch{
+    return DEF_URL;
+  }
+}
 function newSid():string{const id=(globalThis.crypto?.randomUUID?.()||`d-${Date.now()}-${Math.random().toString(16).slice(2)}`);localStorage.setItem(SESSK,id);return id;}
 function readAuth():Auth|null{const r=localStorage.getItem(AK);if(!r)return null;try{const p=JSON.parse(r)as Auth;return p?.token&&p?.username?p:null;}catch{localStorage.removeItem(AK);return null;}}
 

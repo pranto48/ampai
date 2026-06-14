@@ -51,7 +51,7 @@ import {
   Legend
 } from "recharts";
 
-import { S, Auth, Msg, Session, CoreMem, User as AdminUser, Attach, Persona, MemInbox, BrowserJob, TerminalLog, Task } from "./state";
+import { S, Auth, Msg, Session, CoreMem, User as AdminUser, Attach, Persona, MemInbox, BrowserJob, TerminalLog, Task, DEF_URL, norm } from "./state";
 
 // Constants and defaults
 const SESSK = "ampai.sessionId";
@@ -94,7 +94,7 @@ export default function App() {
     return r ? "dashboard" : "account";
   });
 
-  const [serverUrl, setServerUrl] = useState<string>(() => localStorage.getItem("ampai.serverUrl") || "http://127.0.0.1:8001");
+  const [serverUrl, setServerUrl] = useState<string>(() => norm(localStorage.getItem("ampai.serverUrl") || DEF_URL));
   const [health, setHealth] = useState({ ok: false, status: "offline", detail: "Not checked" });
   const [busy, setBusy] = useState<boolean>(false);
   const [toastMsg, setToastMsg] = useState<{ text: string; type: "ok" | "err" | "info" } | null>(null);
