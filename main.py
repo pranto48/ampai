@@ -4074,9 +4074,16 @@ def admin_rebuild_sessions_ownership(
     )
 
 
-def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
+def _parse_iso_dt(value: Any) -> Optional[datetime]:
     if not value:
         return None
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        try:
+            value = str(value)
+        except Exception:
+            return None
     raw = value.strip()
     if not raw:
         return None

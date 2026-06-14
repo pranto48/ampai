@@ -232,9 +232,16 @@ def _append_session_suggestions(session_id: str, suggestions: List[Dict]) -> Lis
 # ── Date helpers ──────────────────────────────────────────────────────────────
 
 
-def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
+def _parse_iso_dt(value: Any) -> Optional[datetime]:
     if not value:
         return None
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        try:
+            value = str(value)
+        except Exception:
+            return None
     raw = value.strip()
     if not raw:
         return None

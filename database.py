@@ -600,7 +600,7 @@ def get_all_sessions(query: str = "", category: Optional[str] = None, archived: 
             }
 
             output = []
-            q = query.lower().strip()
+            q = (query or "").lower().strip()
             for s_id in session_ids:
                 meta = meta_map.get(s_id, {
                     "category": "Uncategorized",
