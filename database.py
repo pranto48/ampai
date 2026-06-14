@@ -582,13 +582,21 @@ def get_all_sessions(query: str = "", category: Optional[str] = None, archived: 
             if not inspector.has_table(CHAT_HISTORY_TABLE):
                 return []
 
+            # Get union of session IDs from both message store and metadata table to support newly created sessions
             session_rows = conn.execute(
                 text(
                     f"SELECT DISTINCT session_id FROM {CHAT_HISTORY_TABLE} "
-                    "WHERE session_id IS NOT NULL ORDER BY session_id ASC"
+                    "WHERE session_id IS NOT NULL"
                 )
             ).fetchall()
-            session_ids = [row[0] for row in session_rows if row and row[0]]
+            msg_session_ids = [row[0] for row in session_rows if row and row[0]]
+
+            meta_session_ids = []
+            if inspector.has_table("session_metadata"):
+                meta_rows = conn.execute(select(session_metadata.c.session_id)).fetchall()
+                meta_session_ids = [row[0] for row in meta_rows if row and row[0]]
+
+            session_ids = list(set(msg_session_ids + meta_session_ids))
 
             stmt_meta = select(
                 session_metadata.c.session_id,
@@ -596,6 +604,7 @@ def get_all_sessions(query: str = "", category: Optional[str] = None, archived: 
                 session_metadata.c.pinned,
                 session_metadata.c.archived,
                 session_metadata.c.updated_at,
+                session_metadata.c.title,
             )
             meta_map = {
                 row[0]: {
@@ -603,6 +612,7 @@ def get_all_sessions(query: str = "", category: Optional[str] = None, archived: 
                     "pinned": bool(row[2]),
                     "archived": bool(row[3]),
                     "updated_at": row[4],
+                    "title": row[5] or "Untitled Conversation",
                 }
                 for row in conn.execute(stmt_meta)
             }
@@ -615,10 +625,11 @@ def get_all_sessions(query: str = "", category: Optional[str] = None, archived: 
                     "pinned": False,
                     "archived": False,
                     "updated_at": None,
+                    "title": "Untitled Conversation",
                 })
                 if archived is not None and meta["archived"] != bool(archived):
                     continue
-                if q and q not in s_id.lower() and q not in meta["category"].lower():
+                if q and q not in s_id.lower() and q not in meta["category"].lower() and q not in meta["title"].lower():
                     continue
                 if category and meta["category"] != category:
                     continue

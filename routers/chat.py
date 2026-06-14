@@ -48,7 +48,16 @@ def auto_name_session_if_needed(session_id: str, message: str):
     from database import get_session_metadata, update_session_metadata
     try:
         meta = get_session_metadata(session_id)
-        if not meta or not meta.get("title"):
+        curr_title = (meta.get("title") or "") if meta else ""
+        curr_title_lower = curr_title.strip().lower()
+        is_generic = not curr_title_lower or curr_title_lower in {
+            "new session",
+            "new chat session",
+            "untitled conversation",
+            "untitled chat",
+            "new chat"
+        }
+        if is_generic:
             title = (message or "").strip().replace("\n", " ")
             if len(title) > 45:
                 title = title[:45].strip() + "..."
