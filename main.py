@@ -2824,7 +2824,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             )
         elif memory_action == "saved" and memory_fact:
             try:
-                add_core_memory(memory_fact)
+                add_core_memory(memory_fact, user.username)
             except Exception:
                 logger.exception("chat saved-memory core write failed")
             try:
@@ -3046,7 +3046,7 @@ def update_memory_inbox(
             approved_text = row["edited_text"] or row.get("candidate_text") or ""
             if approved_text:
                 try:
-                    add_core_memory(approved_text)
+                    add_core_memory(approved_text, row.get("username") or current_user.username)
                 except Exception:
                     logger.exception("Failed to persist approved memory candidate")
         updated = row
@@ -4399,9 +4399,7 @@ def delete_session(session_id: str, user=Depends(require_authenticated_user)):
     try:
         _enforce_session_access_or_403(session_id, user)
         delete_session_metadata(session_id)
-        SQLChatMessageHistory(
-            session_id=session_id, connection=DATABASE_URL
-        ).clear()
+        get_sql_chat_history(session_id).clear()
         get_redis_history(session_id).clear()
         log_audit_event(
             username=user.username,

@@ -17,7 +17,7 @@ from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_ollama import ChatOllama
 from langchain_community.chat_message_histories import SQLChatMessageHistory
-from database import DATABASE_URL, get_config, get_core_memories, add_core_memory, redact_pii_text
+from database import DATABASE_URL, get_config, get_core_memories, add_core_memory, redact_pii_text, CHAT_HISTORY_TABLE, get_sql_chat_history
 from memory_persistence import memory_persistence_manager
 from ampai_identity import get_ampai_system_prompt
 from session_recall import search_and_summarize, index_chat_turn
@@ -729,7 +729,7 @@ def chat_with_agent(
         # Remove tag from displayed response
         content = _SKILL_OPPORTUNITY_RE.sub("", content).strip()
 
-    sql_history = SQLChatMessageHistory(session_id=session_id, connection=DATABASE_URL)
+    sql_history = get_sql_chat_history(session_id)
     message_log = message
     if attachments:
         attachment_names = [a['filename'] for a in attachments]
@@ -790,6 +790,7 @@ async def chat_with_agent_stream(
     pii_strict_mode = kwargs.get("pii_strict_mode", False)
     persona_prompt_override = kwargs.get("persona_prompt_override")
 
+    fallback_occurred = False
     try:
         core_mems = await asyncio.to_thread(get_core_memories)
     except Exception:
@@ -1065,94 +1066,99 @@ async def chat_with_agent_stream(
             yield {"type": "token", "token": chunk}
             await asyncio.sleep(0.01)
 
-        # Yield final metadata and return early to avoid post-exception fallback errors
-        final_meta = {
-            "web_search": web_search,
-            "task_suggestions": [],
-            "has_task_cues": False,
-            "retrieval": retrieval_meta,
-            "memory_action": default_res.get("memory_action"),
-            "memory_fact": default_res.get("memory_fact"),
-            "memory_category": None,
-            "skill_opportunity": None,
-            "recall_used": False,
-        }
-        yield {"type": "done", "metadata": final_meta}
-        return
+        fallback_occurred = True
 
     # Capture memory candidates using the persistence manager
-    await asyncio.to_thread(
-        memory_persistence_manager.capture_memory_candidate,
-        username=username,
-        session_id=session_id,
-        message_content=message,
-        response_content=accumulated_response,
-        require_approval=require_memory_approval
-    )
-    
-    # Score the memory candidate
-    await asyncio.to_thread(
-        memory_persistence_manager.score_memory_candidate,
-        username=username,
-        session_id=session_id,
-        message_content=message,
-        response_content=accumulated_response
-    )
-
-    explicit_memory_request = _extract_explicit_memory_request(message)
-    effective_force_save = force_save or bool(explicit_memory_request)
-    match = re.search(r'\[SAVE_MEMORY:\s*(.*?)\]', accumulated_response, re.IGNORECASE | re.DOTALL)
-    fact_to_save = ""
-    if explicit_memory_request:
-        fact_to_save = explicit_memory_request
-    elif match:
-        fact_to_save = match.group(1).strip().rstrip('].')
-
-    normalized_fact = _normalize_memory_fact(fact_to_save)
-    memory_action = ""
-    memory_category = ""
-    if normalized_fact:
-        memory_category = _infer_memory_category(normalized_fact)
-        memory_action = await asyncio.to_thread(
-            _determine_memory_action,
-            normalized_fact,
-            persist_memory,
-            require_memory_approval,
-            allowed_memory_categories,
-            force_save=effective_force_save,
+    if not fallback_occurred:
+        await asyncio.to_thread(
+            memory_persistence_manager.capture_memory_candidate,
+            username=username,
+            session_id=session_id,
+            message_content=message,
+            response_content=accumulated_response,
+            require_approval=require_memory_approval
         )
-        if memory_action == "saved":
-            await asyncio.to_thread(add_core_memory, normalized_fact)
-            try:
-                indexer = MemoryIndexer(model_type)
-                await asyncio.to_thread(indexer.add_fact, normalized_fact)
-            except Exception as e:
-                print(f"Failed to add fact to PGVector: {e}")
-        accumulated_response = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', accumulated_response, flags=re.IGNORECASE | re.DOTALL).strip()
-        if not accumulated_response and explicit_memory_request:
+        
+        # Score the memory candidate
+        await asyncio.to_thread(
+            memory_persistence_manager.score_memory_candidate,
+            username=username,
+            session_id=session_id,
+            message_content=message,
+            response_content=accumulated_response
+        )
+
+        explicit_memory_request = _extract_explicit_memory_request(message)
+        effective_force_save = force_save or bool(explicit_memory_request)
+        match = re.search(r'\[SAVE_MEMORY:\s*(.*?)\]', accumulated_response, re.IGNORECASE | re.DOTALL)
+        fact_to_save = ""
+        if explicit_memory_request:
+            fact_to_save = explicit_memory_request
+        elif match:
+            fact_to_save = match.group(1).strip().rstrip('].')
+
+        normalized_fact = _normalize_memory_fact(fact_to_save)
+        memory_action = ""
+        memory_category = ""
+        if normalized_fact:
+            memory_category = _infer_memory_category(normalized_fact)
+            memory_action = await asyncio.to_thread(
+                _determine_memory_action,
+                normalized_fact,
+                persist_memory,
+                require_memory_approval,
+                allowed_memory_categories,
+                force_save=effective_force_save,
+            )
             if memory_action == "saved":
-                accumulated_response = f"✅ Saved to memory [{memory_category}]: {normalized_fact[:200]}"
-            elif memory_action == "pending_approval":
-                accumulated_response = "📥 Captured and queued for memory approval."
-            else:
-                accumulated_response = "⚠️ Memory request understood, but saving is disabled by your current policy."
-        elif explicit_memory_request and memory_action == "saved" and accumulated_response:
-            accumulated_response = accumulated_response.rstrip() + f"\n\n✅ Memory saved [{memory_category}]"
+                await asyncio.to_thread(add_core_memory, normalized_fact, username)
+                try:
+                    indexer = MemoryIndexer(model_type)
+                    await asyncio.to_thread(indexer.add_fact, normalized_fact)
+                except Exception as e:
+                    print(f"Failed to add fact to PGVector: {e}")
+            accumulated_response = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', accumulated_response, flags=re.IGNORECASE | re.DOTALL).strip()
+            if not accumulated_response and explicit_memory_request:
+                if memory_action == "saved":
+                    accumulated_response = f"✅ Saved to memory [{memory_category}]: {normalized_fact[:200]}"
+                elif memory_action == "pending_approval":
+                    accumulated_response = "📥 Captured and queued for memory approval."
+                else:
+                    accumulated_response = "⚠️ Memory request understood, but saving is disabled by your current policy."
+            elif explicit_memory_request and memory_action == "saved" and accumulated_response:
+                accumulated_response = accumulated_response.rstrip() + f"\n\n✅ Memory saved [{memory_category}]"
 
-    task_suggestions = _parse_create_task_tags(accumulated_response)
-    accumulated_response = re.sub(r"\[CREATE_TASK:\s*.*?\]", "", accumulated_response, flags=re.IGNORECASE | re.DOTALL).strip()
-    if not task_suggestions:
-        task_suggestions = _build_fallback_suggestion(message, accumulated_response)
+        task_suggestions = _parse_create_task_tags(accumulated_response)
+        accumulated_response = re.sub(r"\[CREATE_TASK:\s*.*?\]", "", accumulated_response, flags=re.IGNORECASE | re.DOTALL).strip()
+        if not task_suggestions:
+            task_suggestions = _build_fallback_suggestion(message, accumulated_response)
 
-    # detect skill opportunity tag
-    skill_opportunity = None
-    skill_match = _parse_skill_opportunity(accumulated_response)
-    if skill_match:
-        skill_name, skill_desc = skill_match
-        skill_opportunity = {"name": skill_name, "description": skill_desc, "session_id": session_id}
-        accumulated_response = _SKILL_OPPORTUNITY_RE.sub("", accumulated_response).strip()
+        # detect skill opportunity tag
+        skill_opportunity = None
+        skill_match = _parse_skill_opportunity(accumulated_response)
+        if skill_match:
+            skill_name, skill_desc = skill_match
+            skill_opportunity = {"name": skill_name, "description": skill_desc, "session_id": session_id}
+            accumulated_response = _SKILL_OPPORTUNITY_RE.sub("", accumulated_response).strip()
+    else:
+        # Fallback post-processing logic using default_res
+        memory_action = default_res.get("memory_action") or ""
+        fact_to_save = default_res.get("memory_fact") or ""
+        normalized_fact = _normalize_memory_fact(fact_to_save)
+        memory_category = ""
+        if normalized_fact:
+            memory_category = _infer_memory_category(normalized_fact)
+            if memory_action == "saved":
+                await asyncio.to_thread(add_core_memory, normalized_fact, username)
+                try:
+                    indexer = MemoryIndexer(model_type)
+                    await asyncio.to_thread(indexer.add_fact, normalized_fact)
+                except Exception as e:
+                    print(f"Failed to add fact to PGVector: {e}")
+        task_suggestions = []
+        skill_opportunity = None
 
-    sql_history = SQLChatMessageHistory(session_id=session_id, connection=DATABASE_URL)
+    sql_history = get_sql_chat_history(session_id)
     message_log = message
     if attachments:
         attachment_names = [a['filename'] for a in attachments]

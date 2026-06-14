@@ -175,7 +175,7 @@ def update_memory_inbox(
             approved_text = row["edited_text"] or row.get("candidate_text") or ""
             if approved_text:
                 try:
-                    add_core_memory(approved_text)
+                    add_core_memory(approved_text, row.get("username") or current_user.username)
                 except Exception:
                     logger.exception("Failed to persist approved memory candidate")
         updated = row

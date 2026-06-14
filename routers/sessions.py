@@ -267,9 +267,7 @@ def delete_session(
         delete_session_metadata(session_id)
 
         # Delete all chat messages from SQL store
-        SQLChatMessageHistory(
-            session_id=session_id, connection=DATABASE_URL
-        ).clear()
+        get_sql_chat_history(session_id).clear()
 
         # Clear Redis history
         try:

@@ -298,7 +298,7 @@ def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated
             )
         elif memory_action == "saved" and memory_fact:
             try:
-                add_core_memory(memory_fact)
+                add_core_memory(memory_fact, user.username)
             except Exception:
                 logger.exception("chat saved-memory core write failed")
             try:

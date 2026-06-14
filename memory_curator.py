@@ -258,7 +258,7 @@ def accept_nudge(nudge_id: int, username: str) -> Optional[str]:
         fact = (payload.get("fact") or "").strip()
         if not fact:
             return None
-        add_core_memory(fact)
+        add_core_memory(fact, username)
         with engine.begin() as conn:
             conn.execute(
                 text("""

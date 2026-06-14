@@ -341,9 +341,8 @@ def ampai_default_chat(
 
     # Persist to SQL history
     try:
-        from database import DATABASE_URL
-        from langchain_community.chat_message_histories import SQLChatMessageHistory
-        sql_history = SQLChatMessageHistory(session_id=session_id, connection=DATABASE_URL)
+        from database import get_sql_chat_history
+        sql_history = get_sql_chat_history(session_id)
         sql_history.add_user_message(message)
         sql_history.add_ai_message(response)
     except Exception:

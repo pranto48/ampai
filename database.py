@@ -698,6 +698,30 @@ def list_chat_messages(session_id: str, dedupe: bool = True) -> List[Dict[str, s
         messages: List[Dict[str, str]] = []
         seen = set()
         for (raw_message,) in rows:
+            is_turn_meta = False
+            try:
+                payload = json.loads(raw_message) if isinstance(raw_message, str) else raw_message
+                if isinstance(payload, dict) and payload.get("type") == "turn_metadata":
+                    is_turn_meta = True
+                    user_msg = payload.get("user_message") or ""
+                    ai_msg = payload.get("assistant_response") or ""
+                    
+                    if user_msg:
+                        user_fp = ("human", user_msg)
+                        if not (dedupe and user_fp in seen):
+                            seen.add(user_fp)
+                            messages.append({"type": "human", "content": user_msg})
+                    if ai_msg:
+                        ai_fp = ("ai", ai_msg)
+                        if not (dedupe and ai_fp in seen):
+                            seen.add(ai_fp)
+                            messages.append({"type": "ai", "content": ai_msg})
+            except Exception:
+                pass
+                
+            if is_turn_meta:
+                continue
+
             parsed = _parse_chat_payload(raw_message)
             if not parsed:
                 continue
@@ -1577,11 +1601,14 @@ def get_all_configs():
         return {}
 
 
-def add_core_memory(fact: str):
+def add_core_memory(fact: str, username: str = "system"):
     if not engine: return False
     try:
         with engine.connect() as conn:
-            conn.execute(text("INSERT INTO core_memories (fact) VALUES (:f)"), {"f": fact})
+            conn.execute(
+                text("INSERT INTO core_memories (username, fact) VALUES (:u, :f)"),
+                {"u": username or "system", "f": fact}
+            )
             conn.commit()
             return True
     except Exception as e:
