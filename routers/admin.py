@@ -2209,70 +2209,12 @@ def _update_log(msg: str) -> None:
     logger.info("[UPDATE] %s", msg)
 
 
-def _get_current_git_commit() -> str:
-    try:
-        for candidate in [
-            os.path.join(
-                os.path.dirname(os.path.dirname(__file__)), "..", "..", ".git"
-            ),
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", ".git"),
-            "/app_host/.git",
-        ]:
-            if os.path.isdir(candidate):
-                git_head = os.path.join(candidate, "HEAD")
-                if os.path.exists(git_head):
-                    with open(git_head) as f:
-                        ref = f.read().strip()
-                    if ref.startswith("ref: "):
-                        ref_file = os.path.join(candidate, ref[5:])
-                        if os.path.exists(ref_file):
-                            with open(ref_file) as f:
-                                return f.read().strip()[:12]
-                    return ref[:12]
-    except Exception:
-        pass
-    return "unknown"
-
-
-def _extract_github_slug(repo_url: str) -> Optional[str]:
-    url = (repo_url or "").strip()
-    if not url:
-        return None
-    if url.startswith("git@github.com:"):
-        slug = url.split(":", 1)[1]
-    elif "github.com/" in url:
-        slug = url.split("github.com/", 1)[1]
-    else:
-        return None
-    slug = slug.strip().rstrip("/")
-    if slug.endswith(".git"):
-        slug = slug[:-4]
-    parts = [p for p in slug.split("/") if p]
-    if len(parts) < 2:
-        return None
-    return f"{parts[0]}/{parts[1]}"
-
-
-def _fetch_remote_commit() -> str:
-    import urllib.request as _ur
-
-    slug = _extract_github_slug(REPO_URL)
-    if not slug:
-        return "unknown"
-    for branch in ["main", "master"]:
-        try:
-            req = _ur.Request(
-                f"https://api.github.com/repos/{slug}/commits/{branch}",
-                headers={
-                    "Accept": "application/vnd.github.sha",
-                    "User-Agent": "ampai-updater/1.0",
-                },
-            )
-            with _ur.urlopen(req, timeout=10) as resp:
-                return resp.read().decode().strip()[:12]
-        except Exception:
-            continue
-    return "unknown"
+from core.updater import (
+    get_current_git_commit as _get_current_git_commit,
+    fetch_remote_commit as _fetch_remote_commit,
+    extract_github_slug as _extract_github_slug,
+    REPO_URL,
+)
 
 
 @router.get("/api/admin/update/version")

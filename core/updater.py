@@ -10,6 +10,77 @@ _update_lock = threading.Lock()
 STATUS_FILE = "/data/agent_data/update_status.json"
 LOG_FILE = "/data/agent_data/update.log"
 RESULT_FILE = "/data/agent_data/update_result.txt"
+REPO_URL = os.getenv("AMPAI_REPO_URL", "https://github.com/pranto48/ampai.git")
+
+def get_current_git_commit() -> str:
+    try:
+        candidates = [
+            "/app/.git",
+            "/app_host/.git",
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), ".git"),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", ".git"),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "..", ".git"),
+        ]
+        for candidate in candidates:
+            if os.path.isdir(candidate):
+                git_head = os.path.join(candidate, "HEAD")
+                if os.path.exists(git_head):
+                    with open(git_head) as f:
+                        ref = f.read().strip()
+                    if ref.startswith("ref: "):
+                        ref_file = os.path.join(candidate, ref[5:])
+                        if os.path.exists(ref_file):
+                            with open(ref_file) as f:
+                                return f.read().strip()[:12]
+                    return ref[:12]
+    except Exception:
+        pass
+    return "unknown"
+
+def extract_github_slug(repo_url: str) -> Any:
+    url = (repo_url or "").strip()
+    if not url:
+        return None
+    if url.startswith("git@github.com:"):
+        slug = url.split(":", 1)[1]
+    elif "github.com/" in url:
+        slug = url.split("github.com/", 1)[1]
+    else:
+        return None
+    slug = slug.strip().rstrip("/")
+    if slug.endswith(".git"):
+        slug = slug[:-4]
+    parts = [p for p in slug.split("/") if p]
+    if len(parts) < 2:
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
+def fetch_remote_commit() -> str:
+    import urllib.request as _ur
+    slug = extract_github_slug(REPO_URL)
+    if not slug:
+        return "unknown"
+    for branch in ["main", "master"]:
+        try:
+            req = _ur.Request(
+                f"https://api.github.com/repos/{slug}/commits/{branch}",
+                headers={
+                    "Accept": "application/vnd.github.sha",
+                    "User-Agent": "ampai-updater/1.0",
+                },
+            )
+            with _ur.urlopen(req, timeout=10) as resp:
+                return resp.read().decode().strip()[:12]
+        except Exception:
+            continue
+    return "unknown"
+
+def check_git_update_available() -> bool:
+    current = get_current_git_commit()
+    latest = fetch_remote_commit()
+    if current == "unknown" or latest == "unknown":
+        return False
+    return current != latest[:len(current)]
 
 def get_system_update_status() -> Dict[str, Any]:
     status = {

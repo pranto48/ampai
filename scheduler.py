@@ -378,6 +378,25 @@ def run_skill_improvement_pass():
         logger.warning("run_skill_improvement_pass failed: %s", exc)
 
 
+def run_auto_update_check():
+    """Daily check for updates and perform auto-update if available."""
+    logger.info("Running scheduled check for git repository updates")
+    try:
+        auto_enabled = str(get_config("auto_update_enabled", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        if not auto_enabled:
+            logger.info("Auto update is disabled in configurations.")
+            return
+
+        from core.updater import check_git_update_available, trigger_system_update
+        if check_git_update_available():
+            logger.info("Git update is available! Initiating automatic update.")
+            trigger_system_update(actor="scheduler_auto")
+        else:
+            logger.info("No git updates available. System is up to date.")
+    except Exception as e:
+        logger.exception("Error checking/running automatic system update: %s", e)
+
+
 def start_scheduler():
     if not scheduler.running:
         retention_interval_hours = max(
@@ -410,6 +429,9 @@ def start_scheduler():
             "interval",
             hours=retention_interval_hours,
             id="ampai_retention_cleanup",
+        )
+        scheduler.add_job(
+            run_auto_update_check, "cron", hour=4, minute=0, id="ampai_auto_update"
         )
         scheduler.start()
         logger.info("Background scheduler started")
