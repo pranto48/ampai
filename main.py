@@ -5773,12 +5773,46 @@ def rollback_skill(skill_id: int, user=Depends(require_admin_user)):
 def recall_search(
     request: RecallSearchRequest, user=Depends(require_authenticated_user)
 ):
-    hits = search_recall(
+    raw_hits = search_recall(
         query=request.q,
         username=user.username,
         session_id=request.session_id,
         limit=request.limit,
     )
+    
+    from database import engine
+    from sqlalchemy import text as sa_text
+    import re
+    hits = []
+    with engine.connect() as conn:
+        for hit in raw_hits:
+            h = dict(hit)
+            h["text"] = h.get("content") or ""
+            # Resolve session title
+            sid = h.get("session_id")
+            title = "Untitled Chat"
+            if sid:
+                row = conn.execute(
+                    sa_text("SELECT title FROM session_metadata WHERE session_id = :sid LIMIT 1"),
+                    {"sid": sid}
+                ).fetchone()
+                if row and row[0]:
+                    title = str(row[0])
+            h["session_title"] = title
+            
+            # Highlight matching query term
+            q_term = request.q.strip()
+            if q_term and h["text"]:
+                try:
+                    pattern = re.compile(re.escape(q_term), re.IGNORECASE)
+                    h["highlight"] = pattern.sub(lambda m: f"<strong class='text-indigo-400 font-bold'>{m.group(0)}</strong>", h["text"])
+                except Exception:
+                    h["highlight"] = h["text"]
+            else:
+                h["highlight"] = h["text"]
+                
+            hits.append(h)
+            
     summary = summarize_hits(hits, max_items=5)
     return {"hits": hits, "summary": summary}
 
@@ -8329,7 +8363,41 @@ def api_recall_search(
     user: UserContext = Depends(get_current_user_from_cookie),
 ):
     """FTS5 full-text search across past sessions with optional LLM summarization."""
-    hits = search_recall(query=req.query, username=user.username, limit=req.limit)
+    raw_hits = search_recall(query=req.query, username=user.username, limit=req.limit)
+    
+    from database import engine
+    from sqlalchemy import text as sa_text
+    import re
+    hits = []
+    with engine.connect() as conn:
+        for hit in raw_hits:
+            h = dict(hit)
+            h["text"] = h.get("content") or ""
+            # Resolve session title
+            sid = h.get("session_id")
+            title = "Untitled Chat"
+            if sid:
+                row = conn.execute(
+                    sa_text("SELECT title FROM session_metadata WHERE session_id = :sid LIMIT 1"),
+                    {"sid": sid}
+                ).fetchone()
+                if row and row[0]:
+                    title = str(row[0])
+            h["session_title"] = title
+            
+            # Highlight matching query term
+            q_term = req.query.strip()
+            if q_term and h["text"]:
+                try:
+                    pattern = re.compile(re.escape(q_term), re.IGNORECASE)
+                    h["highlight"] = pattern.sub(lambda m: f"<strong class='text-indigo-400 font-bold'>{m.group(0)}</strong>", h["text"])
+                except Exception:
+                    h["highlight"] = h["text"]
+            else:
+                h["highlight"] = h["text"]
+                
+            hits.append(h)
+
     summary = ""
     if req.use_llm and hits:
         try:
@@ -8340,6 +8408,10 @@ def api_recall_search(
             from session_recall import summarize_hits
 
             summary = summarize_hits(hits)
+    else:
+        from session_recall import summarize_hits
+
+        summary = summarize_hits(hits)
     return {"hits": hits, "summary": summary, "count": len(hits)}
 
 
