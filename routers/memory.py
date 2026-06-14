@@ -503,7 +503,7 @@ def _memory_analytics_to_csv(payload: Dict[str, Any]) -> str:
 
 @router.get("/api/core-memories")
 def api_get_core_memories_self(user: UserContext = Depends(require_authenticated_user)):
-    return {"core_memories": get_core_memories()}
+    return {"core_memories": get_core_memories(user.username)}
 
 
 @router.post("/api/core-memories")
@@ -513,7 +513,7 @@ def api_add_core_memory(
     fact = (request.get("fact") or "").strip()
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
-    success = add_core_memory(fact)
+    success = add_core_memory(fact, user.username)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save core memory")
     log_audit_event(
@@ -528,6 +528,12 @@ def api_add_core_memory(
 def api_edit_core_memory(
     mem_id: int, request: dict, user: UserContext = Depends(require_authenticated_user)
 ):
+    from database import get_core_memory_owner
+    owner = get_core_memory_owner(mem_id)
+    if not owner:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    if user.role != "admin" and owner != user.username:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this memory")
     fact = (request.get("fact") or "").strip()
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
@@ -538,6 +544,26 @@ def api_edit_core_memory(
         username=user.username, action="memory.edit.core", details=f"id={mem_id}"
     )
     return {"status": "success"}
+
+
+@router.delete("/api/core-memories/{mem_id}")
+def api_delete_core_memory_self(
+    mem_id: int, user: UserContext = Depends(require_authenticated_user)
+):
+    from database import get_core_memory_owner
+    owner = get_core_memory_owner(mem_id)
+    if not owner:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    if user.role != "admin" and owner != user.username:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this memory")
+    success = delete_core_memory(mem_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete core memory")
+    log_audit_event(
+        username=user.username, action="memory.delete.core", details=f"id={mem_id}"
+    )
+    return {"status": "success"}
+
 
 
 @router.get("/api/admin/core-memories")
@@ -569,6 +595,127 @@ def api_delete_core_memory(
     if not success:
         raise HTTPException(status_code=500, detail="Failed to delete core memory")
     return {"status": "success"}
+
+
+# ── Vector Database Explorer (Admin Only) ────────────────────────────────────
+
+
+@router.get("/api/admin/vector-memories")
+def api_admin_list_vector_memories(user: UserContext = Depends(require_admin_user)):
+    from database import vector_engine
+    from sqlalchemy import text as sa_text
+    try:
+        with vector_engine.connect() as conn:
+            query = sa_text(
+                "SELECT e.id, e.document, e.cmetadata "
+                "FROM langchain_pg_embedding e "
+                "JOIN langchain_pg_collection c ON e.collection_id = c.uuid "
+                "WHERE c.name = 'chat_memory' "
+                "ORDER BY e.id DESC"
+            )
+            rows = conn.execute(query).fetchall()
+        memories = []
+        for row in rows:
+            memories.append({
+                "id": row[0],
+                "document": row[1],
+                "cmetadata": row[2] or {}
+            })
+        return {"vector_memories": memories}
+    except Exception as exc:
+        logger.exception("api_admin_list_vector_memories failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/api/admin/vector-memories", status_code=201)
+def api_admin_create_vector_memory(request: dict, user: UserContext = Depends(require_admin_user)):
+    document = (request.get("document") or "").strip()
+    if not document:
+        raise HTTPException(status_code=400, detail="document text is required")
+    try:
+        from memory_indexer import MemoryIndexer
+        indexer = MemoryIndexer()
+        if not indexer.enabled:
+            raise HTTPException(status_code=503, detail=f"Embedding provider disabled: {indexer.disabled_reason}")
+        indexer.add_fact(document)
+        log_audit_event(
+            username=user.username,
+            action="memory.vector.create",
+            details=f"doc_len={len(document)}"
+        )
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("api_admin_create_vector_memory failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.patch("/api/admin/vector-memories/{mem_id}")
+def api_admin_update_vector_memory(mem_id: str, request: dict, user: UserContext = Depends(require_admin_user)):
+    document = (request.get("document") or "").strip()
+    if not document:
+        raise HTTPException(status_code=400, detail="document text is required")
+    try:
+        from memory_indexer import MemoryIndexer
+        indexer = MemoryIndexer()
+        if not indexer.enabled:
+            raise HTTPException(status_code=503, detail=f"Embedding provider disabled: {indexer.disabled_reason}")
+        
+        # Generate new embedding
+        embedding = indexer.embedding_model.embed_query(document)
+        emb_str = "[" + ",".join(map(str, embedding)) + "]"
+        
+        from database import vector_engine
+        from sqlalchemy import text as sa_text
+        with vector_engine.connect() as conn:
+            result = conn.execute(
+                sa_text("UPDATE langchain_pg_embedding SET document = :doc, embedding = :emb WHERE id = :id"),
+                {"doc": document, "emb": emb_str, "id": mem_id}
+            )
+            conn.commit()
+            if result.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Vector memory not found")
+                
+        log_audit_event(
+            username=user.username,
+            action="memory.vector.update",
+            details=f"id={mem_id}"
+        )
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("api_admin_update_vector_memory failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.delete("/api/admin/vector-memories/{mem_id}")
+def api_admin_delete_vector_memory(mem_id: str, user: UserContext = Depends(require_admin_user)):
+    try:
+        from database import vector_engine
+        from sqlalchemy import text as sa_text
+        with vector_engine.connect() as conn:
+            result = conn.execute(
+                sa_text("DELETE FROM langchain_pg_embedding WHERE id = :id"),
+                {"id": mem_id}
+            )
+            conn.commit()
+            if result.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Vector memory not found")
+                
+        log_audit_event(
+            username=user.username,
+            action="memory.vector.delete",
+            details=f"id={mem_id}"
+        )
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("api_admin_delete_vector_memory failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 
 # ── Agent Memories ────────────────────────────────────────────────────────────

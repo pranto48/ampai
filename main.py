@@ -2617,6 +2617,8 @@ def telegram_webhook(
 @app.post("/api/chat")
 def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
     try:
+        from routers.chat import auto_name_session_if_needed
+        auto_name_session_if_needed(request.session_id, request.message)
         logger.info(
             "CHAT REQUEST model_type=%s, model_name=%s, memory_mode=%s, user=%s",
             request.model_type,
@@ -5872,7 +5874,7 @@ def api_get_core_memories(user=Depends(require_admin_user)):
 
 @app.get("/api/core-memories")
 def api_get_core_memories_self(user=Depends(require_authenticated_user)):
-    return {"core_memories": get_core_memories()}
+    return {"core_memories": get_core_memories(user.username)}
 
 
 @app.post("/api/core-memories")
@@ -5880,7 +5882,7 @@ def api_add_core_memory(request: dict, user=Depends(require_authenticated_user))
     fact = (request.get("fact") or "").strip()
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
-    success = add_core_memory(fact)
+    success = add_core_memory(fact, user.username)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save core memory")
     log_audit_event(
@@ -5895,6 +5897,12 @@ def api_add_core_memory(request: dict, user=Depends(require_authenticated_user))
 def api_edit_core_memory(
     mem_id: int, request: dict, user=Depends(require_authenticated_user)
 ):
+    from database import get_core_memory_owner
+    owner = get_core_memory_owner(mem_id)
+    if not owner:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    if user.role != "admin" and owner != user.username:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this memory")
     fact = (request.get("fact") or "").strip()
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
@@ -5905,6 +5913,26 @@ def api_edit_core_memory(
         username=user.username, action="memory.edit.core", details=f"id={mem_id}"
     )
     return {"status": "success"}
+
+
+@app.delete("/api/core-memories/{mem_id}")
+def api_delete_core_memory_self(
+    mem_id: int, user=Depends(require_authenticated_user)
+):
+    from database import get_core_memory_owner
+    owner = get_core_memory_owner(mem_id)
+    if not owner:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    if user.role != "admin" and owner != user.username:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this memory")
+    success = delete_core_memory(mem_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete core memory")
+    log_audit_event(
+        username=user.username, action="memory.delete.core", details=f"id={mem_id}"
+    )
+    return {"status": "success"}
+
 
 
 @app.patch("/api/admin/core-memories/{mem_id}")

@@ -36,7 +36,8 @@ import {
   Archive,
   FolderOpen,
   Eye,
-  EyeOff
+  EyeOff,
+  Search
 } from "lucide-react";
 import {
   AreaChart,
@@ -133,11 +134,26 @@ export default function App() {
   // Memory Panel States
   const [memories, setMemories] = useState<CoreMem[]>([]);
   const [memoryInbox, setMemoryInbox] = useState<MemInbox[]>([]);
-  const [memSubTab, setMemSubTab] = useState<"core" | "inbox" | "analytics">("core");
+  const [memSubTab, setMemSubTab] = useState<"core" | "inbox" | "explorer" | "analytics">("core");
   const [inboxFilter, setInboxFilter] = useState<string>("pending");
   const [newFact, setNewFact] = useState<string>("");
   const [editingMemId, setEditingMemId] = useState<number | null>(null);
   const [editingFactText, setEditingFactText] = useState<string>("");
+
+  // Vector Explorer States
+  const [vectorMemories, setVectorMemories] = useState<any[]>([]);
+  const [newVectorDoc, setNewVectorDoc] = useState<string>("");
+  const [editingVectorId, setEditingVectorId] = useState<string | null>(null);
+  const [editingVectorText, setEditingVectorText] = useState<string>("");
+  const [vectorSearch, setVectorSearch] = useState<string>("");
+  const [vectorLoading, setVectorLoading] = useState<boolean>(false);
+
+  // Global Chat Search States
+  const [showSearchModal, setShowSearchModal] = useState<boolean>(false);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState<string>("");
+  const [globalSearchHits, setGlobalSearchHits] = useState<any[]>([]);
+  const [globalSearchLoading, setGlobalSearchLoading] = useState<boolean>(false);
+
 
   // Tasks Panel States
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -384,6 +400,78 @@ export default function App() {
     setPasswordStrength(score);
   }, [passwordInput]);
 
+  // --- Vector Memory Explorer Handlers ---
+  const loadVectorMemories = async () => {
+    setVectorLoading(true);
+    try {
+      const res = await apiCall<any>("/api/admin/vector-memories");
+      setVectorMemories(res.vector_memories || []);
+    } catch (err: any) {
+      triggerToast(err.message || "Failed to load vector memories", "err");
+    } finally {
+      setVectorLoading(false);
+    }
+  };
+
+  const handleAddVectorMemory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newVectorDoc.trim()) return;
+    try {
+      await apiCall("/api/admin/vector-memories", {
+        method: "POST",
+        body: JSON.stringify({ document: newVectorDoc })
+      });
+      setNewVectorDoc("");
+      triggerToast("Vector memory created successfully", "ok");
+      await loadVectorMemories();
+    } catch (err: any) {
+      triggerToast(err.message || "Failed to add vector memory", "err");
+    }
+  };
+
+  const handleUpdateVectorMemory = async (id: string) => {
+    try {
+      await apiCall(`/api/admin/vector-memories/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ document: editingVectorText })
+      });
+      setEditingVectorId(null);
+      triggerToast("Vector memory updated successfully", "ok");
+      await loadVectorMemories();
+    } catch (err: any) {
+      triggerToast(err.message || "Failed to update vector memory", "err");
+    }
+  };
+
+  const handleDeleteVectorMemory = async (id: string) => {
+    if (!confirm("Delete this vector memory? This will permanently remove it from the vector database.")) return;
+    try {
+      await apiCall(`/api/admin/vector-memories/${id}`, { method: "DELETE" });
+      triggerToast("Vector memory deleted successfully", "ok");
+      await loadVectorMemories();
+    } catch (err: any) {
+      triggerToast(err.message || "Failed to delete vector memory", "err");
+    }
+  };
+
+  // --- Global Chat Search Handler ---
+  const handleGlobalSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!globalSearchQuery.trim()) return;
+    setGlobalSearchLoading(true);
+    try {
+      const res = await apiCall<any>("/api/recall/search", {
+        method: "POST",
+        body: JSON.stringify({ q: globalSearchQuery, limit: 15, session_id: "" })
+      });
+      setGlobalSearchHits(res.hits || []);
+    } catch (err: any) {
+      triggerToast(err.message || "Global search failed", "err");
+    } finally {
+      setGlobalSearchLoading(false);
+    }
+  };
+
   // --- Fetching data depending on selected Tab ---
   useEffect(() => {
     if (!auth) return;
@@ -433,6 +521,8 @@ export default function App() {
           if (memSubTab === "inbox") {
             const inboxRes = await apiCall<any>(`/api/memory/inbox?status=${inboxFilter}`);
             setMemoryInbox(inboxRes.items || inboxRes.candidates || []);
+          } else if (memSubTab === "explorer" && isAdmin()) {
+            await loadVectorMemories();
           }
         }
 
@@ -1831,15 +1921,28 @@ export default function App() {
                   </button>
                   
                   {/* Search sessions */}
-                  <div className="relative">
-                    <input
-                      type="text"
-                      placeholder="Search chats..."
-                      value={sessionSearch}
-                      onChange={(e) => setSessionSearch(e.target.value)}
-                      className="w-full px-3.5 py-2 pl-9 rounded-xl border border-slate-800 bg-slate-900/40 text-slate-200 placeholder-slate-500 text-xs focus:ring-1 focus:ring-indigo-500/40 focus:outline-none focus:border-indigo-500 transition-all"
-                    />
-                    <History className="w-3.5 h-3.5 text-slate-500 absolute left-3.5 top-3" />
+                  <div className="flex items-center space-x-2">
+                    <div className="relative flex-1">
+                      <input
+                        type="text"
+                        placeholder="Search chats..."
+                        value={sessionSearch}
+                        onChange={(e) => setSessionSearch(e.target.value)}
+                        className="w-full px-3.5 py-2 pl-9 rounded-xl border border-slate-800 bg-slate-900/40 text-slate-200 placeholder-slate-500 text-xs focus:ring-1 focus:ring-indigo-500/40 focus:outline-none focus:border-indigo-500 transition-all"
+                      />
+                      <History className="w-3.5 h-3.5 text-slate-500 absolute left-3.5 top-3" />
+                    </div>
+                    <button
+                      onClick={() => {
+                        setShowSearchModal(true);
+                        setGlobalSearchQuery("");
+                        setGlobalSearchHits([]);
+                      }}
+                      className="p-2 rounded-xl bg-slate-900/45 hover:bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-400 hover:text-indigo-400 transition-all cursor-pointer flex-shrink-0"
+                      title="Global FTS Chat Search"
+                    >
+                      <Search className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
 
@@ -2317,17 +2420,22 @@ export default function App() {
                 
                 {/* Tabs */}
                 <div className="bg-slate-900 p-1 rounded-xl border border-slate-800 flex space-x-1">
-                  {(["core", "inbox", "analytics"] as const).map(sub => (
+                  {(isAdmin() ? ["core", "inbox", "explorer", "analytics"] as const : ["core", "inbox", "analytics"] as const).map(sub => (
                     <button
                       key={sub}
-                      onClick={() => setMemSubTab(sub)}
+                      onClick={() => {
+                        setMemSubTab(sub as any);
+                        if (sub === "explorer") {
+                          loadVectorMemories();
+                        }
+                      }}
                       className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize transition-all ${
                         memSubTab === sub 
                           ? "bg-indigo-600 text-white shadow-sm" 
                           : "text-slate-400 hover:text-slate-200"
                       }`}
                     >
-                      {sub === "core" ? "Core Facts" : sub === "inbox" ? "Inbox Pending" : "Analytics"}
+                      {sub === "core" ? "Core Facts" : sub === "inbox" ? "Inbox Pending" : sub === "explorer" ? "Vector Explorer" : "Analytics"}
                     </button>
                   ))}
                 </div>
@@ -2528,6 +2636,131 @@ export default function App() {
                     {memoryInbox.length === 0 && (
                       <div className="p-8 text-center text-xs text-slate-600">No inbox candidates found matching filter.</div>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {/* Sub-Tab: Explorer (Admin Vector Memory Explorer) */}
+              {memSubTab === "explorer" && isAdmin() && (
+                <div className="glass-panel p-5 rounded-2xl border border-slate-800 space-y-6">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800/80 pb-4">
+                    <div>
+                      <h3 className="font-bold text-slate-200 text-sm">Vector Database Explorer</h3>
+                      <p className="text-xs text-slate-500 mt-0.5">Direct raw semantic vectors inside the 'chat_memory' collection.</p>
+                    </div>
+                    
+                    <div className="flex flex-col sm:flex-row gap-3">
+                      <input
+                        type="text"
+                        value={vectorSearch}
+                        onChange={(e) => setVectorSearch(e.target.value)}
+                        placeholder="Filter by fact contents..."
+                        className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                      />
+                      <button
+                        onClick={loadVectorMemories}
+                        className="px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 text-xs font-semibold transition-colors flex items-center justify-center space-x-1"
+                      >
+                        <span>Refresh</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* Left: Add Vector Fact Form */}
+                    <div className="glass-panel p-4 rounded-xl border border-slate-800/60 bg-slate-900/10 space-y-4 h-fit">
+                      <h4 className="font-bold text-slate-200 text-xs">Create Vector Entry</h4>
+                      <form onSubmit={handleAddVectorMemory} className="space-y-3">
+                        <textarea
+                          value={newVectorDoc}
+                          onChange={(e) => setNewVectorDoc(e.target.value)}
+                          placeholder="Type vector database statement document here..."
+                          rows={4}
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                        />
+                        <button
+                          type="submit"
+                          className="w-full py-2 rounded-xl bg-indigo-650 hover:bg-indigo-600 text-white font-semibold text-xs transition-colors flex items-center justify-center space-x-2 shadow active:scale-95"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>Add Vector Record</span>
+                        </button>
+                      </form>
+                    </div>
+
+                    {/* Right: Vectors list */}
+                    <div className="lg:col-span-2 space-y-4">
+                      {vectorLoading ? (
+                        <div className="p-8 text-center text-xs text-indigo-400 font-semibold animate-pulse">
+                          Fetching vector embeddings...
+                        </div>
+                      ) : (
+                        <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
+                          {vectorMemories
+                            .filter(m => !vectorSearch || (m.document && m.document.toLowerCase().includes(vectorSearch.toLowerCase())))
+                            .map(m => (
+                              <div key={m.id} className="p-4 rounded-xl bg-slate-900/40 border border-slate-850 space-y-3 group transition-colors hover:border-slate-800">
+                                {editingVectorId === m.id ? (
+                                  <div className="space-y-2">
+                                    <textarea
+                                      value={editingVectorText}
+                                      onChange={(e) => setEditingVectorText(e.target.value)}
+                                      className="w-full bg-slate-950 border border-slate-850 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                                      rows={3}
+                                    />
+                                    <div className="flex space-x-2 justify-end">
+                                      <button
+                                        onClick={() => setEditingVectorId(null)}
+                                        className="px-3 py-1.5 text-xs rounded-xl bg-slate-850 text-slate-400 font-semibold"
+                                      >
+                                        Cancel
+                                      </button>
+                                      <button
+                                        onClick={() => handleUpdateVectorMemory(m.id)}
+                                        className="px-3 py-1.5 text-xs rounded-xl bg-indigo-600 text-white font-semibold"
+                                      >
+                                        Update Vector
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="flex justify-between items-start space-x-3">
+                                    <div className="space-y-1.5 flex-1">
+                                      <p className="text-xs text-slate-300 leading-relaxed font-mono select-all break-all">{m.document}</p>
+                                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-slate-500 font-semibold">
+                                        <span className="text-[10px] text-indigo-400">ID: {m.id}</span>
+                                        {m.collection_name && <span>Collection: <strong className="text-slate-400">{m.collection_name}</strong></span>}
+                                      </div>
+                                    </div>
+                                    <div className="flex space-x-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                                      <button
+                                        onClick={() => {
+                                          setEditingVectorId(m.id);
+                                          setEditingVectorText(m.document);
+                                        }}
+                                        className="p-1.5 hover:text-indigo-400 text-slate-500 transition-colors"
+                                        title="Edit fact text & regenerate embedding"
+                                      >
+                                        <Edit2 className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        onClick={() => handleDeleteVectorMemory(m.id)}
+                                        className="p-1.5 hover:text-rose-400 text-slate-500 transition-colors"
+                                        title="Delete from vector db"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          {vectorMemories.length === 0 && (
+                            <div className="p-8 text-center text-xs text-slate-600">No vector embeddings found.</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -2916,6 +3149,72 @@ export default function App() {
                     </div>
                     <div className="flex-1 overflow-auto bg-slate-950 rounded-xl flex items-center justify-center border border-slate-850">
                       <img src={selectedJobScreenshot.startsWith("data:") ? selectedJobScreenshot : `data:image/png;base64,${selectedJobScreenshot}`} alt="Page screenshot capture" className="max-w-full h-auto object-contain" />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Global Search Modal overlay */}
+              {showSearchModal && (
+                <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setShowSearchModal(false)}>
+                  <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-2xl max-h-[80vh] flex flex-col space-y-4 shadow-2xl relative" onClick={e => e.stopPropagation()}>
+                    <div className="flex justify-between items-center border-b border-slate-800 pb-3">
+                      <h3 className="font-bold text-slate-200 text-sm flex items-center space-x-2">
+                        <Search className="w-4 h-4 text-indigo-400" />
+                        <span>Global Chat Log Search</span>
+                      </h3>
+                      <button onClick={() => setShowSearchModal(false)} className="p-1 text-slate-400 hover:text-white hover:bg-slate-805 rounded-lg transition-colors">
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <form onSubmit={handleGlobalSearch} className="flex space-x-2">
+                      <input
+                        type="text"
+                        placeholder="Enter search keywords..."
+                        value={globalSearchQuery}
+                        onChange={(e) => setGlobalSearchQuery(e.target.value)}
+                        className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-slate-200 text-xs focus:outline-none focus:border-indigo-500"
+                        autoFocus
+                      />
+                      <button
+                        type="submit"
+                        disabled={globalSearchLoading}
+                        className="px-4 py-2 rounded-xl bg-indigo-650 hover:bg-indigo-600 text-white font-semibold text-xs transition-all flex items-center space-x-1 shadow active:scale-95 disabled:opacity-50"
+                      >
+                        {globalSearchLoading ? "Searching..." : "Search"}
+                      </button>
+                    </form>
+
+                    <div className="flex-1 overflow-y-auto pr-1 space-y-3 min-h-[200px]">
+                      {globalSearchLoading ? (
+                        <div className="p-12 text-center text-xs text-indigo-400 font-semibold animate-pulse">
+                          Searching across history...
+                        </div>
+                      ) : globalSearchHits.length > 0 ? (
+                        globalSearchHits.map((hit, idx) => (
+                          <div
+                            key={idx}
+                            onClick={() => {
+                              if (hit.session_id) {
+                                handleSelectSession(hit.session_id);
+                                setShowSearchModal(false);
+                              }
+                            }}
+                            className="p-3.5 rounded-xl bg-slate-950/45 border border-slate-850 hover:border-indigo-500/40 hover:bg-slate-950 transition-all cursor-pointer group text-left"
+                          >
+                            <div className="flex justify-between items-center text-[10px] text-slate-500 mb-1.5 font-semibold">
+                              <span className="text-indigo-400 group-hover:text-indigo-350 transition-colors">Session: {hit.session_title || "Untitled Conversation"}</span>
+                              {hit.created_at && <span>{new Date(hit.created_at).toLocaleString()}</span>}
+                            </div>
+                            <p className="text-xs text-slate-350 leading-relaxed font-sans" dangerouslySetInnerHTML={{ __html: hit.highlight || hit.text }} />
+                          </div>
+                        ))
+                      ) : globalSearchQuery ? (
+                        <div className="p-12 text-center text-xs text-slate-600">No matching keyword occurrences found.</div>
+                      ) : (
+                        <div className="p-12 text-center text-xs text-slate-500 italic">Type a keyword search term above to scan all historical chat session messages.</div>
+                      )}
                     </div>
                   </div>
                 </div>

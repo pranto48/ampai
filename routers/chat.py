@@ -44,9 +44,25 @@ logger = logging.getLogger("ampai")
 INSIGHT_QUEUE: "Queue[str]" = Queue(maxsize=1000)
 
 
+def auto_name_session_if_needed(session_id: str, message: str):
+    from database import get_session_metadata, update_session_metadata
+    try:
+        meta = get_session_metadata(session_id)
+        if not meta or not meta.get("title"):
+            title = (message or "").strip().replace("\n", " ")
+            if len(title) > 45:
+                title = title[:45].strip() + "..."
+            if title:
+                update_session_metadata(session_id, title=title)
+    except Exception as e:
+        logger.warning(f"Error in auto_name_session_if_needed: {e}")
+
+
+
 @router.post("/api/chat")
 def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated_user)):
     try:
+        auto_name_session_if_needed(request.session_id, request.message)
         logger.info(
             "CHAT REQUEST model_type=%s, model_name=%s, memory_mode=%s, user=%s",
             request.model_type,
@@ -473,6 +489,7 @@ async def chat_stream(request: ChatRequest, user: UserContext = Depends(require_
     import json
     import asyncio
 
+    auto_name_session_if_needed(request.session_id, request.message)
     logger.info(
         "CHAT STREAM REQUEST model_type=%s, model_name=%s, memory_mode=%s, user=%s",
         request.model_type,

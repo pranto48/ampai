@@ -16,7 +16,15 @@ from cryptography.fernet import Fernet, InvalidToken
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from logging_utils import get_logger
 
+import enum
+
+class UserRole(str, enum.Enum):
+    ADMIN = "admin"
+    USER = "user"
+
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ampai:ampai@db:5432/ampai")
+VECTOR_DATABASE_URL = os.getenv("VECTOR_DATABASE_URL", DATABASE_URL)
+vector_engine = create_engine(VECTOR_DATABASE_URL)
 CHAT_HISTORY_TABLE = os.getenv("CHAT_HISTORY_TABLE", "chat_message_store")
 
 engine = None
@@ -1616,17 +1624,33 @@ def add_core_memory(fact: str, username: str = "system"):
         return False
 
 
-def get_core_memories():
+def get_core_memories(username: Optional[str] = None):
     if not engine: return []
     try:
         with engine.connect() as conn:
             if not inspect(engine).has_table("core_memories"):
                 return []
             stmt = select(core_memories.c.id, core_memories.c.fact)
+            if username:
+                stmt = stmt.where(core_memories.c.username == username)
             return [{"id": row[0], "fact": row[1]} for row in conn.execute(stmt)]
     except Exception as e:
         logger.warning(f"Error getting core memories: {e}")
         return []
+
+
+def get_core_memory_owner(mem_id: int) -> Optional[str]:
+    if not engine: return None
+    try:
+        with engine.connect() as conn:
+            if not inspect(engine).has_table("core_memories"):
+                return None
+            stmt = select(core_memories.c.username).where(core_memories.c.id == mem_id)
+            row = conn.execute(stmt).first()
+            return row[0] if row else None
+    except Exception as e:
+        logger.warning(f"Error getting core memory owner {mem_id}: {e}")
+        return None
 
 
 def delete_core_memory(mem_id: int):
