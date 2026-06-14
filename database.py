@@ -624,7 +624,7 @@ def get_all_sessions(query: str = "", category: Optional[str] = None, archived: 
                     continue
                 output.append({"session_id": s_id, **meta})
 
-            output.sort(key=lambda x: (not x["pinned"], x.get("updated_at") or "", x["session_id"]), reverse=False)
+            output.sort(key=lambda x: (not x["pinned"], x.get("updated_at").isoformat() if hasattr(x.get("updated_at"), "isoformat") else str(x.get("updated_at") or ""), x["session_id"]), reverse=False)
             return output
     except Exception as e:
         logger.warning(f"Error fetching sessions: {e}")
