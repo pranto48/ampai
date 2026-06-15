@@ -130,7 +130,7 @@ services:
   frontend-ui:
     build:
       context: .
-      dockerfile: frontend/Dockerfile
+      dockerfile: frontend.Dockerfile
     container_name: ampai-frontend
     restart: unless-stopped
     depends_on:
