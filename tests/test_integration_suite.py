@@ -143,7 +143,7 @@ class TestMemorySubsystem:
         result = svc.save_explicit_memory("user1", "sess1", "I like Python")
         assert result is not None
         assert result["fact"] == "I like Python"
-        indexer.add_fact.assert_called_once_with("I like Python")
+        indexer.add_fact.assert_called_once_with("I like Python", "user1")
 
     def test_error_empty_memory_text_returns_none(self):
         """Error: empty text returns None without DB interaction."""

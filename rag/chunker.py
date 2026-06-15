@@ -29,6 +29,8 @@ def recursive_character_splitter(text: str, chunk_size: int = 1000, overlap: int
         end = min(start + chunk_size, text_len)
         chunk = text[start:end]
         chunks.append(chunk)
+        if end == text_len:
+            break
         # Move start forward by chunk_size - overlap to create overlapping windows
         start += chunk_size - overlap
     return chunks

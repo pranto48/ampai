@@ -231,7 +231,7 @@ class TestSaveExplicitMemory:
         assert result["id"] == 99
         assert result["fact"] == "My favorite color is blue"
         assert result["category"] == "general"
-        mock_indexer.add_fact.assert_called_once_with("My favorite color is blue")
+        mock_indexer.add_fact.assert_called_once_with("My favorite color is blue", "user1")
 
     def test_truncates_to_1000_chars(self, mock_indexer, mock_persistence):
         long_fact = "a" * 1500
@@ -277,7 +277,7 @@ class TestApproveCandidate:
         assert result["status"] == "approved"
         assert result["core_memory_id"] == 50
         assert result["fact"] == "important fact"
-        mock_indexer.add_fact.assert_called_once_with("important fact")
+        mock_indexer.add_fact.assert_called_once_with("important fact", "user1")
 
 
 # ---------------------------------------------------------------------------

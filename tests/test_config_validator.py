@@ -220,7 +220,7 @@ class TestValidateConfigIntegration:
         from pathlib import Path
 
         main_py = Path(__file__).resolve().parent.parent / "main.py"
-        source = main_py.read_text()
+        source = main_py.read_text(encoding="utf-8")
 
         # Find positions of validate_config() call and app = FastAPI()
         validate_pos = source.find("validate_config()")
@@ -238,7 +238,7 @@ class TestValidateConfigIntegration:
         from pathlib import Path
 
         main_py = Path(__file__).resolve().parent.parent / "main.py"
-        source = main_py.read_text()
+        source = main_py.read_text(encoding="utf-8")
 
         assert "from config_validator import validate_config" in source, (
             "main.py must import validate_config from config_validator"
