@@ -374,8 +374,21 @@ class BrowserAutomationService:
         Requirement 8.7: abort action, close tab, return timeout error
         if action exceeds 30 seconds.
         """
-        import playwright.errors
-        from playwright.async_api import Error as PlaywrightError
+        try:
+            import playwright.errors
+            from playwright.async_api import Error as PlaywrightError
+            playwright_errors = (
+                playwright.errors.TimeoutError,
+                playwright.errors.Error,
+                playwright.errors.TargetClosedError,
+                PlaywrightError,
+            )
+            is_playwright_timeout = lambda e: isinstance(e, playwright.errors.TimeoutError)
+        except ImportError:
+            class DummyPlaywrightError(Exception):
+                pass
+            playwright_errors = (DummyPlaywrightError,)
+            is_playwright_timeout = lambda e: False
 
         max_retries = 3
         backoff_factor = 2.0
@@ -396,11 +409,9 @@ class BrowserAutomationService:
                 coro = coro_func()
                 return await asyncio.wait_for(coro, timeout=self.action_timeout)
 
-            except (playwright.errors.TimeoutError,
-                    playwright.errors.Error,
-                    playwright.errors.TargetClosedError,
-                    asyncio.TimeoutError,
+            except (asyncio.TimeoutError,
                     BrowserTimeoutError,
+                    *playwright_errors,
                     Exception) as exc:
 
                 logger.warning(
@@ -424,7 +435,7 @@ class BrowserAutomationService:
                     self._page = None
 
                 # Clean up / reset the page if it timed out
-                if isinstance(exc, (asyncio.TimeoutError, BrowserTimeoutError, playwright.errors.TimeoutError)):
+                if isinstance(exc, (asyncio.TimeoutError, BrowserTimeoutError)) or is_playwright_timeout(exc):
                     try:
                         if self._page and not self._page.is_closed():
                             await self._page.close()
@@ -435,7 +446,7 @@ class BrowserAutomationService:
 
                 if attempt == max_retries:
                     # Final attempt failed
-                    if isinstance(exc, (asyncio.TimeoutError, BrowserTimeoutError, playwright.errors.TimeoutError)):
+                    if isinstance(exc, (asyncio.TimeoutError, BrowserTimeoutError)) or is_playwright_timeout(exc):
                         raise BrowserTimeoutError(
                             f"Action '{action_name}' timed out after "
                             f"{self.action_timeout} seconds."
