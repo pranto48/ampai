@@ -230,7 +230,7 @@ class TestDeleteSession:
     @patch("routers.sessions.log_audit_event")
     @patch("routers.sessions.delete_session_recall_entries", return_value=5)
     @patch("routers.sessions.get_redis_history")
-    @patch("routers.sessions.SQLChatMessageHistory")
+    @patch("routers.sessions.get_sql_chat_history")
     @patch("routers.sessions.delete_session_metadata", return_value=True)
     @patch("routers.sessions._can_access_session", return_value=True)
     def test_delete_session_success(
@@ -258,7 +258,7 @@ class TestDeleteSession:
     @patch("routers.sessions.log_audit_event")
     @patch("routers.sessions.delete_session_recall_entries", side_effect=Exception("SQLite error"))
     @patch("routers.sessions.get_redis_history")
-    @patch("routers.sessions.SQLChatMessageHistory")
+    @patch("routers.sessions.get_sql_chat_history")
     @patch("routers.sessions.delete_session_metadata", return_value=True)
     @patch("routers.sessions._can_access_session", return_value=True)
     def test_delete_continues_if_recall_fails(
@@ -333,7 +333,7 @@ class TestAdminAccess:
     @patch("routers.sessions.log_audit_event")
     @patch("routers.sessions.delete_session_recall_entries", return_value=0)
     @patch("routers.sessions.get_redis_history")
-    @patch("routers.sessions.SQLChatMessageHistory")
+    @patch("routers.sessions.get_sql_chat_history")
     @patch("routers.sessions.delete_session_metadata", return_value=True)
     def test_admin_can_delete_any_session(
         self, mock_del_meta, mock_sql_hist, mock_redis, mock_recall, mock_audit
