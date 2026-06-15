@@ -41,6 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     git \
     curl \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-24.0.7.tgz | tar -xz -C /tmp && \

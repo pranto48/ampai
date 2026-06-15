@@ -181,6 +181,11 @@ export default function App() {
   const [terminalPolicy, setTerminalPolicy] = useState<any>(null);
 
   // Admin & Settings Panel States
+  const [adminSubTab, setAdminSubTab] = useState<"console" | "backup">("console");
+  const [restoreFile, setRestoreFile] = useState<File | null>(null);
+  const [dragActive, setDragActive] = useState<boolean>(false);
+  const [showRestoreConfirm, setShowRestoreConfirm] = useState<boolean>(false);
+  const [restoreBusy, setRestoreBusy] = useState<boolean>(false);
   const [configs, setConfigs] = useState<Record<string, string>>({});
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [adminStats, setAdminStats] = useState<any>(null);
@@ -645,6 +650,82 @@ export default function App() {
       triggerToast(err.message || "Failed to trigger update", "err");
     } finally {
       setIsTriggeringUpdate(false);
+    }
+  };
+
+  const handleDownloadFullBackup = async () => {
+    setBusy(true);
+    try {
+      const response = await fetch(`${serverUrl}/api/admin/backup`, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${auth?.token}`
+        }
+      });
+      if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        throw new Error(errText || `Server returned code ${response.status}`);
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      
+      const disposition = response.headers.get("content-disposition");
+      let filename = `ampai_backup_${new Date().toISOString().slice(0,19).replace(/[:]/g,"-")}.tar.gz`;
+      if (disposition && disposition.indexOf("attachment") !== -1) {
+        const matches = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(disposition);
+        if (matches != null && matches[1]) { 
+          filename = matches[1].replace(/['"]/g, "");
+        }
+      }
+      
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      triggerToast("Physical system backup downloaded successfully!", "ok");
+    } catch (err: any) {
+      triggerToast(err.message || "Failed to download system backup", "err");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleExecuteRestore = async () => {
+    if (!restoreFile) {
+      triggerToast("Please select or drop a backup file first", "err");
+      return;
+    }
+    setRestoreBusy(true);
+    setShowRestoreConfirm(false);
+    
+    const formData = new FormData();
+    formData.append("backup_file", restoreFile);
+    
+    try {
+      const response = await fetch(`${serverUrl}/api/admin/restore`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${auth?.token}`
+        },
+        body: formData
+      });
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.detail || `Server returned code ${response.status}`);
+      }
+      
+      triggerToast("System restore completed successfully! Refreshing page...", "ok");
+      setRestoreFile(null);
+      setTimeout(() => {
+        window.location.reload();
+      }, 2000);
+    } catch (err: any) {
+      triggerToast(err.message || "System restore failed", "err");
+    } finally {
+      setRestoreBusy(false);
     }
   };
 
@@ -3516,7 +3597,32 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Grid 1: Users, Backups and Updates */}
+              <div className="flex border-b border-slate-850 space-x-2 mb-2">
+                <button
+                  onClick={() => setAdminSubTab("console")}
+                  className={`px-4 py-2 text-xs font-bold border-b-2 transition-all ${
+                    adminSubTab === "console"
+                      ? "border-indigo-500 text-indigo-455"
+                      : "border-transparent text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  📊 General Console
+                </button>
+                <button
+                  onClick={() => setAdminSubTab("backup")}
+                  className={`px-4 py-2 text-xs font-bold border-b-2 transition-all ${
+                    adminSubTab === "backup"
+                      ? "border-indigo-500 text-indigo-455"
+                      : "border-transparent text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  💾 Backup & Recovery
+                </button>
+              </div>
+
+              {adminSubTab === "console" && (
+                <>
+                  {/* Grid 1: Users, Backups and Updates */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 
                 {/* Users List & Accounts creation */}
@@ -3667,6 +3773,149 @@ export default function App() {
                   </div>
                 )}
               </div>
+              
+              </>
+              )}
+
+              {adminSubTab === "backup" && (
+                <div className="space-y-6">
+                  {/* Generate Backup Panel */}
+                  <div className="glass-panel p-5 rounded-2xl border border-slate-800 space-y-4">
+                    <h3 className="font-bold text-slate-200 text-sm">System Physical Snapshot</h3>
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      Generate a single compressed <code>.tar.gz</code> archive packaging all application state. This contains:
+                    </p>
+                    <ul className="list-disc list-inside text-xs text-slate-400 space-y-1 ml-2">
+                      <li>PostgreSQL relational database schema & row contents</li>
+                      <li>Local vector database indices (Chroma persistent data)</li>
+                      <li>All uploaded documents, training files, and images</li>
+                    </ul>
+                    <div className="pt-2">
+                      <button
+                        onClick={handleDownloadFullBackup}
+                        disabled={busy}
+                        className="px-4 py-2 rounded-xl bg-indigo-650 hover:bg-indigo-600 text-white font-bold text-xs flex items-center space-x-2 shadow cursor-pointer active:scale-95 transition-all disabled:opacity-50"
+                      >
+                        <span>📥 Generate & Download System Backup</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Restore Panel with Drag and Drop */}
+                  <div className="glass-panel p-5 rounded-2xl border border-slate-800 space-y-4">
+                    <h3 className="font-bold text-slate-200 text-sm">System Restore</h3>
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      Upload a previously downloaded <code>.tar.gz</code> backup archive to overwrite the entire system state.
+                    </p>
+                    
+                    {/* Drag-and-drop zone */}
+                    <div
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        setDragActive(true);
+                      }}
+                      onDragLeave={() => setDragActive(false)}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setDragActive(false);
+                        if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                          setRestoreFile(e.dataTransfer.files[0]);
+                        }
+                      }}
+                      onClick={() => document.getElementById("restore-file-input")?.click()}
+                      className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all ${
+                        dragActive 
+                          ? "border-indigo-500 bg-indigo-950/20" 
+                          : restoreFile 
+                            ? "border-emerald-500 bg-emerald-950/5" 
+                            : "border-slate-800 hover:border-indigo-500/50 bg-slate-950/40"
+                      }`}
+                    >
+                      <input
+                        type="file"
+                        id="restore-file-input"
+                        className="hidden"
+                        accept=".tar.gz"
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files[0]) {
+                            setRestoreFile(e.target.files[0]);
+                          }
+                        }}
+                      />
+                      <div className="flex flex-col items-center space-y-2">
+                        <Upload className={`w-8 h-8 ${restoreFile ? "text-emerald-400" : "text-indigo-400"}`} />
+                        {restoreFile ? (
+                          <div className="space-y-1">
+                            <span className="text-xs text-slate-200 font-bold block">{restoreFile.name}</span>
+                            <span className="text-[10px] text-slate-500">Size: {Math.round(restoreFile.size / 1024)} KB</span>
+                          </div>
+                        ) : (
+                          <div>
+                            <span className="text-xs text-slate-300 font-medium block">Drag and drop your <code>.tar.gz</code> backup file here</span>
+                            <span className="text-[10px] text-slate-500">or click to browse local files</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {restoreFile && (
+                      <div className="flex space-x-2 pt-2">
+                        <button
+                          onClick={() => setShowRestoreConfirm(true)}
+                          disabled={restoreBusy}
+                          className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow active:scale-95 transition-all cursor-pointer disabled:opacity-50"
+                        >
+                          {restoreBusy ? "Restoring..." : "🔥 Start Full Restore"}
+                        </button>
+                        <button
+                          onClick={() => setRestoreFile(null)}
+                          disabled={restoreBusy}
+                          className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-350 text-xs font-semibold border border-slate-800 active:scale-95 transition-all cursor-pointer"
+                        >
+                          Clear File
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Strict Restore Confirmation Modal Overlay */}
+              {showRestoreConfirm && (
+                <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setShowRestoreConfirm(false)}>
+                  <div className="bg-slate-900 border border-rose-500/30 rounded-3xl p-6 w-full max-w-md flex flex-col space-y-4 shadow-2xl relative" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center space-x-3 border-b border-slate-800 pb-3">
+                      <ShieldAlert className="w-6 h-6 text-rose-500" />
+                      <h3 className="font-extrabold text-slate-200 text-sm">Critical Warning: System Restore</h3>
+                    </div>
+                    
+                    <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl">
+                      <p className="text-xs text-rose-350 font-bold leading-relaxed">
+                        Warning: This will overwrite all current users, chats, memories, and configurations.
+                      </p>
+                    </div>
+
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      This operation is destructive and cannot be undone. Make sure you have downloaded a backup of the current state if you want to keep any current data.
+                    </p>
+
+                    <div className="flex justify-end space-x-2 pt-2">
+                      <button
+                        onClick={() => setShowRestoreConfirm(false)}
+                        className="px-3.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800 text-xs font-semibold cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleExecuteRestore}
+                        className="px-4 py-2 rounded-xl bg-rose-650 hover:bg-rose-600 text-white font-bold text-xs shadow active:scale-95 transition-all cursor-pointer"
+                      >
+                        Confirm and Overwrite
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
 
             </div>
           )}

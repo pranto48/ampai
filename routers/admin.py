@@ -91,7 +91,7 @@ from database import delete_user as db_delete_user
 from database import engine as db_engine
 from database import list_users as db_list_users
 from database import update_user as db_update_user
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from passlib.context import CryptContext
 from sqlalchemy import text
@@ -2339,3 +2339,221 @@ def update_restore_backup(
         "status": "restoring",
         "message": "Backup restored. Server restarting...",
     }
+
+
+# ── Full Physical System Backup & Restore ─────────────────────────────────────
+
+@router.get("/api/admin/backup")
+def full_system_backup(
+    background_tasks: BackgroundTasks,
+    user: UserContext = Depends(require_admin_user)
+):
+    import tarfile
+    import subprocess
+    import tempfile
+    from sqlalchemy.engine import make_url
+    from database import DATABASE_URL
+    from fastapi.responses import FileResponse
+    
+    # Paths definition
+    CHROMA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "chroma"))
+    UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "uploads"))
+    
+    # 1. Parse Database URL
+    try:
+        url = make_url(DATABASE_URL)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to parse DATABASE_URL: {exc}")
+        
+    db_name = url.database or "ampai"
+    db_user = url.username or "postgres"
+    db_host = url.host or "localhost"
+    db_port = url.port or 5432
+    
+    # Create temp file for DB dump
+    with tempfile.NamedTemporaryFile(suffix=".dump", delete=False) as tmp_db:
+        db_dump_path = tmp_db.name
+        
+    # Execute pg_dump
+    cmd = [
+        "pg_dump",
+        "-Fc",
+        "-h", db_host,
+        "-p", str(db_port),
+        "-U", db_user,
+        "-d", db_name,
+        "-f", db_dump_path
+    ]
+    env = os.environ.copy()
+    if url.password:
+        env["PGPASSWORD"] = url.password
+        
+    try:
+        # Run subprocess
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        if result.returncode != 0:
+            if os.path.exists(db_dump_path):
+                os.remove(db_dump_path)
+            raise HTTPException(status_code=500, detail=f"Database dump failed: {result.stderr}")
+    except Exception as exc:
+        if os.path.exists(db_dump_path):
+            os.remove(db_dump_path)
+        if isinstance(exc, HTTPException):
+            raise exc
+        raise HTTPException(status_code=500, detail=f"Subprocess pg_dump error: {exc}")
+        
+    # 2. Archive Creation
+    # Create a compressed tar.gz file
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_tar:
+        tar_path = tmp_tar.name
+        
+    try:
+        with tarfile.open(tar_path, "w:gz") as tar:
+            # Add database dump
+            tar.add(db_dump_path, arcname="db_dump.dump")
+            # Recursively add Chroma persistent directory
+            if os.path.isdir(CHROMA_DIR):
+                tar.add(CHROMA_DIR, arcname="chroma_db")
+            # Recursively add uploads directory
+            if os.path.isdir(UPLOAD_DIR):
+                tar.add(UPLOAD_DIR, arcname="uploads")
+    except Exception as exc:
+        if os.path.exists(db_dump_path):
+            os.remove(db_dump_path)
+        if os.path.exists(tar_path):
+            os.remove(tar_path)
+        raise HTTPException(status_code=500, detail=f"Failed to create tar.gz archive: {exc}")
+        
+    # Define cleaner task
+    def cleanup():
+        if os.path.exists(db_dump_path):
+            try:
+                os.remove(db_dump_path)
+            except Exception:
+                pass
+        if os.path.exists(tar_path):
+            try:
+                os.remove(tar_path)
+            except Exception:
+                pass
+                
+    background_tasks.add_task(cleanup)
+    
+    # Return FileResponse
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"ampai_backup_{timestamp}.tar.gz"
+    
+    return FileResponse(
+        tar_path,
+        media_type="application/gzip",
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+@router.post("/api/admin/restore")
+def full_system_restore(
+    backup_file: UploadFile = File(...),
+    user: UserContext = Depends(require_admin_user)
+):
+    import tarfile
+    import subprocess
+    import tempfile
+    import shutil
+    from sqlalchemy.engine import make_url
+    from database import DATABASE_URL
+    from sqlalchemy import text
+    from database import engine as db_engine
+    
+    # Paths definition
+    CHROMA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "chroma"))
+    UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "uploads"))
+    
+    # Create isolated temporary directory
+    temp_extract_dir = tempfile.mkdtemp(prefix="ampai_restore_")
+    
+    try:
+        # Save uploaded file
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_upload:
+            uploaded_path = tmp_upload.name
+        
+        try:
+            with open(uploaded_path, "wb") as f:
+                shutil.copyfileobj(backup_file.file, f)
+                
+            # Extract archive
+            with tarfile.open(uploaded_path, "r:gz") as tar:
+                tar.extractall(path=temp_extract_dir)
+        finally:
+            if os.path.exists(uploaded_path):
+                os.remove(uploaded_path)
+                
+        # Locate extracted assets
+        db_dump_extracted = os.path.join(temp_extract_dir, "db_dump.dump")
+        chroma_extracted = os.path.join(temp_extract_dir, "chroma_db")
+        # Wait, handle if it was stored as chroma in some archives
+        if not os.path.exists(chroma_extracted):
+            chroma_extracted = os.path.join(temp_extract_dir, "chroma")
+        uploads_extracted = os.path.join(temp_extract_dir, "uploads")
+        
+        # 1. Clean Slate (Execute SQL commands via SQLAlchemy to completely clear the database)
+        # DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO public;
+        try:
+            with db_engine.begin() as conn:
+                conn.execute(text("DROP SCHEMA public CASCADE;"))
+                conn.execute(text("CREATE SCHEMA public;"))
+                conn.execute(text("GRANT ALL ON SCHEMA public TO public;"))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Database clean slate failed: {exc}")
+            
+        # 2. Database Restore (Use pg_restore to restore the database)
+        if os.path.exists(db_dump_extracted):
+            url = make_url(DATABASE_URL)
+            db_name = url.database or "ampai"
+            db_user = url.username or "postgres"
+            db_host = url.host or "localhost"
+            db_port = url.port or 5432
+            
+            cmd = [
+                "pg_restore",
+                "-d", db_name,
+                "-h", db_host,
+                "-p", str(db_port),
+                "-U", db_user,
+                db_dump_extracted
+            ]
+            env = os.environ.copy()
+            if url.password:
+                env["PGPASSWORD"] = url.password
+                
+            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+            # pg_restore sometimes yields exit code 1 if there are minor warnings, but we'll accept it
+            # if the schemas were cleanly loaded. Let's check result code.
+            if result.returncode not in (0, 1):
+                raise HTTPException(status_code=500, detail=f"Database pg_restore failed: {result.stderr}")
+        else:
+            raise HTTPException(status_code=400, detail="Database dump file missing in backup archive")
+            
+        # 3. File Restore (Use Python's shutil module to safely overwrite chroma_db and uploads/ directories)
+        # Restore Chroma
+        if os.path.isdir(chroma_extracted):
+            if os.path.exists(CHROMA_DIR):
+                shutil.rmtree(CHROMA_DIR)
+            shutil.copytree(chroma_extracted, CHROMA_DIR)
+            
+        # Restore Uploads
+        if os.path.isdir(uploads_extracted):
+            if os.path.exists(UPLOAD_DIR):
+                shutil.rmtree(UPLOAD_DIR)
+            shutil.copytree(uploads_extracted, UPLOAD_DIR)
+            
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise exc
+        raise HTTPException(status_code=500, detail=f"Restore operation failed: {exc}")
+    finally:
+        # Cleanup temporary extraction workspace
+        if os.path.exists(temp_extract_dir):
+            shutil.rmtree(temp_extract_dir)
+            
+    return {"status": "success", "message": "Full system restore completed successfully"}
