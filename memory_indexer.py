@@ -9,7 +9,7 @@ from langchain_core.documents import Document
 from langchain_postgres import PGVector
 from sqlalchemy import text
 
-from database import DATABASE_URL, engine, get_config
+from database import DATABASE_URL, engine, vector_engine, get_config
 from memory_persistence import memory_persistence_manager
 
 
@@ -136,6 +136,18 @@ class MemoryIndexer:
                 use_jsonb=True,
             )
             self.enabled = True
+
+            # Safety net: Ensure HNSW index is applied to the vector database table
+            if vector_engine and vector_engine.dialect.name == "postgresql":
+                from sqlalchemy import inspect
+                inspector = inspect(vector_engine)
+                if inspector.has_table("langchain_pg_embedding"):
+                    with vector_engine.begin() as conn:
+                        conn.execute(text(
+                            "CREATE INDEX IF NOT EXISTS langchain_pg_embedding_hnsw_idx "
+                            "ON langchain_pg_embedding USING hnsw (embedding vector_cosine_ops) "
+                            "WITH (m = 16, ef_construction = 64);"
+                        ))
         except EmbeddingUnavailableError as e:
             # Requirement 6.8: No embedding provider available, disable vector retrieval
             self.disabled_reason = str(e)
@@ -182,16 +194,19 @@ class MemoryIndexer:
         cfg_val = (get_config("memory_hybrid_retrieval_enabled", "false") or "false").strip().lower()
         return cfg_val in {"1", "true", "yes", "on"}
 
-    def add_fact(self, fact: str):
+    def add_fact(self, fact: str, username: Optional[str] = None):
         if not self.enabled:
             return
         try:
+            metadata = {
+                "type": "distilled_fact",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if username:
+                metadata["username"] = username
             doc = Document(
                 page_content=fact,
-                metadata={
-                    "type": "distilled_fact",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                },
+                metadata=metadata,
             )
             self.vectorstore.add_documents([doc])
         except Exception as e:

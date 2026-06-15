@@ -1620,8 +1620,98 @@ def get_all_configs():
         return {}
 
 
+def _call_llm_for_merge(prompt: str) -> str:
+    try:
+        from agent import get_llm
+        llm = get_llm("ollama")
+        resp = llm.invoke(prompt)
+        return resp.content if hasattr(resp, "content") else str(resp)
+    except Exception as exc:
+        logger.warning(f"LLM call failed in merge: {exc}")
+        return ""
+
+
+def merge_memories_with_llm(old_fact: str, new_fact: str) -> str:
+    prompt = f"""You are an advanced memory consolidation system.
+Your task is to merge two similar memory facts about a user into a single, cohesive, and concise memory fact.
+Ensure you preserve all unique and important details from both facts without repeating information. Do not add any introductory or meta text, just output the merged memory fact text directly.
+
+Fact 1 (Existing): {old_fact}
+Fact 2 (New): {new_fact}
+
+Merged Fact:"""
+    merged = _call_llm_for_merge(prompt).strip()
+    if merged:
+        merged = merged.strip('"\'')
+        return merged
+    return old_fact + " | " + new_fact
+
+
 def add_core_memory(fact: str, username: str = "system"):
     if not engine: return False
+    
+    # Check if similarity search can be performed to deduplicate/merge
+    try:
+        from memory_indexer import MemoryIndexer
+        indexer = MemoryIndexer()
+        if indexer.enabled:
+            existing_mems = get_core_memories(username)
+            if existing_mems:
+                new_emb = indexer.embedding_model.embed_query(fact)
+                
+                best_similarity = -1.0
+                best_mem = None
+                
+                for mem in existing_mems:
+                    mem_text = mem["fact"]
+                    if fact.strip().lower() == mem_text.strip().lower():
+                        # Perfect duplicate: skip writing
+                        return True
+                        
+                    row_key = indexer._cache_key("row", f"dedupe::{mem_text}")
+                    emb = indexer._get_cached_embedding(row_key)
+                    if emb is None:
+                        emb = indexer.embedding_model.embed_query(mem_text)
+                        indexer._set_cached_embedding(row_key, emb)
+                    
+                    sim = indexer._cosine_similarity(new_emb, emb)
+                    if sim > best_similarity:
+                        best_similarity = sim
+                        best_mem = mem
+                
+                if best_similarity > 0.85 and best_mem:
+                    old_fact = best_mem["fact"]
+                    mem_id = best_mem["id"]
+                    
+                    # Merge using LLM
+                    merged_fact = merge_memories_with_llm(old_fact, fact)
+                    
+                    if merged_fact and merged_fact.strip():
+                        # Update relational database
+                        with engine.connect() as conn:
+                            conn.execute(
+                                text("UPDATE core_memories SET fact = :f, created_at = NOW() WHERE id = :id"),
+                                {"f": merged_fact.strip(), "id": mem_id}
+                            )
+                            conn.commit()
+                        
+                        # Update vector database: delete old embedding
+                        if vector_engine:
+                            with vector_engine.begin() as conn:
+                                conn.execute(
+                                    text("""
+                                        DELETE FROM langchain_pg_embedding
+                                        WHERE document = :old_fact AND collection_id = (
+                                            SELECT uuid FROM langchain_pg_collection WHERE name = 'chat_memory' LIMIT 1
+                                        )
+                                    """),
+                                    {"old_fact": old_fact}
+                                )
+                        indexer.add_fact(merged_fact.strip(), username)
+                        return True
+    except Exception as e:
+        logger.warning(f"Error in memory deduplication check: {e}")
+
     try:
         with engine.connect() as conn:
             conn.execute(

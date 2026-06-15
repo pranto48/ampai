@@ -327,7 +327,7 @@ def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated
             except Exception:
                 logger.exception("chat saved-memory core write failed")
             try:
-                MemoryIndexer(request.model_type).add_fact(memory_fact)
+                MemoryIndexer(request.model_type).add_fact(memory_fact, user.username)
             except Exception:
                 logger.exception("chat saved-memory index write failed")
 

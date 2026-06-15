@@ -215,7 +215,7 @@ class MemoryService:
 
             # Also add to vector index for retrieval
             if self.indexer and self.indexer.enabled:
-                self.indexer.add_fact(fact)
+                self.indexer.add_fact(fact, username)
 
             if row:
                 return {
@@ -302,7 +302,7 @@ class MemoryService:
 
             # Add to vector index
             if self.indexer and self.indexer.enabled:
-                self.indexer.add_fact(fact)
+                self.indexer.add_fact(fact, username)
 
             return {
                 "candidate_id": candidate_id,

@@ -368,33 +368,84 @@ class BrowserAutomationService:
             logger.error("Failed to launch browser: %s", exc)
             raise
 
-    async def _execute_with_timeout(self, coro, action_name: str):
-        """Execute a coroutine with the configured action timeout.
+    async def _execute_with_timeout(self, coro_func, action_name: str):
+        """Execute a coroutine function with the configured action timeout and retries.
 
         Requirement 8.7: abort action, close tab, return timeout error
         if action exceeds 30 seconds.
         """
-        try:
-            return await asyncio.wait_for(coro, timeout=self.action_timeout)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Browser action '%s' timed out after %ds",
-                action_name,
-                self.action_timeout,
-            )
-            # Close the affected tab on timeout
+        import playwright.errors
+        from playwright.async_api import Error as PlaywrightError
+
+        max_retries = 3
+        backoff_factor = 2.0
+        initial_delay = 1.0  # seconds
+
+        for attempt in range(1, max_retries + 1):
             try:
-                if self._page and not self._page.is_closed():
-                    await self._page.close()
-                    # Open a fresh page for subsequent actions
+                # Ensure the browser/page is open and healthy on each attempt
+                await self._ensure_browser()
+                if self._page is None or self._page.is_closed():
                     if self._context:
                         self._page = await self._context.new_page()
-            except Exception:
-                pass
-            raise BrowserTimeoutError(
-                f"Action '{action_name}' timed out after "
-                f"{self.action_timeout} seconds."
-            )
+                    else:
+                        self._browser = None
+                        await self._ensure_browser()
+
+                # Call the function to get a fresh coroutine
+                coro = coro_func()
+                return await asyncio.wait_for(coro, timeout=self.action_timeout)
+
+            except (playwright.errors.TimeoutError,
+                    playwright.errors.Error,
+                    playwright.errors.TargetClosedError,
+                    asyncio.TimeoutError,
+                    BrowserTimeoutError,
+                    Exception) as exc:
+
+                logger.warning(
+                    "Browser action '%s' failed on attempt %d/%d: %s",
+                    action_name,
+                    attempt,
+                    max_retries,
+                    exc,
+                )
+
+                # Reset browser client if connection/context was closed/crashed
+                if "closed" in str(exc).lower() or "connection" in str(exc).lower() or "shutdown" in str(exc).lower():
+                    logger.warning("Premature shutdown or connection loss detected. Resetting browser client.")
+                    try:
+                        if self._browser:
+                            await self._browser.close()
+                    except Exception:
+                        pass
+                    self._browser = None
+                    self._context = None
+                    self._page = None
+
+                # Clean up / reset the page if it timed out
+                if isinstance(exc, (asyncio.TimeoutError, BrowserTimeoutError, playwright.errors.TimeoutError)):
+                    try:
+                        if self._page and not self._page.is_closed():
+                            await self._page.close()
+                            if self._context:
+                                self._page = await self._context.new_page()
+                    except Exception:
+                        pass
+
+                if attempt == max_retries:
+                    # Final attempt failed
+                    if isinstance(exc, (asyncio.TimeoutError, BrowserTimeoutError, playwright.errors.TimeoutError)):
+                        raise BrowserTimeoutError(
+                            f"Action '{action_name}' timed out after "
+                            f"{self.action_timeout} seconds."
+                        )
+                    raise exc
+
+                # Backoff sleep
+                delay = initial_delay * (backoff_factor ** (attempt - 1))
+                logger.info(f"Retrying browser action '{action_name}' in {delay:.1f} seconds...")
+                await asyncio.sleep(delay)
 
     # ------------------------------------------------------------------
     # Browser actions
@@ -485,7 +536,7 @@ class BrowserAutomationService:
                 return self._page.url
 
             final_url = await self._execute_with_timeout(
-                _do_navigate(), "navigate"
+                _do_navigate, "navigate"
             )
             duration_ms = int((time.time() - start) * 1000)
 
@@ -557,7 +608,7 @@ class BrowserAutomationService:
             async def _do_click():
                 await self._page.click(selector)
 
-            await self._execute_with_timeout(_do_click(), "click")
+            await self._execute_with_timeout(_do_click, "click")
             duration_ms = int((time.time() - start) * 1000)
 
             self._log_action(
@@ -651,7 +702,7 @@ class BrowserAutomationService:
             async def _do_type():
                 await self._page.fill(selector, text)
 
-            await self._execute_with_timeout(_do_type(), "type")
+            await self._execute_with_timeout(_do_type, "type")
             duration_ms = int((time.time() - start) * 1000)
 
             # Don't log the actual text for security
@@ -733,7 +784,7 @@ class BrowserAutomationService:
                 else:
                     raise ValueError(f"Element not found: {selector}")
 
-            await self._execute_with_timeout(_do_submit(), "submit")
+            await self._execute_with_timeout(_do_submit, "submit")
             duration_ms = int((time.time() - start) * 1000)
 
             self._log_action(
@@ -811,7 +862,7 @@ class BrowserAutomationService:
                 else:
                     return await self._page.inner_text("body")
 
-            content = await self._execute_with_timeout(_do_extract(), "extract")
+            content = await self._execute_with_timeout(_do_extract, "extract")
             duration_ms = int((time.time() - start) * 1000)
 
             # Truncate content to reasonable size
@@ -885,7 +936,7 @@ class BrowserAutomationService:
                 return await self._page.screenshot(full_page=full_page)
 
             screenshot_bytes = await self._execute_with_timeout(
-                _do_screenshot(), "screenshot"
+                _do_screenshot, "screenshot"
             )
             duration_ms = int((time.time() - start) * 1000)
 
@@ -968,7 +1019,7 @@ class BrowserAutomationService:
                 return text
 
             page_text = await self._execute_with_timeout(
-                _do_summarize(), "summarize"
+                _do_summarize, "summarize"
             )
             duration_ms = int((time.time() - start) * 1000)
 
@@ -1127,55 +1178,63 @@ class BrowserAutomationService:
         """
         action = action.lower().strip()
 
-        if action == "open":
-            return await self.open_browser(username, session_id)
-        elif action == "navigate":
-            if not url:
-                return BrowserActionResult(
-                    action="navigate",
-                    status=BrowserActionStatus.FAILED,
-                    message="URL is required for navigate action.",
+        try:
+            if action == "open":
+                return await self.open_browser(username, session_id)
+            elif action == "navigate":
+                if not url:
+                    return BrowserActionResult(
+                        action="navigate",
+                        status=BrowserActionStatus.FAILED,
+                        message="URL is required for navigate action.",
+                    )
+                return await self.navigate(url, username, session_id)
+            elif action == "click":
+                if not selector:
+                    return BrowserActionResult(
+                        action="click",
+                        status=BrowserActionStatus.FAILED,
+                        message="Selector is required for click action.",
+                    )
+                return await self.click(selector, username, session_id)
+            elif action == "type":
+                if not selector or value is None:
+                    return BrowserActionResult(
+                        action="type",
+                        status=BrowserActionStatus.FAILED,
+                        message="Selector and value are required for type action.",
+                    )
+                return await self.type_text(
+                    selector, value, username, session_id, credentials_provided
                 )
-            return await self.navigate(url, username, session_id)
-        elif action == "click":
-            if not selector:
+            elif action == "submit":
+                if not selector:
+                    return BrowserActionResult(
+                        action="submit",
+                        status=BrowserActionStatus.FAILED,
+                        message="Selector is required for submit action.",
+                    )
+                return await self.submit_form(selector, username, session_id)
+            elif action == "extract":
+                return await self.extract(username, session_id, selector)
+            elif action == "screenshot":
+                return await self.screenshot(username, session_id, full_page)
+            elif action == "summarize":
+                return await self.summarize(username, session_id)
+            elif action == "close":
+                return await self.close(username, session_id)
+            else:
                 return BrowserActionResult(
-                    action="click",
+                    action=action,
                     status=BrowserActionStatus.FAILED,
-                    message="Selector is required for click action.",
+                    message=f"Unknown action: {action}. "
+                    f"Supported: open, navigate, click, type, submit, "
+                    f"extract, screenshot, summarize, close.",
                 )
-            return await self.click(selector, username, session_id)
-        elif action == "type":
-            if not selector or value is None:
-                return BrowserActionResult(
-                    action="type",
-                    status=BrowserActionStatus.FAILED,
-                    message="Selector and value are required for type action.",
-                )
-            return await self.type_text(
-                selector, value, username, session_id, credentials_provided
-            )
-        elif action == "submit":
-            if not selector:
-                return BrowserActionResult(
-                    action="submit",
-                    status=BrowserActionStatus.FAILED,
-                    message="Selector is required for submit action.",
-                )
-            return await self.submit_form(selector, username, session_id)
-        elif action == "extract":
-            return await self.extract(username, session_id, selector)
-        elif action == "screenshot":
-            return await self.screenshot(username, session_id, full_page)
-        elif action == "summarize":
-            return await self.summarize(username, session_id)
-        elif action == "close":
-            return await self.close(username, session_id)
-        else:
+        except Exception as exc:
+            logger.exception("Browser action %s encountered an error", action)
             return BrowserActionResult(
                 action=action,
                 status=BrowserActionStatus.FAILED,
-                message=f"Unknown action: {action}. "
-                f"Supported: open, navigate, click, type, submit, "
-                f"extract, screenshot, summarize, close.",
+                message=f"Browser execution failed: {str(exc)}",
             )

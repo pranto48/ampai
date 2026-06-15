@@ -21,7 +21,8 @@ from rag import embedding_helpers
 from rag.vector_store import _CHROMA_PERSIST_DIR, get_collection
 
 
-def test_rag_end_to_end(tmp_path: "pathlib.Path"):
+@pytest.mark.asyncio
+async def test_rag_end_to_end(tmp_path: "pathlib.Path"):
     # Override the Chroma persistence directory to a temporary location
     # The vector_store module reads the constant at import time, so we monkey‑patch it.
     # Note: we need to re‑initialise the client after changing the directory.
@@ -37,11 +38,11 @@ def test_rag_end_to_end(tmp_path: "pathlib.Path"):
     ]
     source_name = "sample_doc.txt"
 
-    # Store embeddings
-    embedding_helpers.store_embeddings(docs, source_file=source_name)
+    # Store embeddings asynchronously
+    await embedding_helpers.store_embeddings(docs, source_file=source_name)
 
     # Perform a search that should match the first document (keyword "web development")
-    results = embedding_helpers.search_embeddings("web development", top_k=3)
+    results = await embedding_helpers.search_embeddings("web development", top_k=3)
 
     # Verify that we get at least one result and that metadata includes our source file
     assert results, "No results returned from similarity search"
@@ -56,4 +57,3 @@ def test_rag_end_to_end(tmp_path: "pathlib.Path"):
     # Clean up the collection to avoid interference with other tests
     collection = get_collection()
     collection.delete(ids=list(ids))
-

@@ -206,6 +206,22 @@ validate_config()
 from migration_runner import MigrationRunner, MigrationTimeoutError, MigrationConnectionError
 
 _migration_runner = MigrationRunner(engine)
+
+@_migration_runner.register(1, "create_hnsw_index_on_vector_table")
+def migrate_v1(conn):
+    from database import vector_engine
+    if vector_engine and vector_engine.dialect.name == "postgresql":
+        from sqlalchemy import inspect
+        inspector = inspect(vector_engine)
+        if inspector.has_table("langchain_pg_embedding"):
+            with vector_engine.begin() as vector_conn:
+                vector_conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+                vector_conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS langchain_pg_embedding_hnsw_idx "
+                    "ON langchain_pg_embedding USING hnsw (embedding vector_cosine_ops) "
+                    "WITH (m = 16, ef_construction = 64);"
+                ))
+
 try:
     _migration_runner.run_pending()
 except MigrationTimeoutError as e:
@@ -1890,6 +1906,14 @@ def startup_event():
     # Log the complete route inventory at startup
     _log_route_inventory()
 
+    # Preload the sentence-transformers embedding model
+    try:
+        from rag.embedding import preload_model
+        preload_model()
+        logger.info("Sentence-Transformers embedding model preloaded successfully.")
+    except Exception as exc:
+        logger.warning("Failed to preload sentence-transformers embedding model: %s", exc)
+
     try:
         _bootstrap_default_users()
     except Exception as exc:
@@ -2833,7 +2857,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             except Exception:
                 logger.exception("chat saved-memory core write failed")
             try:
-                MemoryIndexer(request.model_type).add_fact(memory_fact)
+                MemoryIndexer(request.model_type).add_fact(memory_fact, user.username)
             except Exception:
                 logger.exception("chat saved-memory index write failed")
 

@@ -845,10 +845,10 @@ def chat_with_agent(
             force_save=effective_force_save,
         )
         if memory_action == "saved":
-            add_core_memory(normalized_fact)
+            add_core_memory(normalized_fact, username)
             try:
                 indexer = MemoryIndexer(model_type)
-                indexer.add_fact(normalized_fact)
+                indexer.add_fact(normalized_fact, username)
             except Exception as e:
                 print(f"Failed to add fact to PGVector: {e}")
         content = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', content, flags=re.IGNORECASE | re.DOTALL).strip()
@@ -1325,7 +1325,7 @@ async def chat_with_agent_stream(
                 await asyncio.to_thread(add_core_memory, normalized_fact, username)
                 try:
                     indexer = MemoryIndexer(model_type)
-                    await asyncio.to_thread(indexer.add_fact, normalized_fact)
+                    await asyncio.to_thread(indexer.add_fact, normalized_fact, username)
                 except Exception as e:
                     print(f"Failed to add fact to PGVector: {e}")
             accumulated_response = re.sub(r'\[SAVE_MEMORY:\s*.*?\]', '', accumulated_response, flags=re.IGNORECASE | re.DOTALL).strip()
@@ -1363,7 +1363,7 @@ async def chat_with_agent_stream(
                 await asyncio.to_thread(add_core_memory, normalized_fact, username)
                 try:
                     indexer = MemoryIndexer(model_type)
-                    await asyncio.to_thread(indexer.add_fact, normalized_fact)
+                    await asyncio.to_thread(indexer.add_fact, normalized_fact, username)
                 except Exception as e:
                     print(f"Failed to add fact to PGVector: {e}")
         task_suggestions = []

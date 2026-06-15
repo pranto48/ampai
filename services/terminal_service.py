@@ -257,6 +257,8 @@ class TerminalService:
 
         # 4. Resolve execution parameters
         effective_timeout = self._clamp_timeout(timeout if timeout is not None else self._config.timeout)
+        # Enforce strict maximum timeout of 15 seconds for actuator tools security/resilience
+        effective_timeout = min(effective_timeout, 15)
         effective_max_output = self._clamp_output_limit(
             max_output if max_output is not None else self._config.max_output
         )
@@ -285,9 +287,25 @@ class TerminalService:
                 process.kill()
                 stdout, stderr = process.communicate()
                 timed_out = True
+                stderr = (stderr or "") + f"\n[Error: Command execution timed out after exceeding the strict limit of {effective_timeout} seconds]"
 
             exit_code = process.returncode
 
+        except PermissionError as exc:
+            # Catch and return permission errors explicitly
+            execution_ms = int((time.time() - start_time) * 1000)
+            result = CommandResult(
+                command=command,
+                exit_code=-1,
+                stdout="",
+                stderr=f"[Error: Permission denied. You do not have permissions to execute this command: {str(exc)}]",
+                execution_ms=execution_ms,
+                truncated=False,
+                timed_out=False,
+                blocked=False,
+            )
+            self._log_execution(result, effective_cwd, username, session_id)
+            return result
         except OSError as exc:
             # Handle cases where the shell or command cannot be found
             execution_ms = int((time.time() - start_time) * 1000)

@@ -11,7 +11,7 @@ from .embedding import get_batch_embeddings, get_text_embedding
 from .vector_store import upsert_chunks, similarity_search
 
 
-def store_embeddings(texts: List[str], source_file: Optional[str] = None) -> None:
+async def store_embeddings(texts: List[str], source_file: Optional[str] = None) -> None:
     """Chunk the given texts, embed them, and upsert into the vector store.
 
     Args:
@@ -32,18 +32,18 @@ def store_embeddings(texts: List[str], source_file: Optional[str] = None) -> Non
                 meta["source_file"] = source_file
             meta["chunk_index"] = chunk_index
             metadatas.append(meta)
-    # Generate embeddings for all chunks
-    embeddings = get_batch_embeddings(chunks)
+    # Generate embeddings for all chunks asynchronously
+    embeddings = await get_batch_embeddings(chunks)
     # Upsert into Chroma collection
     upsert_chunks(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
 
 
-def search_embeddings(query: str, top_k: int = 5) -> List[Tuple[str, str, dict]]:
+async def search_embeddings(query: str, top_k: int = 5) -> List[Tuple[str, str, dict]]:
     """Embed a query string and retrieve the most similar stored chunks.
 
     Returns a list of ``(id, document, metadata)`` tuples.
     """
-    query_embedding = get_text_embedding(query)
+    query_embedding = await get_text_embedding(query)
     if not query_embedding:
         return []
     return similarity_search(query_embedding, top_k=top_k)

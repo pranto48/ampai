@@ -636,7 +636,7 @@ def api_admin_create_vector_memory(request: dict, user: UserContext = Depends(re
         from memory_indexer import MemoryIndexer
         indexer = MemoryIndexer()
         if indexer.enabled:
-            indexer.add_fact(document)
+            indexer.add_fact(document, user.username)
         else:
             # Graceful fallback: Insert using raw SQL with a dummy vector if embedding provider is offline
             from database import vector_engine
