@@ -4,10 +4,13 @@ import json
 import uuid
 import urllib.parse
 import urllib.request
+import asyncio
 from langchain_community.chat_message_histories import RedisChatMessageHistory
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.tools import tool
 from memory_indexer import MemoryIndexer
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -16,7 +19,6 @@ from logging_utils import get_logger
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_ollama import ChatOllama
-from langchain_community.chat_message_histories import SQLChatMessageHistory
 from database import DATABASE_URL, get_config, get_core_memories, add_core_memory, redact_pii_text, CHAT_HISTORY_TABLE, get_sql_chat_history
 from memory_persistence import memory_persistence_manager
 from ampai_identity import get_ampai_system_prompt
@@ -380,6 +382,97 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None, genera
         raise ValueError(f"Unsupported model type: {model_type}")
 
 
+def run_web_search_sync(query: str) -> str:
+    try:
+        from routers.web_search import _get_web_search_service
+        service = _get_web_search_service()
+        res = service.search(query=query)
+        if res.status == "ok" and res.hits:
+            return service.summarize_for_context(res.hits)
+        else:
+            return f"Web search failed: {res.error or 'No results found.'}"
+    except Exception as e:
+        return f"Error executing web search: {str(e)}"
+
+
+def run_web_scrape_sync(url: str, username: str, session_id: str) -> str:
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    async def scrape():
+        from routers.browser import _get_browser_service
+        service = _get_browser_service()
+        await service.open_browser(username=username, session_id=session_id)
+        nav_res = await service.navigate(url=url, username=username, session_id=session_id)
+        if nav_res.status not in ("success", "executed"):
+            return f"Failed to navigate to {url}: {nav_res.message}"
+        ext_res = await service.extract(username=username, session_id=session_id)
+        return ext_res.data.get("content", "")
+
+    return loop.run_until_complete(scrape())
+
+
+async def run_async_scrape_tool(url: str, username: str, session_id: str) -> str:
+    from routers.browser import _get_browser_service
+    service = _get_browser_service()
+    try:
+        await service.open_browser(username=username, session_id=session_id)
+        nav_res = await service.navigate(url=url, username=username, session_id=session_id)
+        if nav_res.status not in ("success", "executed"):
+            return f"Failed to navigate to {url}: {nav_res.message}"
+        ext_res = await service.extract(username=username, session_id=session_id)
+        return ext_res.data.get("content", "")
+    except Exception as e:
+        return f"Failed to scrape webpage: {str(e)}"
+
+
+def run_terminal_command_sync(command: str, session_id: str, username: str) -> str:
+    try:
+        from routers.terminal import _get_terminal_service
+        service = _get_terminal_service()
+        service.check_enabled()
+        if not service.is_session_confirmed(session_id):
+            return "ERROR: Terminal access requires per-session confirmation. The user must execute a command or click confirm in the UI first."
+        res = service.execute(
+            command=command,
+            session_id=session_id,
+            username=username,
+        )
+        if res.blocked:
+            return f"BLOCKED: Command was blocked by security policy. Reason: {res.block_reason}"
+        output = res.stdout
+        if res.stderr:
+            output += f"\n--- stderr ---\n{res.stderr}"
+        if res.truncated:
+            output += "\n--- (output truncated) ---"
+        return output
+    except Exception as e:
+        return f"ERROR: {str(e)}"
+
+
+def create_agent_tools(username: str, session_id: str):
+    @tool
+    def web_search(query: str) -> str:
+        """Search the web for a given query and return a summary of organic search hits."""
+        return run_web_search_sync(query)
+
+    @tool
+    async def web_scrape_page(url: str) -> str:
+        """Scrape the text content of a webpage at the given URL using the browser service. Only allowed domains can be scraped."""
+        return await run_async_scrape_tool(url, username, session_id)
+
+    @tool
+    def execute_terminal_command(command: str) -> str:
+        """Execute a safe/read-only shell command on the host container environment (e.g. ping, df -h, uptime).
+        Destructive commands (e.g. rm -rf, format, regedit) are blocked by security policy."""
+        return run_terminal_command_sync(command, session_id, username)
+
+    return web_search, web_scrape_page, execute_terminal_command
+
+
 def chat_with_agent(
     session_id: str,
     message: str,
@@ -432,9 +525,30 @@ def chat_with_agent(
             except Exception as _recall_err:
                 logger.debug("Cross-session recall failed: %s", _recall_err)
 
+        enable_browser_tools = kwargs.get("enable_browser_tools", False)
+        enable_terminal_tools = kwargs.get("enable_terminal_tools", False)
+
+        tools = []
+        web_search_t, web_scrape_t, exec_term_t = create_agent_tools(username, session_id)
+        if use_web_search:
+            tools.append(web_search_t)
+        if enable_browser_tools:
+            tools.append(web_scrape_t)
+        if enable_terminal_tools:
+            tools.append(exec_term_t)
+
+        has_tools = False
+        llm_with_tools = None
+        if tools and hasattr(llm, "bind_tools"):
+            try:
+                llm_with_tools = llm.bind_tools(tools)
+                has_tools = True
+            except Exception as bind_err:
+                logger.warning("Failed to bind tools to LLM: %s. Falling back to default execution.", bind_err)
+
         web_context = ""
         web_search = {"enabled": use_web_search, "provider": None, "status": "disabled", "error": None}
-        if use_web_search:
+        if use_web_search and not has_tools:
             try:
                 from langchain_community.tools import DuckDuckGoSearchRun
                 search = DuckDuckGoSearchRun()
@@ -600,20 +714,54 @@ def chat_with_agent(
                 ("human", "{input}")
             ])
 
-        chain = prompt | llm
+        human_input = [{"type": "text", "text": message}] + image_contents if image_contents else message
         history_factory = get_short_redis_history if memory_mode == "indexed" else get_redis_history
 
-        chain_with_history = RunnableWithMessageHistory(
-            chain,
-            history_factory,
-            input_messages_key="input",
-            history_messages_key="history",
-        )
-
-        human_input = [{"type": "text", "text": message}] + image_contents if image_contents else message
-
-        response = chain_with_history.invoke({"input": human_input}, config={"configurable": {"session_id": session_id}})
-        content = response.content
+        if has_tools and llm_with_tools:
+            history = history_factory(session_id)
+            chat_history = history.messages
+            
+            messages = [SystemMessage(content=system_msg)] + chat_history + [HumanMessage(content=human_input)]
+            
+            max_iterations = 5
+            for i in range(max_iterations):
+                response = llm_with_tools.invoke(messages)
+                if not response.tool_calls:
+                    content = response.content
+                    break
+                messages.append(response)
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+                    tool_id = tool_call["id"]
+                    
+                    if tool_name == "web_search":
+                        tool_result = run_web_search_sync(tool_args.get("query"))
+                        web_search = {"enabled": True, "provider": "tool-calling", "status": "ok", "error": None}
+                    elif tool_name == "web_scrape_page":
+                        tool_result = run_web_scrape_sync(tool_args.get("url"), username, session_id)
+                    elif tool_name == "execute_terminal_command":
+                        tool_result = run_terminal_command_sync(tool_args.get("command"), session_id, username)
+                    else:
+                        tool_result = f"Error: Tool {tool_name} not found."
+                    
+                    messages.append(ToolMessage(content=tool_result, tool_call_id=tool_id, name=tool_name))
+            else:
+                content = "Tool execution limit reached."
+                
+            # Manually append this turn to Redis history
+            history.add_user_message(message)
+            history.add_ai_message(content)
+        else:
+            chain = prompt | llm
+            chain_with_history = RunnableWithMessageHistory(
+                chain,
+                history_factory,
+                input_messages_key="input",
+                history_messages_key="history",
+            )
+            response = chain_with_history.invoke({"input": human_input}, config={"configurable": {"session_id": session_id}})
+            content = response.content
     except Exception as e:
         logger.warning("LLM execution failed, falling back to ampai_default_chat. Error: %s", e)
         from ampai_default_engine import ampai_default_chat
@@ -804,6 +952,28 @@ async def chat_with_agent_stream(
         generation_options = _resolve_generation_options(model_type=model_type, chat_output_mode=chat_output_mode or "normal")
         llm = get_llm(model_type, api_key, model_name=model_name, generation_options=generation_options)
 
+        enable_browser_tools = kwargs.get("enable_browser_tools", False)
+        enable_terminal_tools = kwargs.get("enable_terminal_tools", False)
+
+        tools = []
+        web_search_t, web_scrape_t, exec_term_t = create_agent_tools(username, session_id)
+        if use_web_search:
+            tools.append(web_search_t)
+        if enable_browser_tools:
+            tools.append(web_scrape_t)
+        if enable_terminal_tools:
+            tools.append(exec_term_t)
+
+        has_tools = False
+        llm_with_tools = None
+        if tools and hasattr(llm, "bind_tools"):
+            try:
+                llm_with_tools = llm.bind_tools(tools)
+                has_tools = True
+            except Exception as bind_err:
+                logger.warning("Failed to bind tools to LLM in stream: %s. Falling back to default execution.", bind_err)
+
+
         core_facts_str = "\n".join([f"- {m['fact']}" for m in core_mems]) if core_mems else "None yet."
 
         recall_context = ""
@@ -825,7 +995,7 @@ async def chat_with_agent_stream(
 
         web_context = ""
         web_search = {"enabled": use_web_search, "provider": None, "status": "disabled", "error": None}
-        if use_web_search:
+        if use_web_search and not has_tools:
             yield {"type": "status", "status": "searching_web", "message": "Initiating live web search..."}
             try:
                 from langchain_community.tools import DuckDuckGoSearchRun
@@ -854,14 +1024,14 @@ async def chat_with_agent_stream(
                     )
 
         # Terminal command execution check
-        if kwargs.get("enable_terminal_tools"):
+        if kwargs.get("enable_terminal_tools") and not has_tools:
             terminal_keywords = ["run", "execute", "install", "deploy", "build", "npm", "pip", "python", "docker", "git", "bash", "sh", "cmd", "systemctl"]
             msg_lower = (message or "").lower()
             if any(kw in msg_lower for kw in terminal_keywords):
                 yield {"type": "status", "status": "executing_command", "message": "Analyzing system environment for terminal execution..."}
 
         # Browser active check
-        if kwargs.get("enable_browser_tools"):
+        if kwargs.get("enable_browser_tools") and not has_tools:
             yield {"type": "status", "status": "browser_action", "message": "Browser node active: Navigating to resource..."}
 
         file_context = ""
@@ -1007,24 +1177,65 @@ async def chat_with_agent_stream(
                 ("human", "{input}")
             ])
 
-        chain = prompt | llm
-        history_factory = get_short_redis_history if memory_mode == "indexed" else get_redis_history
-
-        chain_with_history = RunnableWithMessageHistory(
-            chain,
-            history_factory,
-            input_messages_key="input",
-            history_messages_key="history",
-        )
-
         human_input = [{"type": "text", "text": message}] + image_contents if image_contents else message
-
+        history_factory = get_short_redis_history if memory_mode == "indexed" else get_redis_history
         accumulated_response = ""
-        async for chunk in chain_with_history.astream({"input": human_input}, config={"configurable": {"session_id": session_id}}):
-            token = chunk.content
-            if token:
-                accumulated_response += token
-                yield {"type": "token", "token": token}
+
+        if has_tools and llm_with_tools:
+            history = history_factory(session_id)
+            chat_history = history.messages
+            
+            messages = [SystemMessage(content=system_msg)] + chat_history + [HumanMessage(content=human_input)]
+            
+            max_iterations = 5
+            for i in range(max_iterations):
+                response = await llm_with_tools.ainvoke(messages)
+                if not response.tool_calls:
+                    async for chunk in llm_with_tools.astream(messages):
+                        token = chunk.content
+                        if token:
+                            accumulated_response += token
+                            yield {"type": "token", "token": token}
+                    break
+                messages.append(response)
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+                    tool_id = tool_call["id"]
+                    
+                    if tool_name == "web_search":
+                        yield {"type": "status", "status": "searching", "message": "Searching web..."}
+                        tool_result = await asyncio.to_thread(run_web_search_sync, tool_args.get("query"))
+                        web_search = {"enabled": True, "provider": "tool-calling", "status": "ok", "error": None}
+                    elif tool_name == "web_scrape_page":
+                        yield {"type": "status", "status": "scraping", "message": "Scraping content..."}
+                        tool_result = await run_async_scrape_tool(tool_args.get("url"), username, session_id)
+                    elif tool_name == "execute_terminal_command":
+                        yield {"type": "status", "status": "executing", "message": "Running shell command..."}
+                        tool_result = await asyncio.to_thread(run_terminal_command_sync, tool_args.get("command"), session_id, username)
+                    else:
+                        tool_result = f"Error: Tool {tool_name} not found."
+                    
+                    messages.append(ToolMessage(content=tool_result, tool_call_id=tool_id, name=tool_name))
+            else:
+                accumulated_response = "Tool execution limit reached."
+                yield {"type": "token", "token": accumulated_response}
+                
+            await asyncio.to_thread(history.add_user_message, message)
+            await asyncio.to_thread(history.add_ai_message, accumulated_response)
+        else:
+            chain = prompt | llm
+            chain_with_history = RunnableWithMessageHistory(
+                chain,
+                history_factory,
+                input_messages_key="input",
+                history_messages_key="history",
+            )
+            async for chunk in chain_with_history.astream({"input": human_input}, config={"configurable": {"session_id": session_id}}):
+                token = chunk.content
+                if token:
+                    accumulated_response += token
+                    yield {"type": "token", "token": token}
 
     except Exception as e:
         logger.warning("LLM execution failed in stream, falling back to ampai_default_chat. Error: %s", e)

@@ -2571,6 +2571,7 @@ def telegram_webhook(
     session_id = f"tg_{chat_id}"
     username = "telegram-bot"
     model_type = (get_config("default_model", "ollama") or "ollama").strip().lower()
+    tool_access = _config_bool("telegram_tool_access_enabled", default=False)
 
     try:
         result = chat_with_agent(
@@ -2592,6 +2593,8 @@ def telegram_webhook(
             persist_memory=True,
             require_memory_approval=False,
             pii_strict_mode=True,
+            enable_browser_tools=tool_access,
+            enable_terminal_tools=tool_access,
         )
         response_text = str((result or {}).get("response") or "").strip()
         if response_text:

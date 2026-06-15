@@ -582,6 +582,7 @@ def telegram_webhook(
     session_id = f"tg_{chat_id}"
     username = "telegram-bot"
     model_type = (get_config("default_model", "ollama") or "ollama").strip().lower()
+    tool_access = _config_bool("telegram_tool_access_enabled", default=False)
     try:
         result = chat_with_agent(
             session_id=session_id,
@@ -602,6 +603,8 @@ def telegram_webhook(
             persist_memory=True,
             require_memory_approval=False,
             pii_strict_mode=True,
+            enable_browser_tools=tool_access,
+            enable_terminal_tools=tool_access,
         )
         response_text = str((result or {}).get("response") or "").strip()
         if response_text:
@@ -684,6 +687,8 @@ def _get_telegram_bot_service() -> TelegramBotService:
             persist_memory=bool(policy.get("auto_capture_enabled", True)),
             require_memory_approval=bool(policy.get("require_approval", False)),
             pii_strict_mode=bool(policy.get("pii_strict_mode", True)),
+            enable_browser_tools=kwargs.get("enable_browser_tools", False),
+            enable_terminal_tools=kwargs.get("enable_terminal_tools", False),
         )
 
     def _audit_logger(username, action, session_id=None, details=None):
