@@ -22,7 +22,7 @@ from routers.browser import router as browser_router
 from routers.chat import router as chat_router
 from routers.integrations import router as integrations_router
 from routers.memory import router as memory_router
-from routers.models_router import router as models_router
+from routers.models_router import router as models_api_router
 from routers.personas import router as personas_router
 from routers.recall import router as recall_router
 from routers.sessions import router as sessions_router
@@ -46,7 +46,7 @@ ALL_ROUTERS = [
     skills_router,
     tasks_router,
     recall_router,
-    models_router,
+    models_api_router,
     admin_router,
     integrations_router,
     system_router,
