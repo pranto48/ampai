@@ -264,7 +264,17 @@ export default function App() {
       const text = await response.text();
       const data = text ? JSON.parse(text) : {};
       if (!response.ok) {
-        throw new Error(data?.detail || data?.message || response.statusText);
+        let errorMsg = data?.message || response.statusText;
+        if (data?.detail) {
+          if (Array.isArray(data.detail)) {
+            errorMsg = data.detail.map((d: any) => d.msg || JSON.stringify(d)).join(", ");
+          } else if (typeof data.detail === "string") {
+            errorMsg = data.detail;
+          } else {
+            errorMsg = JSON.stringify(data.detail);
+          }
+        }
+        throw new Error(errorMsg);
       }
       return data as T;
     } finally {
@@ -1357,17 +1367,36 @@ export default function App() {
   // --- Browser Allowlist handler ---
   const handleAddAllowlistDomain = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newAllowlistDomain.trim()) return;
+    const domainToAdd = newAllowlistDomain.trim().toLowerCase();
+    if (!domainToAdd) return;
+    if (allowlist.includes(domainToAdd)) {
+      triggerToast("Domain already in allowlist", "err");
+      return;
+    }
     try {
-      await apiCall("/api/browser/allowlist", {
+      const res = await apiCall<any>("/api/browser/allowlist", {
         method: "POST",
-        body: JSON.stringify({ domain: newAllowlistDomain })
+        body: JSON.stringify({ domains: [...allowlist, domainToAdd] })
       });
-      setAllowlist(prev => [...prev, newAllowlistDomain]);
+      setAllowlist(res.domains || res.allowlist || []);
       setNewAllowlistDomain("");
       triggerToast("Domain added to allowlist", "ok");
     } catch (err: any) {
       triggerToast(err.message || "Failed to add domain", "err");
+    }
+  };
+
+  const handleRemoveAllowlistDomain = async (domainToRemove: string) => {
+    try {
+      const updatedList = allowlist.filter(d => d !== domainToRemove);
+      const res = await apiCall<any>("/api/browser/allowlist", {
+        method: "POST",
+        body: JSON.stringify({ domains: updatedList })
+      });
+      setAllowlist(res.domains || res.allowlist || []);
+      triggerToast("Domain removed from allowlist", "ok");
+    } catch (err: any) {
+      triggerToast(err.message || "Failed to remove domain", "err");
     }
   };
 
@@ -3159,8 +3188,16 @@ export default function App() {
                     <span className="text-xs text-slate-400 font-semibold block mb-1">Approved Host Domains</span>
                     <div className="flex flex-wrap gap-1.5">
                       {allowlist.map(domain => (
-                        <span key={domain} className="px-2 py-0.5 rounded bg-slate-900 border border-slate-850 text-slate-350 text-[10px] flex items-center">
-                          {domain}
+                        <span key={domain} className="px-2 py-0.5 rounded bg-slate-900 border border-slate-850 text-slate-350 text-[10px] flex items-center space-x-1.5">
+                          <span>{domain}</span>
+                          <button
+                            onClick={() => handleRemoveAllowlistDomain(domain)}
+                            type="button"
+                            className="text-slate-500 hover:text-rose-400 font-bold ml-1 focus:outline-none cursor-pointer"
+                            title="Remove domain"
+                          >
+                            ×
+                          </button>
                         </span>
                       ))}
                       {allowlist.length === 0 && (
