@@ -183,7 +183,7 @@ export default function App() {
   // Admin & Settings Panel States
   const [adminSubTab, setAdminSubTab] = useState<"console" | "backup">("console");
   const [restoreFile, setRestoreFile] = useState<File | null>(null);
-  const [dragActive, setDragActive] = useState<boolean>(false);
+  const [restoreDragActive, setRestoreDragActive] = useState<boolean>(false);
   const [showRestoreConfirm, setShowRestoreConfirm] = useState<boolean>(false);
   const [restoreBusy, setRestoreBusy] = useState<boolean>(false);
   const [configs, setConfigs] = useState<Record<string, string>>({});
@@ -588,7 +588,7 @@ export default function App() {
         if (tab === "admin" && isAdmin()) {
           const usersRes = await apiCall<any>("/api/admin/users").catch(() => ({ users: [] }));
           setAdminUsers(usersRes.users || []);
-          const bRes = await apiCall<any>("/api/admin/backups").catch(() => ({ backups: [] }));
+          const bRes = await apiCall<any>("/api/admin/fullbackup/list").catch(() => ({ backups: [] }));
           setBackups(bRes.backups || []);
           const statusRes = await apiCall<any>("/api/admin/update/status").catch(() => null);
           if (statusRes) {
@@ -3646,8 +3646,8 @@ export default function App() {
                     <button
                       onClick={async () => {
                         try {
-                          await apiCall("/api/admin/backups", { method: "POST" });
-                          const res = await apiCall<any>("/api/admin/backups");
+                          await apiCall("/api/admin/fullbackup/create", { method: "POST" });
+                          const res = await apiCall<any>("/api/admin/fullbackup/list");
                           setBackups(res.backups || []);
                           triggerToast("Backup created successfully", "ok");
                         } catch (err: any) {
@@ -3672,7 +3672,10 @@ export default function App() {
                           onClick={async () => {
                             if (!confirm("Confirm system restore from this file? Current changes will be overwritten!")) return;
                             try {
-                              await apiCall(`/api/admin/backups/${encodeURIComponent(b.filename)}/restore`, { method: "POST" });
+                              await apiCall("/api/admin/fullbackup/restore", {
+                                method: "POST",
+                                body: JSON.stringify({ filename: b.filename })
+                              });
                               triggerToast("Backup restored successfully. Please refresh the page.", "ok");
                             } catch (err: any) {
                               triggerToast(err.message || "Failed to restore backup", "err");
@@ -3812,19 +3815,19 @@ export default function App() {
                     <div
                       onDragOver={(e) => {
                         e.preventDefault();
-                        setDragActive(true);
+                        setRestoreDragActive(true);
                       }}
-                      onDragLeave={() => setDragActive(false)}
+                      onDragLeave={() => setRestoreDragActive(false)}
                       onDrop={(e) => {
                         e.preventDefault();
-                        setDragActive(false);
+                        setRestoreDragActive(false);
                         if (e.dataTransfer.files && e.dataTransfer.files[0]) {
                           setRestoreFile(e.dataTransfer.files[0]);
                         }
                       }}
                       onClick={() => document.getElementById("restore-file-input")?.click()}
                       className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all ${
-                        dragActive 
+                        restoreDragActive 
                           ? "border-indigo-500 bg-indigo-950/20" 
                           : restoreFile 
                             ? "border-emerald-500 bg-emerald-950/5" 
