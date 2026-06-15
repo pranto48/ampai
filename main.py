@@ -2853,7 +2853,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             )
         elif memory_action == "saved" and memory_fact:
             try:
-                add_core_memory(memory_fact, user.username)
+                add_core_memory(memory_fact, user.username, category=result.get("memory_category"))
             except Exception:
                 logger.exception("chat saved-memory core write failed")
             try:
@@ -3073,9 +3073,10 @@ def update_memory_inbox(
         row["reviewed_at"] = datetime.now(timezone.utc).isoformat()
         if next_status == "approved":
             approved_text = row["edited_text"] or row.get("candidate_text") or ""
+            category = row.get("category") or None
             if approved_text:
                 try:
-                    add_core_memory(approved_text, row.get("username") or current_user.username)
+                    add_core_memory(approved_text, row.get("username") or current_user.username, category=category)
                 except Exception:
                     logger.exception("Failed to persist approved memory candidate")
         updated = row
@@ -5941,9 +5942,10 @@ def api_get_core_memories_self(user=Depends(require_authenticated_user)):
 @app.post("/api/core-memories")
 def api_add_core_memory(request: dict, user=Depends(require_authenticated_user)):
     fact = (request.get("fact") or "").strip()
+    category = request.get("category")
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
-    success = add_core_memory(fact, user.username)
+    success = add_core_memory(fact, user.username, category=category)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save core memory")
     log_audit_event(
@@ -5965,9 +5967,10 @@ def api_edit_core_memory(
     if user.role != "admin" and owner != user.username:
         raise HTTPException(status_code=403, detail="Forbidden: You do not own this memory")
     fact = (request.get("fact") or "").strip()
+    category = request.get("category")
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
-    success = update_core_memory(mem_id, fact)
+    success = update_core_memory(mem_id, fact, category)
     if not success:
         raise HTTPException(status_code=404, detail="Memory not found or unchanged")
     log_audit_event(
@@ -6001,9 +6004,10 @@ def api_admin_edit_core_memory(
     mem_id: int, request: dict, user=Depends(require_admin_user)
 ):
     fact = (request.get("fact") or "").strip()
+    category = request.get("category")
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
-    success = update_core_memory(mem_id, fact)
+    success = update_core_memory(mem_id, fact, category)
     if not success:
         raise HTTPException(status_code=404, detail="Memory not found or unchanged")
     log_audit_event(

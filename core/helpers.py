@@ -9,7 +9,6 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-
 from database import (
     engine,
     get_accessible_session_ids,
@@ -18,6 +17,7 @@ from database import (
     session_exists,
     set_config,
     user_can_access_session,
+    _auto_infer_memory_category,
 )
 from fastapi import HTTPException
 from redis import Redis
@@ -101,6 +101,7 @@ def _create_memory_candidate(
         "username": username,
         "session_id": session_id,
         "candidate_text": (text or "").strip()[:1000],
+        "category": _auto_infer_memory_category(text),
         "confidence": round(float(confidence), 2),
         "status": "pending",
         "edited_text": "",

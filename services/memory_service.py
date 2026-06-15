@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text as sqlalchemy_text
 
-from database import engine
+from database import engine, _auto_infer_memory_category
 from memory_indexer import MemoryIndexer
 from memory_curator import create_nudge, list_pending_nudges
 from memory_persistence import memory_persistence_manager
@@ -288,15 +288,16 @@ class MemoryService:
                 )
 
                 # Insert into core_memories
+                category = _auto_infer_memory_category(fact)
                 core_result = conn.execute(
                     sqlalchemy_text(
                         """
                         INSERT INTO core_memories (username, fact, category, created_at)
-                        VALUES (:username, :fact, 'general', NOW())
+                        VALUES (:username, :fact, :category, NOW())
                         RETURNING id, created_at
                         """
                     ),
-                    {"username": username, "fact": fact},
+                    {"username": username, "fact": fact, "category": category},
                 )
                 core_row = core_result.fetchone()
 

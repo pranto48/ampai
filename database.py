@@ -1647,9 +1647,44 @@ Merged Fact:"""
     return old_fact + " | " + new_fact
 
 
-def add_core_memory(fact: str, username: str = "system"):
+# --- Memory category auto-detection patterns ---
+_DATABASE_CATEGORY_PATTERNS = [
+    ("personal_info", re.compile(
+        r"\b(my name is|i('m| am)|born on|date of birth|nationality|citizen|passport|age|birthday|full name)\b",
+        re.IGNORECASE,
+    )),
+    ("work", re.compile(
+        r"\b(i work|my job|my role|i'm a|i am a|co-founder|founder|ceo|cto|chairman|manager|engineer|developer|designer|freelancer|consultant|company|organisation|organization)\b",
+        re.IGNORECASE,
+    )),
+    ("preferences", re.compile(
+        r"\b(i (like|love|prefer|enjoy|hate|dislike)|my preference|my favourite|favorite|always use|usually use)\b",
+        re.IGNORECASE,
+    )),
+    ("location", re.compile(
+        r"\b(i live|i'm based|i am based|my (home|city|country|address|location)|located in)\b",
+        re.IGNORECASE,
+    )),
+    ("contact", re.compile(
+        r"\b(my email|my phone|my number|contact me|reach me|telegram|whatsapp)\b",
+        re.IGNORECASE,
+    )),
+]
+
+def _auto_infer_memory_category(fact: str) -> str:
+    """Return the best-matching memory category for a fact, or 'general'."""
+    for category, pattern in _DATABASE_CATEGORY_PATTERNS:
+        if pattern.search(fact or ""):
+            return category
+    return "general"
+
+
+def add_core_memory(fact: str, username: str = "system", category: Optional[str] = None):
     if not engine: return False
     
+    if not category or category == "auto":
+        category = _auto_infer_memory_category(fact)
+        
     # Check if similarity search can be performed to deduplicate/merge
     try:
         from memory_indexer import MemoryIndexer
@@ -1690,8 +1725,8 @@ def add_core_memory(fact: str, username: str = "system"):
                         # Update relational database
                         with engine.connect() as conn:
                             conn.execute(
-                                text("UPDATE core_memories SET fact = :f, created_at = NOW() WHERE id = :id"),
-                                {"f": merged_fact.strip(), "id": mem_id}
+                                text("UPDATE core_memories SET fact = :f, category = :cat, created_at = NOW() WHERE id = :id"),
+                                {"f": merged_fact.strip(), "cat": category or best_mem.get("category") or "general", "id": mem_id}
                             )
                             conn.commit()
                         
@@ -1715,8 +1750,8 @@ def add_core_memory(fact: str, username: str = "system"):
     try:
         with engine.connect() as conn:
             conn.execute(
-                text("INSERT INTO core_memories (username, fact) VALUES (:u, :f)"),
-                {"u": username or "system", "f": fact}
+                text("INSERT INTO core_memories (username, fact, category) VALUES (:u, :f, :cat)"),
+                {"u": username or "system", "f": fact, "cat": category or "general"}
             )
             conn.commit()
             return True
@@ -1731,10 +1766,10 @@ def get_core_memories(username: Optional[str] = None):
         with engine.connect() as conn:
             if not inspect(engine).has_table("core_memories"):
                 return []
-            stmt = select(core_memories.c.id, core_memories.c.fact)
+            stmt = select(core_memories.c.id, core_memories.c.fact, core_memories.c.category)
             if username:
                 stmt = stmt.where(core_memories.c.username == username)
-            return [{"id": row[0], "fact": row[1]} for row in conn.execute(stmt)]
+            return [{"id": row[0], "fact": row[1], "category": row[2]} for row in conn.execute(stmt)]
     except Exception as e:
         logger.warning(f"Error getting core memories: {e}")
         return []
@@ -1766,14 +1801,20 @@ def delete_core_memory(mem_id: int):
         return False
 
 
-def update_core_memory(mem_id: int, fact: str):
+def update_core_memory(mem_id: int, fact: str, category: Optional[str] = None):
     if not engine: return False
     try:
         with engine.connect() as conn:
-            result = conn.execute(
-                text("UPDATE core_memories SET fact = :f WHERE id = :id"),
-                {"f": fact, "id": mem_id}
-            )
+            if category:
+                result = conn.execute(
+                    text("UPDATE core_memories SET fact = :f, category = :cat WHERE id = :id"),
+                    {"f": fact, "cat": category, "id": mem_id}
+                )
+            else:
+                result = conn.execute(
+                    text("UPDATE core_memories SET fact = :f WHERE id = :id"),
+                    {"f": fact, "id": mem_id}
+                )
             conn.commit()
             return result.rowcount > 0
     except Exception as e:
