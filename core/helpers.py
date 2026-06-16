@@ -272,6 +272,32 @@ def _classify_tier(updated_at_raw: Optional[str]) -> str:
 # ── Email / notification helpers ──────────────────────────────────────────────
 
 
+def send_email(to_email: str, subject: str, body_text: str) -> bool:
+    api_key = (get_config("resend_api_key") or "").strip()
+    from_email = (get_config("resend_from_email") or "").strip()
+    recipient = (to_email or "").strip() or (get_config("notification_email_to") or "").strip()
+    if not api_key or not from_email or not recipient:
+        return False
+
+    payload = json.dumps(
+        {"from": from_email, "to": [recipient], "subject": subject, "text": body_text}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception:
+        return False
+
+
 def _send_resend_email(subject: str, body_text: str) -> bool:
     api_key = (get_config("resend_api_key") or "").strip()
     from_email = (get_config("resend_from_email") or "").strip()

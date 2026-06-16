@@ -33,6 +33,7 @@ from core.helpers import (
     _check_db_health,
     _send_resend_email,
     _to_bool,
+    send_email,
 )
 from core.models import (
     AdminPasswordChangeRequest,
@@ -151,10 +152,14 @@ def admin_list_users(_: UserContext = Depends(require_admin_user)):
 
 @router.post("/api/admin/users")
 def admin_create_user(
-    request: AdminUserCreateRequest, _: UserContext = Depends(require_admin_user)
+    request: AdminUserCreateRequest,
+    background_tasks: BackgroundTasks,
+    _: UserContext = Depends(require_admin_user)
 ):
     username = (request.username or "").strip()
     role = (request.role or "user").strip().lower()
+    email = (request.email or "").strip() or None
+    allowed_categories = (request.allowed_categories or "all").strip()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
     if len(request.password or "") < 8:
@@ -166,9 +171,28 @@ def admin_create_user(
     if get_user(username):
         raise HTTPException(status_code=409, detail="User already exists")
     if not db_create_user(
-        username=username, role=role, password_hash=pwd_context.hash(request.password)
+        username=username,
+        role=role,
+        password_hash=pwd_context.hash(request.password),
+        email=email,
+        allowed_categories=allowed_categories
     ):
         raise HTTPException(status_code=500, detail="Failed to create user")
+
+    if email:
+        subject = "Account Created - Welcome to AmpAI"
+        body = (
+            f"Hello {username},\n\n"
+            "An administrator has created an account for you on AmpAI.\n\n"
+            f"Username: {username}\n"
+            f"Role: {role}\n"
+            f"Allowed Categories: {allowed_categories}\n\n"
+            "Please contact your administrator to obtain your password.\n\n"
+            "Best regards,\n"
+            "The AmpAI Team"
+        )
+        background_tasks.add_task(send_email, email, subject, body)
+
     return {"status": "success"}
 
 
@@ -176,6 +200,7 @@ def admin_create_user(
 def admin_update_user(
     username: str,
     request: AdminUserUpdateRequest,
+    background_tasks: BackgroundTasks,
     current_user: UserContext = Depends(require_admin_user),
 ):
     username = username.strip()
@@ -194,8 +219,41 @@ def admin_update_user(
             status_code=400, detail="You cannot remove your own admin role"
         )
     password_hash = pwd_context.hash(request.password) if request.password else None
-    if not db_update_user(username=username, role=role, password_hash=password_hash):
+    email = request.email.strip() if request.email is not None else None
+    allowed_categories = request.allowed_categories.strip() if request.allowed_categories is not None else None
+
+    if not db_update_user(
+        username=username,
+        role=role,
+        password_hash=password_hash,
+        email=email,
+        allowed_categories=allowed_categories
+    ):
         raise HTTPException(status_code=500, detail="Failed to update user")
+
+    recipient_email = email or existing.get("email")
+    if recipient_email:
+        if request.password is not None:
+            subject = "Your Password Has Been Reset - AmpAI"
+            body = (
+                f"Hello {username},\n\n"
+                "An administrator has reset your password on AmpAI. Please check with your administrator for the new password.\n\n"
+                "Best regards,\n"
+                "The AmpAI Team"
+            )
+            background_tasks.add_task(send_email, recipient_email, subject, body)
+        elif allowed_categories is not None or role is not None:
+            subject = "Your Account Settings Have Been Updated - AmpAI"
+            body = (
+                f"Hello {username},\n\n"
+                "An administrator has updated your account settings on AmpAI.\n\n"
+                f"Role: {role or existing.get('role')}\n"
+                f"Allowed Categories: {allowed_categories or existing.get('allowed_categories')}\n\n"
+                "Best regards,\n"
+                "The AmpAI Team"
+            )
+            background_tasks.add_task(send_email, recipient_email, subject, body)
+
     return {"status": "success"}
 
 

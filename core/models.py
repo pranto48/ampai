@@ -295,11 +295,15 @@ class AdminUserCreateRequest(BaseModel):
     username: str
     password: str
     role: str = "user"
+    email: Optional[str] = None
+    allowed_categories: Optional[str] = "all"
 
 
 class AdminUserUpdateRequest(BaseModel):
     role: Optional[str] = None
     password: Optional[str] = None
+    email: Optional[str] = None
+    allowed_categories: Optional[str] = None
 
 
 # ── Admin sessions ────────────────────────────────────────────────────────────
@@ -485,6 +489,7 @@ class UserLoginResponse(BaseModel):
 class UserRegisterRequest(BaseModel):
     username: str
     password: str
+    email: Optional[str] = None
 
 
 class UserLoginRequest(BaseModel):

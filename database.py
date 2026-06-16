@@ -51,6 +51,9 @@ users = Table(
     Column("username", String, primary_key=True),
     Column("role", String, nullable=False, default="user"),
     Column("password_hash", String, nullable=False),
+    Column("email", String, nullable=True),
+    Column("avatar", Text, nullable=True),
+    Column("allowed_categories", String, nullable=True, default="all"),
     Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)),
 )
@@ -446,6 +449,29 @@ def migrate_session_metadata_schema():
 
 
 migrate_session_metadata_schema()
+
+
+def migrate_users_schema():
+    if not engine:
+        return
+    try:
+        with engine.connect() as conn:
+            inspector = inspect(engine)
+            if not inspector.has_table("users"):
+                return
+            columns = {col["name"] for col in inspector.get_columns("users")}
+            if "email" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR(255) NULL"))
+            if "avatar" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN avatar TEXT NULL"))
+            if "allowed_categories" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN allowed_categories VARCHAR(500) DEFAULT 'all'"))
+            conn.commit()
+    except Exception as e:
+        print(f"Error migrating users schema: {e}")
+
+
+migrate_users_schema()
 
 
 def migrate_memory_embeddings_schema():
@@ -1769,7 +1795,16 @@ def get_core_memories(username: Optional[str] = None):
             stmt = select(core_memories.c.id, core_memories.c.fact, core_memories.c.category)
             if username:
                 stmt = stmt.where(core_memories.c.username == username)
-            return [{"id": row[0], "fact": row[1], "category": row[2]} for row in conn.execute(stmt)]
+            results = conn.execute(stmt).fetchall()
+            memories = [{"id": row[0], "fact": row[1], "category": row[2] or "general"} for row in results]
+            if username:
+                user_profile = get_user(username)
+                if user_profile and user_profile.get("role") != "admin":
+                    allowed_str = user_profile.get("allowed_categories") or "all"
+                    if allowed_str != "all":
+                        allowed = {c.strip().lower() for c in allowed_str.split(",") if c.strip()}
+                        memories = [m for m in memories if m["category"].lower() in allowed]
+            return memories
     except Exception as e:
         logger.warning(f"Error getting core memories: {e}")
         return []
@@ -2692,7 +2727,7 @@ def get_user(username: str) -> Optional[Dict[str, str]]:
         with engine.connect() as conn:
             row = conn.execute(
                 text(
-                    "SELECT username, role, password_hash, created_at, updated_at "
+                    "SELECT username, role, password_hash, email, avatar, allowed_categories, created_at, updated_at "
                     "FROM users WHERE username = :username"
                 ),
                 {"username": username},
@@ -2710,7 +2745,7 @@ def list_users() -> List[Dict[str, str]]:
         with engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    "SELECT username, role, created_at, updated_at "
+                    "SELECT username, role, email, avatar, allowed_categories, created_at, updated_at "
                     "FROM users ORDER BY username ASC"
                 )
             ).mappings().all()
@@ -2720,17 +2755,31 @@ def list_users() -> List[Dict[str, str]]:
         return []
 
 
-def create_user(username: str, role: str, password_hash: str) -> bool:
+def create_user(
+    username: str,
+    role: str,
+    password_hash: str,
+    email: Optional[str] = None,
+    avatar: Optional[str] = None,
+    allowed_categories: Optional[str] = "all"
+) -> bool:
     if not engine:
         return False
     try:
         with engine.connect() as conn:
             conn.execute(
                 text(
-                    "INSERT INTO users (username, role, password_hash, created_at, updated_at) "
-                    "VALUES (:username, :role, :password_hash, NOW(), NOW())"
+                    "INSERT INTO users (username, role, password_hash, email, avatar, allowed_categories, created_at, updated_at) "
+                    "VALUES (:username, :role, :password_hash, :email, :avatar, :allowed_categories, NOW(), NOW())"
                 ),
-                {"username": username, "role": role, "password_hash": password_hash},
+                {
+                    "username": username,
+                    "role": role,
+                    "password_hash": password_hash,
+                    "email": email,
+                    "avatar": avatar,
+                    "allowed_categories": allowed_categories
+                },
             )
             conn.commit()
             return True
@@ -2739,10 +2788,17 @@ def create_user(username: str, role: str, password_hash: str) -> bool:
         return False
 
 
-def update_user(username: str, role: Optional[str] = None, password_hash: Optional[str] = None) -> bool:
+def update_user(
+    username: str,
+    role: Optional[str] = None,
+    password_hash: Optional[str] = None,
+    email: Optional[str] = None,
+    avatar: Optional[str] = None,
+    allowed_categories: Optional[str] = None
+) -> bool:
     if not engine:
         return False
-    if role is None and password_hash is None:
+    if role is None and password_hash is None and email is None and avatar is None and allowed_categories is None:
         return True
     try:
         params = {"username": username}
@@ -2753,6 +2809,15 @@ def update_user(username: str, role: Optional[str] = None, password_hash: Option
         if password_hash is not None:
             set_parts.append("password_hash = :password_hash")
             params["password_hash"] = password_hash
+        if email is not None:
+            set_parts.append("email = :email")
+            params["email"] = email
+        if avatar is not None:
+            set_parts.append("avatar = :avatar")
+            params["avatar"] = avatar
+        if allowed_categories is not None:
+            set_parts.append("allowed_categories = :allowed_categories")
+            params["allowed_categories"] = allowed_categories
 
         with engine.connect() as conn:
             result = conn.execute(

@@ -498,7 +498,7 @@ def chat_with_agent(
     persona_prompt_override = kwargs.get("persona_prompt_override")
 
     try:
-        core_mems = get_core_memories()
+        core_mems = get_core_memories(username)
     except Exception:
         core_mems = []
 
@@ -940,7 +940,7 @@ async def chat_with_agent_stream(
 
     fallback_occurred = False
     try:
-        core_mems = await asyncio.to_thread(get_core_memories)
+        core_mems = await asyncio.to_thread(get_core_memories, username)
     except Exception:
         core_mems = []
 

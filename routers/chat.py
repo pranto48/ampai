@@ -164,7 +164,7 @@ def chat(request: ChatRequest, user: UserContext = Depends(require_authenticated
             from database import get_core_memories
 
             _ensure_session_owner_for_user(request.session_id, user)
-            core_mems = get_core_memories()
+            core_mems = get_core_memories(user.username)
             default_result = ampai_default_chat(
                 message=request.message,
                 session_id=request.session_id,
@@ -579,7 +579,7 @@ async def chat_stream(request: ChatRequest, user: UserContext = Depends(require_
         from database import get_core_memories
         
         async def default_stream_generator():
-            core_mems = get_core_memories()
+            core_mems = get_core_memories(user.username)
             default_result = ampai_default_chat(
                 message=request.message,
                 session_id=request.session_id,

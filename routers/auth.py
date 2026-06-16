@@ -17,7 +17,8 @@ from core.models import UserLoginRequest, UserLoginResponse, UserRegisterRequest
 from database import create_user as db_create_user
 from database import get_user
 from database import update_user as db_update_user
-from fastapi import APIRouter, Depends, HTTPException, status
+from core.helpers import send_email
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
 from passlib.context import CryptContext
 
@@ -119,7 +120,7 @@ def login(payload: UserLoginRequest):
 
 
 @router.post("/register")
-def register(payload: UserRegisterRequest):
+def register(payload: UserRegisterRequest, background_tasks: BackgroundTasks):
     username = (payload.username or "").strip()
     if not username or not payload.password:
         raise HTTPException(
@@ -136,9 +137,21 @@ def register(payload: UserRegisterRequest):
         username=username,
         role="user",
         password_hash=pwd_context.hash(payload.password),
+        email=payload.email,
     )
     if not ok:
         raise HTTPException(status_code=400, detail="Failed to create user")
+
+    if payload.email:
+        subject = "Welcome to AmpAI - Registration Confirmed!"
+        body = (
+            f"Hello {username},\n\n"
+            "Your registration on AmpAI has been successfully confirmed. Welcome to the cognitive AI assistant!\n\n"
+            "Best regards,\n"
+            "The AmpAI Team"
+        )
+        background_tasks.add_task(send_email, payload.email, subject, body)
+
     return {"status": "success"}
 
 

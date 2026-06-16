@@ -591,11 +591,15 @@ class AdminUserCreateRequest(BaseModel):
     username: str
     password: str
     role: str = "user"
+    email: Optional[str] = None
+    allowed_categories: Optional[str] = "all"
 
 
 class AdminUserUpdateRequest(BaseModel):
     role: Optional[str] = None
     password: Optional[str] = None
+    email: Optional[str] = None
+    allowed_categories: Optional[str] = None
 
 
 class MemoryGroupCreateRequest(BaseModel):
@@ -2742,7 +2746,7 @@ def chat(request: ChatRequest, user=Depends(require_authenticated_user)):
             from database import get_core_memories
 
             _ensure_session_owner_for_user(request.session_id, user)
-            core_mems = get_core_memories()
+            core_mems = get_core_memories(user.username)
             default_result = ampai_default_chat(
                 message=request.message,
                 session_id=request.session_id,
