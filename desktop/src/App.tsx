@@ -131,6 +131,7 @@ export default function App() {
   const [providers, setProviders] = useState<any[]>([]);
   const [providerModels, setProviderModels] = useState<Record<string, any[]>>({});
   const [sessionSearch, setSessionSearch] = useState<string>("");
+  const [chatHistoryMobileOpen, setChatHistoryMobileOpen] = useState<boolean>(false);
 
   // Curation text-file import states
   const [curatedFacts, setCuratedFacts] = useState<string[]>([]);
@@ -187,6 +188,8 @@ export default function App() {
   const [newAllowlistDomain, setNewAllowlistDomain] = useState<string>("");
   const [browserConfirmation, setBrowserConfirmation] = useState<any>(null);
   const [selectedJobScreenshot, setSelectedJobScreenshot] = useState<string | null>(null);
+  const [browserEmulationMode, setBrowserEmulationMode] = useState<string>("desktop");
+  const [screenshotAspect, setScreenshotAspect] = useState<"desktop" | "mobile">("desktop");
 
   // Terminal Panel States
   const [terminalLogs, setTerminalLogs] = useState<TerminalLog[]>([]);
@@ -609,6 +612,8 @@ export default function App() {
         if (tab === "browser") {
           const jobsRes = await apiCall<any>("/api/browser/jobs?limit=50").catch(() => ({ jobs: [] }));
           setBrowserJobs(jobsRes.jobs || []);
+          const emuRes = await apiCall<any>("/api/browser/emulation").catch(() => ({ mode: "desktop" }));
+          setBrowserEmulationMode(emuRes.mode || "desktop");
           if (isAdmin()) {
             const listRes = await apiCall<any>("/api/browser/allowlist").catch(() => ({ domains: [] }));
             setAllowlist(listRes.domains || listRes.allowlist || []);
@@ -3315,62 +3320,113 @@ export default function App() {
                     >
                       Approve Action
                     </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Grid block */}
+                  </di              {/* Grid block */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 
-                {/* Allowlist management (Admin only) */}
-                <div className="glass-panel p-5 rounded-2xl border border-slate-800 h-fit space-y-4">
-                  <div className="space-y-1">
-                    <h3 className="font-bold text-slate-200 text-sm">Domain Access Allowlist</h3>
-                    <p className="text-[11px] text-slate-500">Domains the agent is permitted to navigate without requiring manual approvals.</p>
+                {/* Left settings column */}
+                <div className="space-y-6 h-fit">
+                  {/* Allowlist management (Admin only) */}
+                  <div className="glass-panel p-5 rounded-2xl border border-slate-800 h-fit space-y-4">
+                    <div className="space-y-1">
+                      <h3 className="font-bold text-slate-200 text-sm">Domain Access Allowlist</h3>
+                      <p className="text-[11px] text-slate-500">Domains the agent is permitted to navigate without requiring manual approvals.</p>
+                    </div>
+
+                    <form onSubmit={handleAddAllowlistDomain} className="flex space-x-2">
+                      <input
+                        type="text"
+                        required
+                        value={newAllowlistDomain}
+                        onChange={(e) => setNewAllowlistDomain(e.target.value)}
+                        placeholder="e.g. github.com"
+                        className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 focus:outline-none"
+                      />
+                      <button
+                        type="submit"
+                        className="px-3 py-1.5 bg-indigo-650 hover:bg-indigo-650 text-white rounded-xl text-xs font-semibold cursor-pointer"
+                      >
+                        Add
+                      </button>
+                    </form>
+
+                    <div className="border-t border-slate-800/80 pt-3.5 space-y-2">
+                      <span className="text-xs text-slate-400 font-semibold block mb-1">Approved Host Domains</span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {allowlist.map(domain => (
+                          <span key={domain} className="px-2 py-0.5 rounded bg-slate-900 border border-slate-850 text-slate-350 text-[10px] flex items-center space-x-1.5">
+                            <span>{domain}</span>
+                            <button
+                              onClick={() => handleRemoveAllowlistDomain(domain)}
+                              type="button"
+                              className="text-slate-500 hover:text-rose-400 font-bold ml-1 focus:outline-none cursor-pointer"
+                              title="Remove domain"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                        {allowlist.length === 0 && (
+                          <span className="text-[10px] text-slate-600">Allowlist empty. Manual confirmations active for all hosts.</span>
+                        )}
+                      </div>
+                    </div>
                   </div>
 
-                  <form onSubmit={handleAddAllowlistDomain} className="flex space-x-2">
-                    <input
-                      type="text"
-                      required
-                      value={newAllowlistDomain}
-                      onChange={(e) => setNewAllowlistDomain(e.target.value)}
-                      placeholder="e.g. github.com"
-                      className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 focus:outline-none"
-                    />
-                    <button
-                      type="submit"
-                      className="px-3 py-1.5 bg-indigo-650 hover:bg-indigo-650 text-white rounded-xl text-xs font-semibold cursor-pointer"
-                    >
-                      Add
-                    </button>
-                  </form>
-
-                  <div className="border-t border-slate-800/80 pt-3.5 space-y-2">
-                    <span className="text-xs text-slate-400 font-semibold block mb-1">Approved Host Domains</span>
-                    <div className="flex flex-wrap gap-1.5">
-                      {allowlist.map(domain => (
-                        <span key={domain} className="px-2 py-0.5 rounded bg-slate-900 border border-slate-850 text-slate-350 text-[10px] flex items-center space-x-1.5">
-                          <span>{domain}</span>
-                          <button
-                            onClick={() => handleRemoveAllowlistDomain(domain)}
-                            type="button"
-                            className="text-slate-500 hover:text-rose-400 font-bold ml-1 focus:outline-none cursor-pointer"
-                            title="Remove domain"
-                          >
-                            ×
-                          </button>
-                        </span>
-                      ))}
-                      {allowlist.length === 0 && (
-                        <span className="text-[10px] text-slate-600">Allowlist empty. Manual confirmations active for all hosts.</span>
-                      )}
+                  {/* Browser Emulation Mode selection */}
+                  <div className="glass-panel p-5 rounded-2xl border border-slate-800 h-fit space-y-4 animate-fade-in">
+                    <div className="space-y-1">
+                      <h3 className="font-bold text-slate-200 text-sm">Browser Emulation Mode</h3>
+                      <p className="text-[11px] text-slate-500">Select the viewport and client profile for automated tasks.</p>
+                    </div>
+                    <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800/80">
+                      <button
+                        onClick={async () => {
+                          try {
+                            await apiCall("/api/browser/emulation", {
+                              method: "POST",
+                              body: JSON.stringify({ mode: "desktop" })
+                            });
+                            setBrowserEmulationMode("desktop");
+                            triggerToast("Switched to Desktop browser mode", "ok");
+                          } catch (err: any) {
+                            triggerToast(err.message || "Failed to save emulation mode", "err");
+                          }
+                        }}
+                        className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition-all cursor-pointer ${
+                          browserEmulationMode === "desktop"
+                            ? "bg-indigo-650 text-white shadow"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        <span>🖥️ Desktop</span>
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await apiCall("/api/browser/emulation", {
+                              method: "POST",
+                              body: JSON.stringify({ mode: "mobile" })
+                            });
+                            setBrowserEmulationMode("mobile");
+                            triggerToast("Switched to Mobile browser mode", "ok");
+                          } catch (err: any) {
+                            triggerToast(err.message || "Failed to save emulation mode", "err");
+                          }
+                        }}
+                        className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition-all cursor-pointer ${
+                          browserEmulationMode === "mobile"
+                            ? "bg-indigo-650 text-white shadow"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        <span>📱 Mobile</span>
+                      </button>
                     </div>
                   </div>
                 </div>
 
                 {/* Automation Jobs index list */}
-                <div className="lg:col-span-2 glass-panel p-5 rounded-2xl border border-slate-800 space-y-4">
+                <div className="lg:col-span-2 glass-panel p-5 rounded-2xl border border-slate-800 space-y-4">unded-2xl border border-slate-800 space-y-4">
                   <h3 className="font-bold text-slate-200 text-sm">Active Browser Job Outputs</h3>
                   <div className="space-y-3.5 max-h-[500px] overflow-y-auto pr-1">
                     {browserJobs.map(job => (

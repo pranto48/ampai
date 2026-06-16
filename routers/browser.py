@@ -92,6 +92,11 @@ class AllowlistUpdateRequest(BaseModel):
     domains: List[str] = Field(..., max_length=200)
 
 
+class BrowserEmulationRequest(BaseModel):
+    """Request body for POST /api/browser/emulation."""
+    mode: str = Field(..., description="Emulation mode: 'desktop' or 'mobile'")
+
+
 # ── Response models ───────────────────────────────────────────────────────────
 
 
@@ -585,3 +590,28 @@ def update_allowlist(
     )
 
     return AllowlistResponse(domains=cleaned)
+
+
+@router.get("/api/browser/emulation")
+def get_browser_emulation(
+    current_user: UserContext = Depends(require_authenticated_user),
+) -> Dict[str, str]:
+    """Get the current browser emulation mode (desktop or mobile)."""
+    mode = (get_config("browser_emulation_mode") or "desktop").strip().lower()
+    return {"mode": mode}
+
+
+@router.post("/api/browser/emulation")
+def set_browser_emulation(
+    request: BrowserEmulationRequest,
+    current_user: UserContext = Depends(require_authenticated_user),
+) -> Dict[str, str]:
+    """Set the browser emulation mode (desktop or mobile)."""
+    mode = request.mode.strip().lower()
+    if mode not in {"desktop", "mobile"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Emulation mode must be 'desktop' or 'mobile'"
+        )
+    set_config("browser_emulation_mode", mode)
+    return {"status": "success", "mode": mode}

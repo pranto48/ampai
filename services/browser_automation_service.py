@@ -362,7 +362,23 @@ class BrowserAutomationService:
                 self._browser = await pw.chromium.launch(
                     headless=self.config.headless
                 )
-            self._context = await self._browser.new_context()
+            
+            from database import get_config
+            emulation_mode = (get_config("browser_emulation_mode") or "desktop").strip().lower()
+            if emulation_mode == "mobile":
+                logger.info("Initializing Playwright with Mobile viewport and UA emulation.")
+                self._context = await self._browser.new_context(
+                    viewport={"width": 375, "height": 667},
+                    device_scale_factor=2,
+                    is_mobile=True,
+                    has_touch=True,
+                    user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+                )
+            else:
+                logger.info("Initializing Playwright with Desktop viewport emulation.")
+                self._context = await self._browser.new_context(
+                    viewport={"width": 1280, "height": 800}
+                )
             self._page = await self._context.new_page()
         except Exception as exc:
             logger.error("Failed to launch browser: %s", exc)
