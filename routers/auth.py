@@ -126,9 +126,9 @@ def register(payload: UserRegisterRequest, background_tasks: BackgroundTasks):
         raise HTTPException(
             status_code=400, detail="Username and password are required"
         )
-    if len(payload.password) < 4:
+    if len(payload.password) < 8:
         raise HTTPException(
-            status_code=400, detail="Password must be at least 4 characters"
+            status_code=400, detail="Password must be at least 8 characters"
         )
     if get_user(username):
         raise HTTPException(status_code=400, detail="Username already exists")

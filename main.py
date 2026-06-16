@@ -1838,24 +1838,38 @@ def login(payload: UserLoginRequest):
 
 
 @app.post("/api/auth/register")
-def register(payload: UserRegisterRequest):
+def register(payload: UserRegisterRequest, background_tasks: BackgroundTasks):
     username = (payload.username or "").strip()
     if not username or not payload.password:
         raise HTTPException(
             status_code=400, detail="Username and password are required"
         )
-    if len(payload.password) < 4:
+    if len(payload.password) < 8:
         raise HTTPException(
-            status_code=400, detail="Password must be at least 4 characters"
+            status_code=400, detail="Password must be at least 8 characters"
         )
     if get_user(username):
         raise HTTPException(status_code=400, detail="Username already exists")
 
     ok = db_create_user(
-        username=username, role="user", password_hash=pwd_context.hash(payload.password)
+        username=username,
+        role="user",
+        password_hash=pwd_context.hash(payload.password),
+        email=payload.email,
     )
     if not ok:
         raise HTTPException(status_code=400, detail="Failed to create user")
+
+    if payload.email:
+        subject = "Welcome to AmpAI - Registration Confirmed!"
+        body = (
+            f"Hello {username},\n\n"
+            "Your registration on AmpAI has been successfully confirmed. Welcome to the cognitive AI assistant!\n\n"
+            "Best regards,\n"
+            "The AmpAI Team"
+        )
+        background_tasks.add_task(send_email, payload.email, subject, body)
+
     return {"status": "success"}
 
 
