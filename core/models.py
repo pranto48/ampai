@@ -291,6 +291,13 @@ class AdminPasswordChangeRequest(BaseModel):
     new_password: str
 
 
+class UserProfileUpdateRequest(BaseModel):
+    email: Optional[str] = None
+    password: Optional[str] = None
+    avatar: Optional[str] = None
+
+
+
 class AdminUserCreateRequest(BaseModel):
     username: str
     password: str

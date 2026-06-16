@@ -191,6 +191,26 @@ export default function App() {
   const [restoreBusy, setRestoreBusy] = useState<boolean>(false);
   const [configs, setConfigs] = useState<Record<string, string>>({});
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
+
+  // Profile / Self Settings States
+  const [profileEmail, setProfileEmail] = useState("");
+  const [profilePassword, setProfilePassword] = useState("");
+  const [profileConfirmPassword, setProfileConfirmPassword] = useState("");
+  const [profileAvatarUrl, setProfileAvatarUrl] = useState("");
+  const [profileUploadingAvatar, setProfileUploadingAvatar] = useState(false);
+
+  // Admin User CRUD States
+  const [adminCreateUsername, setAdminCreateUsername] = useState("");
+  const [adminCreatePassword, setAdminCreatePassword] = useState("");
+  const [adminCreateEmail, setAdminCreateEmail] = useState("");
+  const [adminCreateRole, setAdminCreateRole] = useState("user");
+  const [adminCreateAllowedCategories, setAdminCreateAllowedCategories] = useState<string[]>([]);
+  const [adminEditingUser, setAdminEditingUser] = useState<AdminUser | null>(null);
+  const [adminEditPassword, setAdminEditPassword] = useState("");
+  const [adminEditEmail, setAdminEditEmail] = useState("");
+  const [adminEditRole, setAdminEditRole] = useState("user");
+  const [adminEditAllowedCategories, setAdminEditAllowedCategories] = useState<string[]>([]);
+
   const [adminStats, setAdminStats] = useState<any>(null);
   const [telegramStatus, setTelegramStatus] = useState<any>(null);
   const [backups, setBackups] = useState<any[]>([]);
@@ -609,6 +629,14 @@ export default function App() {
             setUpdateLogs(statusRes.log_lines || []);
           }
         }
+
+        if (tab === "profile") {
+          const profileRes = await apiCall<any>("/api/auth/me").catch(() => null);
+          if (profileRes) {
+            setProfileEmail(profileRes.email || "");
+            setProfileAvatarUrl(profileRes.avatar || "");
+          }
+        }
       } catch (err: any) {
         triggerToast(err.message || "Failed to load tab data", "err");
       }
@@ -663,6 +691,19 @@ export default function App() {
       triggerToast(err.message || "Failed to trigger update", "err");
     } finally {
       setIsTriggeringUpdate(false);
+    }
+  };
+
+  const handleDeleteUser = async (username: string) => {
+    if (!auth) return;
+    if (!confirm(`Are you sure you want to delete user "${username}"?`)) return;
+    try {
+      await apiCall(`/api/admin/users/${username}`, { method: "DELETE" });
+      triggerToast("User deleted successfully", "ok");
+      const usersRes = await apiCall<any>("/api/admin/users").catch(() => ({ users: [] }));
+      setAdminUsers(usersRes.users || []);
+    } catch (err: any) {
+      triggerToast(err.message || "Failed to delete user", "err");
     }
   };
 
@@ -3740,13 +3781,230 @@ export default function App() {
                 <div className="glass-panel p-5 rounded-2xl border border-slate-800 space-y-4">
                   <h3 className="font-bold text-slate-200 text-sm">System Database Users</h3>
                   
-                  <div className="space-y-3.5 max-h-[300px] overflow-y-auto pr-1">
+                  <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1 scrollbar-thin">
                     {adminUsers.map(user => (
-                      <div key={user.username} className="p-3 rounded-xl bg-slate-900/40 border border-slate-850 flex justify-between items-center text-xs">
-                        <span className="font-semibold text-slate-200">{user.username}</span>
-                        <span className="px-2 py-0.5 rounded bg-slate-950 text-slate-500 font-bold uppercase tracking-wider">{user.role}</span>
+                      <div key={user.username} className="p-3 rounded-xl bg-slate-900/40 border border-slate-850 flex flex-col space-y-2 text-xs">
+                        <div className="flex justify-between items-center">
+                          <div className="flex items-center space-x-2.5">
+                            {/* Avatar or Placeholder */}
+                            <div className="w-8 h-8 rounded-full overflow-hidden border border-slate-800 flex items-center justify-center bg-slate-900 flex-shrink-0">
+                              {user.avatar ? (
+                                <img
+                                  src={user.avatar.startsWith("http") ? user.avatar : `${serverUrl}${user.avatar}`}
+                                  alt={user.username}
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                <span className="text-[10px] font-bold text-slate-400 uppercase">
+                                  {user.username.slice(0, 2)}
+                                </span>
+                              )}
+                            </div>
+                            
+                            <div className="flex flex-col">
+                              <span className="font-semibold text-slate-200">{user.username}</span>
+                              {user.email ? (
+                                <span className="text-[10px] text-slate-500">{user.email}</span>
+                              ) : (
+                                <span className="text-[10px] text-slate-600 italic">No email</span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center space-x-2">
+                            <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold uppercase tracking-wider ${
+                              user.role === "admin"
+                                ? "bg-rose-950/40 text-rose-400 border border-rose-500/20"
+                                : "bg-slate-950 text-slate-500 border border-slate-800"
+                            }`}>
+                              {user.role}
+                            </span>
+                            
+                            {/* Action Buttons */}
+                            <button
+                              onClick={() => {
+                                setAdminEditingUser(user);
+                                setAdminEditEmail(user.email || "");
+                                setAdminEditRole(user.role || "user");
+                                setAdminEditPassword("");
+                                const cats = user.allowed_categories
+                                  ? user.allowed_categories.split(",").map(c => c.trim()).filter(Boolean)
+                                  : ["all"];
+                                setAdminEditAllowedCategories(cats);
+                              }}
+                              className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors cursor-pointer"
+                              title="Edit User"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                            
+                            <button
+                              onClick={() => handleDeleteUser(user.username)}
+                              disabled={user.username === auth?.username}
+                              className={`p-1 rounded transition-colors cursor-pointer ${
+                                user.username === auth?.username
+                                  ? "text-slate-800 cursor-not-allowed"
+                                  : "hover:bg-rose-950/30 text-slate-500 hover:text-rose-400"
+                              }`}
+                              title={user.username === auth?.username ? "Cannot delete self" : "Delete User"}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Allowed Categories tags */}
+                        <div className="flex flex-wrap items-center gap-1.5 pt-1.5 border-t border-slate-900/60">
+                          <span className="text-[9px] text-slate-500 font-semibold uppercase">Memory Permissions:</span>
+                          {(!user.allowed_categories || user.allowed_categories === "all") ? (
+                            <span className="px-1.5 py-0.5 rounded bg-indigo-950/20 text-indigo-400 text-[9px] font-semibold">all</span>
+                          ) : (
+                            user.allowed_categories.split(",").map(c => (
+                              <span key={c} className="px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-850 text-[9px] font-semibold">{c.trim()}</span>
+                            ))
+                          )}
+                        </div>
                       </div>
                     ))}
+                  </div>
+
+                  {/* Add User Form */}
+                  <div className="border-t border-slate-850/80 pt-4 space-y-3">
+                    <h4 className="font-bold text-slate-350 text-[11px] uppercase tracking-wider">Create New Account</h4>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Username</label>
+                        <input
+                          type="text"
+                          value={adminCreateUsername}
+                          onChange={(e) => setAdminCreateUsername(e.target.value)}
+                          placeholder="username"
+                          className="w-full bg-slate-950 border border-slate-850 focus:border-indigo-500 rounded-xl px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Password</label>
+                        <input
+                          type="password"
+                          value={adminCreatePassword}
+                          onChange={(e) => setAdminCreatePassword(e.target.value)}
+                          placeholder="At least 8 chars"
+                          className="w-full bg-slate-950 border border-slate-850 focus:border-indigo-500 rounded-xl px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Email Address</label>
+                        <input
+                          type="email"
+                          value={adminCreateEmail}
+                          onChange={(e) => setAdminCreateEmail(e.target.value)}
+                          placeholder="user@example.com"
+                          className="w-full bg-slate-950 border border-slate-850 focus:border-indigo-500 rounded-xl px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Role</label>
+                        <select
+                          value={adminCreateRole}
+                          onChange={(e) => setAdminCreateRole(e.target.value)}
+                          className="w-full bg-slate-950 border border-slate-850 focus:border-indigo-500 rounded-xl px-2 py-1.5 text-xs text-slate-300 focus:outline-none"
+                        >
+                          <option value="user">User (Restricted)</option>
+                          <option value="admin">Admin (Full Access)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Allowed categories checkboxes */}
+                    <div className="space-y-1">
+                      <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Allowed Memory Categories</label>
+                      <div className="flex flex-wrap gap-1">
+                        {["all", "personal_info", "work", "contacts", "preferences", "general"].map(cat => {
+                          const selected = adminCreateAllowedCategories.includes(cat) || (cat !== "all" && adminCreateAllowedCategories.length === 0);
+                          const isAllSelected = adminCreateAllowedCategories.includes("all") || adminCreateAllowedCategories.length === 0;
+                          const active = cat === "all" ? isAllSelected : selected && !isAllSelected;
+                          return (
+                            <button
+                              key={cat}
+                              type="button"
+                              onClick={() => {
+                                if (cat === "all") {
+                                  setAdminCreateAllowedCategories(["all"]);
+                                } else {
+                                  let next = adminCreateAllowedCategories.filter(c => c !== "all");
+                                  if (next.includes(cat)) {
+                                    next = next.filter(c => c !== cat);
+                                  } else {
+                                    next.push(cat);
+                                  }
+                                  if (next.length === 0) next = ["all"];
+                                  setAdminCreateAllowedCategories(next);
+                                }
+                              }}
+                              className={`px-2 py-0.5 rounded text-[10px] font-semibold border cursor-pointer transition-all ${
+                                active
+                                  ? "bg-indigo-650/30 text-indigo-400 border-indigo-500/50"
+                                  : "bg-slate-950 text-slate-500 border-slate-850 hover:text-slate-400"
+                              }`}
+                            >
+                              {cat}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end pt-1">
+                      <button
+                        onClick={async () => {
+                          if (!adminCreateUsername.trim() || !adminCreatePassword) {
+                            triggerToast("Username and Password are required", "err");
+                            return;
+                          }
+                          if (adminCreatePassword.length < 8) {
+                            triggerToast("Password must be at least 8 characters", "err");
+                            return;
+                          }
+                          try {
+                            const cats = adminCreateAllowedCategories.includes("all") || adminCreateAllowedCategories.length === 0
+                              ? "all"
+                              : adminCreateAllowedCategories.join(",");
+                              
+                            await apiCall("/api/admin/users", {
+                              method: "POST",
+                              body: JSON.stringify({
+                                username: adminCreateUsername.trim(),
+                                password: adminCreatePassword,
+                                email: adminCreateEmail.trim() || undefined,
+                                role: adminCreateRole,
+                                allowed_categories: cats
+                              })
+                            });
+                            triggerToast("User created successfully", "ok");
+                            setAdminCreateUsername("");
+                            setAdminCreatePassword("");
+                            setAdminCreateEmail("");
+                            setAdminCreateRole("user");
+                            setAdminCreateAllowedCategories(["all"]);
+                            
+                            // refresh
+                            const usersRes = await apiCall<any>("/api/admin/users").catch(() => ({ users: [] }));
+                            setAdminUsers(usersRes.users || []);
+                          } catch (err: any) {
+                            triggerToast(err.message || "Failed to create user", "err");
+                          }
+                        }}
+                        className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-bold rounded-xl shadow cursor-pointer transition-all"
+                      >
+                        Create User
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -4031,6 +4289,321 @@ export default function App() {
                 </div>
               )}
 
+              {/* Edit User Modal Overlay */}
+              {adminEditingUser && (
+                <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setAdminEditingUser(null)}>
+                  <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-md flex flex-col space-y-4 shadow-2xl relative" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                      <div className="flex items-center space-x-2">
+                        <Edit2 className="w-5 h-5 text-indigo-400" />
+                        <h3 className="font-bold text-slate-200 text-sm">Edit User: {adminEditingUser.username}</h3>
+                      </div>
+                      <button onClick={() => setAdminEditingUser(null)} className="text-slate-400 hover:text-slate-200">
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <div className="space-y-4">
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Email Address</label>
+                        <input
+                          type="email"
+                          value={adminEditEmail}
+                          onChange={(e) => setAdminEditEmail(e.target.value)}
+                          placeholder="user@example.com"
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200 focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Reset Password (Optional)</label>
+                        <input
+                          type="password"
+                          value={adminEditPassword}
+                          onChange={(e) => setAdminEditPassword(e.target.value)}
+                          placeholder="Leave blank to keep current"
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200 focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Role</label>
+                        <select
+                          value={adminEditRole}
+                          onChange={(e) => setAdminEditRole(e.target.value)}
+                          disabled={adminEditingUser.username === auth?.username}
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300 focus:outline-none disabled:opacity-50"
+                        >
+                          <option value="user">User (Restricted)</option>
+                          <option value="admin">Admin (Full Access)</option>
+                        </select>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Allowed Memory Categories</label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {["all", "personal_info", "work", "contacts", "preferences", "general"].map(cat => {
+                            const selected = adminEditAllowedCategories.includes(cat) || (cat !== "all" && adminEditAllowedCategories.length === 0);
+                            const isAllSelected = adminEditAllowedCategories.includes("all") || adminEditAllowedCategories.length === 0;
+                            const active = cat === "all" ? isAllSelected : selected && !isAllSelected;
+                            return (
+                              <button
+                                key={cat}
+                                type="button"
+                                onClick={() => {
+                                  if (cat === "all") {
+                                    setAdminEditAllowedCategories(["all"]);
+                                  } else {
+                                    let next = adminEditAllowedCategories.filter(c => c !== "all");
+                                    if (next.includes(cat)) {
+                                      next = next.filter(c => c !== cat);
+                                    } else {
+                                      next.push(cat);
+                                    }
+                                    if (next.length === 0) next = ["all"];
+                                    setAdminEditAllowedCategories(next);
+                                  }
+                                }}
+                                className={`px-2 py-0.5 rounded text-[10px] font-semibold border cursor-pointer transition-all ${
+                                  active
+                                    ? "bg-indigo-650/30 text-indigo-400 border-indigo-500/50"
+                                    : "bg-slate-950 text-slate-500 border-slate-850 hover:text-slate-400"
+                                }`}
+                              >
+                                {cat}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end space-x-2 pt-2 border-t border-slate-800/80">
+                      <button
+                        onClick={() => setAdminEditingUser(null)}
+                        className="px-3.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-350 hover:bg-slate-800 text-xs font-semibold cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={async () => {
+                          if (adminEditPassword && adminEditPassword.length < 8) {
+                            triggerToast("Password must be at least 8 characters", "err");
+                            return;
+                          }
+                          try {
+                            const cats = adminEditAllowedCategories.includes("all") || adminEditAllowedCategories.length === 0
+                              ? "all"
+                              : adminEditAllowedCategories.join(",");
+                            
+                            const body: any = {
+                              role: adminEditRole,
+                              email: adminEditEmail.trim() || "",
+                              allowed_categories: cats
+                            };
+                            if (adminEditPassword) {
+                              body.password = adminEditPassword;
+                            }
+                            
+                            await apiCall(`/api/admin/users/${adminEditingUser.username}`, {
+                              method: "PATCH",
+                              body: JSON.stringify(body)
+                            });
+                            triggerToast("User updated successfully", "ok");
+                            setAdminEditingUser(null);
+                            
+                            // refresh
+                            const usersRes = await apiCall<any>("/api/admin/users").catch(() => ({ users: [] }));
+                            setAdminUsers(usersRes.users || []);
+                          } catch (err: any) {
+                            triggerToast(err.message || "Failed to update user", "err");
+                          }
+                        }}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-bold rounded-xl shadow cursor-pointer transition-all"
+                      >
+                        Save Changes
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+            </div>
+          )}
+
+          {/* ==========================================
+              MY PROFILE VIEW
+             ========================================== */}
+          {tab === "profile" && auth && (
+            <div className="space-y-6 max-w-2xl mx-auto">
+              <div className="flex justify-between items-center border-b border-slate-800 pb-4">
+                <div>
+                  <h2 className="text-xl font-bold text-slate-200 flex items-center space-x-2">
+                    <User className="w-6 h-6 text-indigo-400" />
+                    <span>My Profile & Settings</span>
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-1">Manage your account profile credentials, avatar, and settings.</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {/* Left side: Avatar details */}
+                <div className="glass-panel p-5 rounded-2xl border border-slate-800 flex flex-col items-center space-y-4">
+                  <h3 className="font-bold text-slate-200 text-xs tracking-wider uppercase">Profile Picture</h3>
+                  <div className="relative group">
+                    <div className="w-28 h-28 rounded-full overflow-hidden border-2 border-slate-800 flex items-center justify-center bg-slate-900 shadow-inner">
+                      {profileAvatarUrl ? (
+                        <img
+                          src={profileAvatarUrl.startsWith("http") ? profileAvatarUrl : `${serverUrl}${profileAvatarUrl}`}
+                          alt="Avatar"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <span className="text-3xl font-bold text-indigo-400 uppercase">
+                          {auth.username.slice(0, 2)}
+                        </span>
+                      )}
+                    </div>
+                    <label className="absolute inset-0 bg-slate-950/70 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center rounded-full cursor-pointer transition-all duration-200 text-[10px] text-slate-200 font-bold space-y-1">
+                      <Upload className="w-4 h-4" />
+                      <span>{profileUploadingAvatar ? "Uploading..." : "Upload Photo"}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        disabled={profileUploadingAvatar}
+                        onChange={async (e) => {
+                          if (e.target.files && e.target.files[0]) {
+                            const file = e.target.files[0];
+                            const formData = new FormData();
+                            formData.append("file", file);
+                            setProfileUploadingAvatar(true);
+                            try {
+                              const res = await fetch(`${serverUrl}/api/users/me/avatar`, {
+                                method: "POST",
+                                headers: {
+                                  "Authorization": `Bearer ${auth.token}`
+                                },
+                                body: formData
+                              });
+                              if (!res.ok) {
+                                const errData = await res.json();
+                                throw new Error(errData.detail || "Failed to upload avatar");
+                              }
+                              const data = await res.json();
+                              setProfileAvatarUrl(data.avatar_url);
+                              triggerToast("Avatar updated successfully", "ok");
+                            } catch (err: any) {
+                              triggerToast(err.message || "Failed to upload avatar", "err");
+                            } finally {
+                              setProfileUploadingAvatar(false);
+                            }
+                          }
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <p className="text-[10px] text-slate-500 text-center leading-normal">
+                    Supports JPG, PNG, or WEBP.<br/>Max file size 2MB.
+                  </p>
+                </div>
+
+                {/* Right side: Form details */}
+                <div className="md:col-span-2 glass-panel p-5 rounded-2xl border border-slate-800 space-y-4">
+                  <h3 className="font-bold text-slate-200 text-xs tracking-wider uppercase">Account Details</h3>
+
+                  <div className="space-y-4">
+                    {/* Username (Readonly) */}
+                    <div className="space-y-1">
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">Username</label>
+                      <input
+                        type="text"
+                        value={auth.username}
+                        disabled
+                        className="w-full bg-slate-900 border border-slate-850 text-slate-400 rounded-xl px-3.5 py-2 text-xs cursor-not-allowed"
+                      />
+                    </div>
+
+                    {/* Email address */}
+                    <div className="space-y-1">
+                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Email Address</label>
+                      <input
+                        type="email"
+                        value={profileEmail}
+                        onChange={(e) => setProfileEmail(e.target.value)}
+                        placeholder="yourname@domain.com"
+                        className="w-full bg-slate-950 border border-slate-850 focus:border-indigo-500 rounded-xl px-3.5 py-2 text-xs text-slate-200 focus:outline-none transition-colors"
+                      />
+                    </div>
+
+                    {/* Password */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">New Password</label>
+                        <input
+                          type="password"
+                          value={profilePassword}
+                          onChange={(e) => setProfilePassword(e.target.value)}
+                          placeholder="••••••••"
+                          className="w-full bg-slate-950 border border-slate-850 focus:border-indigo-500 rounded-xl px-3.5 py-2 text-xs text-slate-200 focus:outline-none transition-colors"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Confirm Password</label>
+                        <input
+                          type="password"
+                          value={profileConfirmPassword}
+                          onChange={(e) => setProfileConfirmPassword(e.target.value)}
+                          placeholder="••••••••"
+                          className="w-full bg-slate-950 border border-slate-850 focus:border-indigo-500 rounded-xl px-3.5 py-2 text-xs text-slate-200 focus:outline-none transition-colors"
+                        />
+                      </div>
+                    </div>
+
+                    {profilePassword && (
+                      <div className="p-3 bg-slate-900/60 rounded-xl border border-slate-850 text-[10px] text-slate-500">
+                        Leave password fields blank if you do not wish to change your current password. Password must be at least 8 characters.
+                      </div>
+                    )}
+
+                    <div className="flex justify-end pt-2 border-t border-slate-800/80">
+                      <button
+                        onClick={async () => {
+                          if (profilePassword && profilePassword !== profileConfirmPassword) {
+                            triggerToast("Passwords do not match", "err");
+                            return;
+                          }
+                          if (profilePassword && profilePassword.length < 8) {
+                            triggerToast("Password must be at least 8 characters", "err");
+                            return;
+                          }
+                          try {
+                            const body: any = {
+                              email: profileEmail,
+                            };
+                            if (profilePassword) {
+                              body.password = profilePassword;
+                            }
+                            await apiCall<any>("/api/users/me", {
+                              method: "PATCH",
+                              body: JSON.stringify(body)
+                            });
+                            triggerToast("Profile updated successfully", "ok");
+                            setProfilePassword("");
+                            setProfileConfirmPassword("");
+                          } catch (err: any) {
+                            triggerToast(err.message || "Failed to update profile", "err");
+                          }
+                        }}
+                        className="px-4 py-2 bg-indigo-650 hover:bg-indigo-600 active:scale-95 text-white font-bold text-xs rounded-xl shadow transition-all cursor-pointer"
+                      >
+                        Update Settings
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 

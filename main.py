@@ -4811,8 +4811,6 @@ def admin_update_user(
             )
             background_tasks.add_task(send_email, recipient_email, subject, body)
 
-    return {"status": "success"}ord_hash):
-        raise HTTPException(status_code=500, detail="Failed to update user")
     return {"status": "success"}
 
 

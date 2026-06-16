@@ -20,6 +20,7 @@ from core.models import (
     WorkspaceCreateRequest,
     WorkspaceMemberUpdateRequest,
     WorkspaceShareSessionRequest,
+    UserProfileUpdateRequest,
 )
 from database import (
     get_config,
@@ -275,18 +276,18 @@ UPLOAD_DIR = os.path.join(
 
 @router.patch("/api/users/me")
 def update_my_profile(
-    request: dict,
+    request: UserProfileUpdateRequest,
     current_user: UserContext = Depends(require_authenticated_user)
 ):
-    email = request.get("email")
-    password = request.get("password")
-    avatar = request.get("avatar")
+    email = request.email
+    password = request.password
+    avatar = request.avatar
     
     password_hash = None
     if password:
         password = password.strip()
-        if len(password) < 4:
-            raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+        if len(password) < 8:
+            raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
         password_hash = pwd_context.hash(password)
 
     if email is not None:
