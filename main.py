@@ -146,6 +146,8 @@ from database import (
 )
 from database import (
     update_user as db_update_user,
+    get_user,
+    _auto_infer_memory_category,
 )
 from fastapi import (
     Depends,
@@ -158,6 +160,7 @@ from fastapi import (
     Request,
     UploadFile,
     status,
+    BackgroundTasks,
 )
 
 # NOTE:
@@ -177,6 +180,7 @@ from integrations.gmail_api import (
 from integrations.telegram_api import delete_webhook, get_me, send_message, set_webhook
 from jose import JWTError, jwt
 from langchain_community.chat_message_histories import SQLChatMessageHistory
+from core.helpers import send_email
 from memory_indexer import MemoryIndexer
 from memory_persistence import memory_persistence_manager
 from passlib.context import CryptContext
@@ -1857,12 +1861,30 @@ def register(payload: UserRegisterRequest):
 
 @app.get("/api/auth/whoami")
 def whoami(current_user: UserContext = Depends(require_authenticated_user)):
-    return {"username": current_user.username, "role": current_user.role}
+    user_info = get_user(current_user.username)
+    if not user_info:
+        return {"username": current_user.username, "role": current_user.role}
+    return {
+        "username": user_info["username"],
+        "role": user_info["role"],
+        "email": user_info.get("email"),
+        "avatar": user_info.get("avatar"),
+        "allowed_categories": user_info.get("allowed_categories")
+    }
 
 
 @app.get("/api/auth/me")
 def me(current_user: UserContext = Depends(require_authenticated_user)):
-    return {"username": current_user.username, "role": current_user.role}
+    user_info = get_user(current_user.username)
+    if not user_info:
+        return {"username": current_user.username, "role": current_user.role}
+    return {
+        "username": user_info["username"],
+        "role": user_info["role"],
+        "email": user_info.get("email"),
+        "avatar": user_info.get("avatar"),
+        "allowed_categories": user_info.get("allowed_categories")
+    }
 
 
 @app.post("/api/auth/logout")
@@ -4687,10 +4709,14 @@ def admin_list_users(_: UserContext = Depends(require_admin_user)):
 
 @app.post("/api/admin/users")
 def admin_create_user(
-    request: AdminUserCreateRequest, _: UserContext = Depends(require_admin_user)
+    request: AdminUserCreateRequest,
+    background_tasks: BackgroundTasks,
+    _: UserContext = Depends(require_admin_user)
 ):
     username = (request.username or "").strip()
     role = (request.role or "user").strip().lower()
+    email = (request.email or "").strip() or None
+    allowed_categories = (request.allowed_categories or "all").strip()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
     if len(request.password or "") < 8:
@@ -4702,9 +4728,28 @@ def admin_create_user(
     if get_user(username):
         raise HTTPException(status_code=409, detail="User already exists")
     if not db_create_user(
-        username=username, role=role, password_hash=pwd_context.hash(request.password)
+        username=username,
+        role=role,
+        password_hash=pwd_context.hash(request.password),
+        email=email,
+        allowed_categories=allowed_categories
     ):
         raise HTTPException(status_code=500, detail="Failed to create user")
+
+    if email:
+        subject = "Account Created - Welcome to AmpAI"
+        body = (
+            f"Hello {username},\n\n"
+            "An administrator has created an account for you on AmpAI.\n\n"
+            f"Username: {username}\n"
+            f"Role: {role}\n"
+            f"Allowed Categories: {allowed_categories}\n\n"
+            "Please contact your administrator to obtain your password.\n\n"
+            "Best regards,\n"
+            "The AmpAI Team"
+        )
+        background_tasks.add_task(send_email, email, subject, body)
+
     return {"status": "success"}
 
 
@@ -4712,13 +4757,13 @@ def admin_create_user(
 def admin_update_user(
     username: str,
     request: AdminUserUpdateRequest,
+    background_tasks: BackgroundTasks,
     current_user: UserContext = Depends(require_admin_user),
 ):
     username = username.strip()
     existing = get_user(username)
     if not existing:
         raise HTTPException(status_code=404, detail="User not found")
-
     role = request.role.strip().lower() if request.role is not None else None
     if role is not None and role not in {"admin", "user"}:
         raise HTTPException(status_code=400, detail="Role must be admin or user")
@@ -4730,9 +4775,43 @@ def admin_update_user(
         raise HTTPException(
             status_code=400, detail="You cannot remove your own admin role"
         )
-
     password_hash = pwd_context.hash(request.password) if request.password else None
-    if not db_update_user(username=username, role=role, password_hash=password_hash):
+    email = request.email.strip() if request.email is not None else None
+    allowed_categories = request.allowed_categories.strip() if request.allowed_categories is not None else None
+
+    if not db_update_user(
+        username=username,
+        role=role,
+        password_hash=password_hash,
+        email=email,
+        allowed_categories=allowed_categories
+    ):
+        raise HTTPException(status_code=500, detail="Failed to update user")
+
+    recipient_email = email or existing.get("email")
+    if recipient_email:
+        if request.password is not None:
+            subject = "Your Password Has Been Reset - AmpAI"
+            body = (
+                f"Hello {username},\n\n"
+                "An administrator has reset your password on AmpAI. Please check with your administrator for the new password.\n\n"
+                "Best regards,\n"
+                "The AmpAI Team"
+            )
+            background_tasks.add_task(send_email, recipient_email, subject, body)
+        elif allowed_categories is not None or role is not None:
+            subject = "Your Account Settings Have Been Updated - AmpAI"
+            body = (
+                f"Hello {username},\n\n"
+                "An administrator has updated your account settings on AmpAI.\n\n"
+                f"Role: {role or existing.get('role')}\n"
+                f"Allowed Categories: {allowed_categories or existing.get('allowed_categories')}\n\n"
+                "Best regards,\n"
+                "The AmpAI Team"
+            )
+            background_tasks.add_task(send_email, recipient_email, subject, body)
+
+    return {"status": "success"}ord_hash):
         raise HTTPException(status_code=500, detail="Failed to update user")
     return {"status": "success"}
 
@@ -5949,6 +6028,22 @@ def api_add_core_memory(request: dict, user=Depends(require_authenticated_user))
     category = request.get("category")
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
+
+    if user.role != "admin":
+        user_profile = get_user(user.username)
+        if user_profile:
+            allowed_str = user_profile.get("allowed_categories") or "all"
+            if allowed_str != "all":
+                allowed = {c.strip().lower() for c in allowed_str.split(",") if c.strip()}
+                resolved_category = category
+                if not resolved_category or resolved_category == "auto":
+                    resolved_category = _auto_infer_memory_category(fact)
+                if resolved_category.strip().lower() not in allowed:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Permission denied: You do not have permission to use the category '{resolved_category}'"
+                    )
+
     success = add_core_memory(fact, user.username, category=category)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save core memory")
@@ -5974,6 +6069,22 @@ def api_edit_core_memory(
     category = request.get("category")
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
+
+    if user.role != "admin":
+        user_profile = get_user(user.username)
+        if user_profile:
+            allowed_str = user_profile.get("allowed_categories") or "all"
+            if allowed_str != "all":
+                allowed = {c.strip().lower() for c in allowed_str.split(",") if c.strip()}
+                resolved_category = category
+                if not resolved_category or resolved_category == "auto":
+                    resolved_category = _auto_infer_memory_category(fact)
+                if resolved_category.strip().lower() not in allowed:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Permission denied: You do not have permission to use the category '{resolved_category}'"
+                    )
+
     success = update_core_memory(mem_id, fact, category)
     if not success:
         raise HTTPException(status_code=404, detail="Memory not found or unchanged")

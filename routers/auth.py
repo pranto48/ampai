@@ -157,12 +157,30 @@ def register(payload: UserRegisterRequest, background_tasks: BackgroundTasks):
 
 @router.get("/whoami")
 def whoami(current_user: UserContext = Depends(require_authenticated_user)):
-    return {"username": current_user.username, "role": current_user.role}
+    user_info = get_user(current_user.username)
+    if not user_info:
+        return {"username": current_user.username, "role": current_user.role}
+    return {
+        "username": user_info["username"],
+        "role": user_info["role"],
+        "email": user_info.get("email"),
+        "avatar": user_info.get("avatar"),
+        "allowed_categories": user_info.get("allowed_categories")
+    }
 
 
 @router.get("/me")
 def me(current_user: UserContext = Depends(require_authenticated_user)):
-    return {"username": current_user.username, "role": current_user.role}
+    user_info = get_user(current_user.username)
+    if not user_info:
+        return {"username": current_user.username, "role": current_user.role}
+    return {
+        "username": user_info["username"],
+        "role": user_info["role"],
+        "email": user_info.get("email"),
+        "avatar": user_info.get("avatar"),
+        "allowed_categories": user_info.get("allowed_categories")
+    }
 
 
 @router.post("/logout")

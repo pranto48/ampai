@@ -29,8 +29,10 @@ from database import (
     upsert_user_chat_preferences,
     upsert_user_memory_policy,
     upsert_user_notification_preferences,
+    update_user,
+    get_user,
 )
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
 
 router = APIRouter(tags=["users"])
 
@@ -257,3 +259,63 @@ def share_session_to_workspace(
         session_ids.append(session_id)
     _save_workspace_store(rows)
     return {"status": "success", "workspace": target}
+
+
+# ── User self-profile updates ───────────────────────────────────────────────
+
+from passlib.context import CryptContext
+import os
+import shutil
+
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+UPLOAD_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "data", "uploads"
+)
+
+
+@router.patch("/api/users/me")
+def update_my_profile(
+    request: dict,
+    current_user: UserContext = Depends(require_authenticated_user)
+):
+    email = request.get("email")
+    password = request.get("password")
+    avatar = request.get("avatar")
+    
+    password_hash = None
+    if password:
+        password = password.strip()
+        if len(password) < 4:
+            raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+        password_hash = pwd_context.hash(password)
+
+    if email is not None:
+        email = email.strip() or None
+
+    success = update_user(
+        username=current_user.username,
+        password_hash=password_hash,
+        email=email,
+        avatar=avatar
+    )
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to update profile or nothing changed")
+    
+    return {"status": "success", "user": get_user(current_user.username)}
+
+
+@router.post("/api/users/me/avatar")
+def upload_my_avatar(
+    file: UploadFile = File(...),
+    current_user: UserContext = Depends(require_authenticated_user)
+):
+    os.makedirs(os.path.join(UPLOAD_DIR, "avatars"), exist_ok=True)
+    file_ext = os.path.splitext(file.filename)[1]
+    filename = f"avatar_{current_user.username}{file_ext}"
+    file_path = os.path.join(UPLOAD_DIR, "avatars", filename)
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    avatar_url = f"/uploads/avatars/{filename}"
+    update_user(username=current_user.username, avatar=avatar_url)
+    return {"status": "success", "avatar_url": avatar_url}

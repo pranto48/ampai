@@ -1493,9 +1493,10 @@ export default function App() {
               { id: "browser", label: "Web Automation", icon: Globe },
               { id: "terminal", label: "Shell Terminal", icon: Terminal },
               { id: "ai", label: "AI Models & Personas", icon: Sliders },
+              { id: "profile", label: "My Profile", icon: User },
               ...(isAdmin() ? [
                 { id: "settings", label: "System Config", icon: Shield },
-                { id: "admin", label: "Admin Console", icon: User }
+                { id: "admin", label: "Admin Console", icon: ShieldAlert }
               ] : [])
             ].map(item => {
               const Icon = item.icon;

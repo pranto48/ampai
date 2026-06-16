@@ -57,6 +57,8 @@ from database import (
     unshare_session_from_group,
     update_core_memory,
     update_memory_candidate_status,
+    get_user,
+    _auto_infer_memory_category,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
@@ -515,6 +517,22 @@ def api_add_core_memory(
     category = request.get("category")
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
+
+    if user.role != "admin":
+        user_profile = get_user(user.username)
+        if user_profile:
+            allowed_str = user_profile.get("allowed_categories") or "all"
+            if allowed_str != "all":
+                allowed = {c.strip().lower() for c in allowed_str.split(",") if c.strip()}
+                resolved_category = category
+                if not resolved_category or resolved_category == "auto":
+                    resolved_category = _auto_infer_memory_category(fact)
+                if resolved_category.strip().lower() not in allowed:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Permission denied: You do not have permission to use the category '{resolved_category}'"
+                    )
+
     success = add_core_memory(fact, user.username, category=category)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save core memory")
@@ -540,6 +558,22 @@ def api_edit_core_memory(
     category = request.get("category")
     if not fact:
         raise HTTPException(status_code=400, detail="fact is required")
+
+    if user.role != "admin":
+        user_profile = get_user(user.username)
+        if user_profile:
+            allowed_str = user_profile.get("allowed_categories") or "all"
+            if allowed_str != "all":
+                allowed = {c.strip().lower() for c in allowed_str.split(",") if c.strip()}
+                resolved_category = category
+                if not resolved_category or resolved_category == "auto":
+                    resolved_category = _auto_infer_memory_category(fact)
+                if resolved_category.strip().lower() not in allowed:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Permission denied: You do not have permission to use the category '{resolved_category}'"
+                    )
+
     success = update_core_memory(mem_id, fact, category)
     if not success:
         raise HTTPException(status_code=404, detail="Memory not found or unchanged")
