@@ -56,6 +56,19 @@ import { S, Auth, Msg, Session, CoreMem, User as AdminUser, Attach, Persona, Mem
 
 // Constants and defaults
 const SESSK = "ampai.sessionId";
+
+const PROVIDER_EMOJIS: Record<string, string> = {
+  ollama: "🦙",
+  generic: "🏠",
+  anythingllm: "📚",
+  openrouter: "🔀",
+  openai: "✨",
+  gemini: "🌟",
+  anthropic: "🔴",
+  groq: "⚡",
+  mistral: "🌪️",
+  cohere: "🔵",
+};
 const ACCENT_COLORS = [
   { name: "Indigo", value: "#6366f1" },
   { name: "Purple", value: "#8b5cf6" },
@@ -333,6 +346,30 @@ export default function App() {
     S.serverUrl = serverUrl;
     S.health = health;
   }, [serverUrl, health]);
+
+  // Fetch model options/providers on initial auth / login
+  useEffect(() => {
+    if (!auth) return;
+    const fetchOptions = async () => {
+      try {
+        const optionsRes = await apiCall<any>("/api/models/options");
+        if (optionsRes) {
+          setProviders(optionsRes.providers || []);
+          const lists = optionsRes.models || {};
+          const parsedLists: Record<string, any[]> = {};
+          for (const [p, ml] of Object.entries(lists)) {
+            if (Array.isArray(ml)) {
+              parsedLists[p] = ml.map(m => ({ id: m, name: m }));
+            }
+          }
+          setProviderModels(prev => ({ ...parsedLists, ...prev }));
+        }
+      } catch (err) {
+        console.error("Failed to load models options", err);
+      }
+    };
+    fetchOptions();
+  }, [auth]);
 
   const isAdmin = () => auth?.role === "admin";
 
@@ -2255,11 +2292,21 @@ export default function App() {
                       onChange={(e) => setModelType(e.target.value)}
                       className="bg-slate-900 border border-slate-800 px-2.5 py-1.5 rounded-xl text-xs text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
                     >
-                      <option value="ollama">🦙 Ollama</option>
-                      <option value="openai">✨ OpenAI</option>
-                      <option value="gemini">🌟 Gemini</option>
-                      <option value="anthropic">🔴 Anthropic</option>
-                      <option value="openrouter">🔀 OpenRouter</option>
+                      {providers.map((prov) => (
+                        <option key={prov.value} value={prov.value}>
+                          {PROVIDER_EMOJIS[prov.value] || "🤖"} {prov.label}
+                        </option>
+                      ))}
+                      {providers.length === 0 && (
+                        <>
+                          <option value="ollama">🦙 Ollama</option>
+                          <option value="generic">🏠 LM Studio</option>
+                          <option value="openai">✨ OpenAI</option>
+                          <option value="gemini">🌟 Gemini</option>
+                          <option value="anthropic">🔴 Anthropic</option>
+                          <option value="openrouter">🔀 OpenRouter</option>
+                        </>
+                      )}
                     </select>
 
                     <select
