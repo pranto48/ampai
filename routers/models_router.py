@@ -55,6 +55,7 @@ def _timed_probe(
 
 @router.get("/api/models/options")
 def get_model_options(_: UserContext = Depends(require_authenticated_user)):
+    import json
     configs = get_all_configs()
     local_only_mode = str(configs.get("local_only_mode", "false")).strip().lower() in {
         "1",
@@ -75,17 +76,56 @@ def get_model_options(_: UserContext = Depends(require_authenticated_user)):
         providers = [
             p for p in providers if p["value"] in {"ollama", "generic", "anythingllm"}
         ]
+
+    # Dynamically fetch local Ollama models if reachable
+    ollama_models = []
+    try:
+        base = (configs.get("ollama_base_url") or "http://host.docker.internal:11434").rstrip("/")
+        req = urllib.request.Request(f"{base}/api/tags")
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        for m in data.get("models", []):
+            name = m.get("name", "")
+            if name:
+                ollama_models.append(name)
+    except Exception:
+        pass
+    if not ollama_models:
+        ollama_models = _parse_config_list(
+            configs.get("ollama_model_list"),
+            ["llama3.2", "gemma", "mistral", "qwen2.5"],
+        )
+
+    # Dynamically fetch local Generic (LM Studio) models if reachable
+    generic_models = []
+    try:
+        base = (configs.get("generic_base_url") or "").strip().rstrip("/")
+        if base:
+            if not base.endswith("/v1"):
+                base += "/v1"
+            headers = {}
+            if configs.get("generic_api_key"):
+                headers["Authorization"] = f"Bearer {configs['generic_api_key']}"
+            req = urllib.request.Request(f"{base}/models", headers=headers)
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for m in data.get("data", []):
+                model_id = m.get("id", "")
+                if model_id:
+                    generic_models.append(model_id)
+    except Exception:
+        pass
+    if not generic_models:
+        generic_models = _parse_config_list(
+            configs.get("generic_model_list"),
+            ["local-model", "llama-3.1-8b-instruct", "qwen2.5-7b-instruct"],
+        )
+
     return {
         "providers": providers,
         "models": {
-            "ollama": _parse_config_list(
-                configs.get("ollama_model_list"),
-                ["llama3.2", "gemma", "mistral", "qwen2.5"],
-            ),
-            "generic": _parse_config_list(
-                configs.get("generic_model_list"),
-                ["local-model", "llama-3.1-8b-instruct", "qwen2.5-7b-instruct"],
-            ),
+            "ollama": ollama_models,
+            "generic": generic_models,
             "anythingllm": _parse_config_list(
                 configs.get("anythingllm_workspace_list"),
                 ["my-workspace"],
@@ -209,13 +249,15 @@ def fetch_provider_models(
                     })
 
         elif provider == "generic":
-            base = (configs.get("generic_base_url") or "").rstrip("/")
+            base = (configs.get("generic_base_url") or "").strip().rstrip("/")
             if not base:
                 raise HTTPException(status_code=400, detail="Generic base URL not configured")
+            if not base.endswith("/v1"):
+                base += "/v1"
             headers = {}
             if configs.get("generic_api_key"):
                 headers["Authorization"] = f"Bearer {configs['generic_api_key']}"
-            req = urllib.request.Request(f"{base}/v1/models", headers=headers)
+            req = urllib.request.Request(f"{base}/models", headers=headers)
             with urllib.request.urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             for m in data.get("data", []):
@@ -419,13 +461,15 @@ def _check_provider_health(provider: str, configs: Dict[str, Any]) -> Dict[str, 
                 return {"name": "anthropic", "ok": ok, "latency_ms": latency}
 
         elif provider == "generic":
-            base = (configs.get("generic_base_url") or "").rstrip("/")
+            base = (configs.get("generic_base_url") or "").strip().rstrip("/")
             if not base:
                 return {"name": "generic", "ok": False, "latency_ms": 0, "reason": "base_url_not_configured"}
+            if not base.endswith("/v1"):
+                base += "/v1"
             headers = {}
             if configs.get("generic_api_key"):
                 headers["Authorization"] = f"Bearer {configs.get('generic_api_key')}"
-            result = _timed_probe(f"{base}/v1/models", headers=headers, timeout=8)
+            result = _timed_probe(f"{base}/models", headers=headers, timeout=8)
             return {"name": "generic", "ok": result["ok"], "latency_ms": result["latency_ms"]}
 
         elif provider == "ampai_default":
@@ -499,17 +543,19 @@ def test_provider_connection(
             ).rstrip("/")
             return _timed_probe(f"{base}/api/tags")
         if provider == "generic":
-            base = (configs.get("generic_base_url") or "").rstrip("/")
+            base = (configs.get("generic_base_url") or "").strip().rstrip("/")
             if not base:
                 raise HTTPException(
                     status_code=400, detail="generic_base_url is not configured"
                 )
+            if not base.endswith("/v1"):
+                base += "/v1"
             headers = (
                 {"Authorization": f"Bearer {configs.get('generic_api_key') or ''}"}
                 if configs.get("generic_api_key")
                 else {}
             )
-            result = _timed_probe(f"{base}/v1/models", headers=headers)
+            result = _timed_probe(f"{base}/models", headers=headers)
             result["model"] = (configs.get("generic_model") or "").strip() or None
             return result
         if provider == "openrouter":

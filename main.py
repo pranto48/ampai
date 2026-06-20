@@ -5365,17 +5365,19 @@ def test_provider_connection(
             ).rstrip("/")
             return _timed_probe(f"{base}/api/tags")
         if provider == "generic":
-            base = (configs.get("generic_base_url") or "").rstrip("/")
+            base = (configs.get("generic_base_url") or "").strip().rstrip("/")
             if not base:
                 raise HTTPException(
                     status_code=400, detail="generic_base_url is not configured"
                 )
+            if not base.endswith("/v1"):
+                base += "/v1"
             headers = (
                 {"Authorization": f"Bearer {configs.get('generic_api_key') or ''}"}
                 if configs.get("generic_api_key")
                 else {}
             )
-            result = _timed_probe(f"{base}/v1/models", headers=headers)
+            result = _timed_probe(f"{base}/models", headers=headers)
             result["model"] = (configs.get("generic_model") or "").strip() or None
             return result
         if provider == "openrouter":

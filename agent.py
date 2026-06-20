@@ -338,12 +338,15 @@ def get_llm(model_type: str, api_key: str = None, model_name: str = None, genera
         key = api_key or get_config("generic_api_key") or "not-needed"
         if not base_url:
             raise ValueError("Generic Base URL is required")
+        base_url_clean = base_url.strip().rstrip("/")
+        if not base_url_clean.endswith("/v1"):
+            base_url_clean += "/v1"
         configured_models = _parse_model_list(
             get_config("generic_model_list"),
             ["local-model", "llama-3.1-8b-instruct", "qwen2.5-7b-instruct"],
         )
         selected_model = (model_name or get_config("generic_model") or configured_models[0]).strip()
-        return ChatOpenAI(model=selected_model, api_key=key, base_url=base_url, timeout=30.0, **generation_options)
+        return ChatOpenAI(model=selected_model, api_key=key, base_url=base_url_clean, timeout=30.0, **generation_options)
     elif model_type == "openrouter":
         key = api_key or get_config("openrouter_api_key")
         if not key:
