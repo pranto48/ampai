@@ -62,7 +62,7 @@ docker compose up -d --build
 # --- 6. Health wait ---
 echo -e "\n${BOLD}[STEP 4] Waiting for backend...${NC}"
 for i in $(seq 1 40); do
-  curl -sf http://localhost:8000/healthz >/dev/null 2>&1 && break
+  curl -sf http://localhost:8005/healthz >/dev/null 2>&1 && break
   printf "."; sleep 3
 done
 echo -e "\n${GREEN}[OK] Backend healthy.${NC}"
@@ -71,7 +71,7 @@ echo -e "\n${GREEN}[OK] Backend healthy.${NC}"
 HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 echo -e "\n${BOLD}========================================\n  AmpAI is running!\n========================================${NC}"
 echo -e "  Web UI   : ${GREEN}http://${HOST_IP}:8080${NC}"
-echo -e "  API      : ${GREEN}http://${HOST_IP}:8000${NC}"
+echo -e "  API      : ${GREEN}http://${HOST_IP}:8005${NC}"
 echo -e "  ChromaDB : ${GREEN}http://${HOST_IP}:8001${NC}"
 echo -e "\n  docker compose ps          # status"
 echo -e "  docker compose logs -f     # live logs"
