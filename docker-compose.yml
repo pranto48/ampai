@@ -112,7 +112,7 @@ services:
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       SESSION_RECALL_DB_PATH: /data/agent_data/session_recall.db
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:1420,http://127.0.0.1:1420,tauri://localhost,http://localhost:8080,http://127.0.0.1:8080}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:1420,http://127.0.0.1:1420,tauri://localhost,http://localhost:6622,http://127.0.0.1:6622}
       WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-duckduckgo}
       BROWSER_AUTOMATION_ENABLED: ${BROWSER_AUTOMATION_ENABLED:-false}
       BROWSER_HEADLESS: ${BROWSER_HEADLESS:-false}
@@ -136,7 +136,7 @@ services:
     depends_on:
       - core-backend
     ports:
-      - "8080:80"
+      - "6622:80"
     networks:
       - ampai-network
 

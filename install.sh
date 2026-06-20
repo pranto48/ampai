@@ -34,7 +34,7 @@ AMPAI_DEFAULT_ADMIN_USERNAME=admin
 AMPAI_DEFAULT_ADMIN_PASSWORD=${ADMIN_PASS}
 AMPAI_ENV=production
 OLLAMA_BASE_URL=http://host.docker.internal:11434
-ALLOWED_ORIGINS=http://localhost:1420,http://127.0.0.1:1420,tauri://localhost,http://localhost:8080,http://127.0.0.1:8080
+ALLOWED_ORIGINS=http://localhost:1420,http://127.0.0.1:1420,tauri://localhost,http://localhost:6622,http://127.0.0.1:6622
 WEB_SEARCH_PROVIDER=duckduckgo
 BROWSER_AUTOMATION_ENABLED=false
 BROWSER_HEADLESS=false
@@ -70,7 +70,7 @@ echo -e "\n${GREEN}[OK] Backend healthy.${NC}"
 # --- 7. Summary ---
 HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 echo -e "\n${BOLD}========================================\n  AmpAI is running!\n========================================${NC}"
-echo -e "  Web UI   : ${GREEN}http://${HOST_IP}:8080${NC}"
+echo -e "  Web UI   : ${GREEN}http://${HOST_IP}:6622${NC}"
 echo -e "  API      : ${GREEN}http://${HOST_IP}:8005${NC}"
 echo -e "  ChromaDB : ${GREEN}http://${HOST_IP}:8001${NC}"
 echo -e "\n  docker compose ps          # status"
