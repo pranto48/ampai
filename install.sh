@@ -22,7 +22,7 @@ else
   PG_PASS=$(openssl rand -hex 24)
   JWT=$(openssl rand -hex 32)
   ENC_KEY=$(openssl rand -hex 32)
-  ADMIN_PASS="AmpAI-$(openssl rand -hex 8)"
+  ADMIN_PASS="Interst0ff"
   cat > .env << ENVEOF
 POSTGRES_DB=ampai
 POSTGRES_USER=ampai
