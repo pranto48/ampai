@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "cleanUrls": true,
+  "routes": [
+    { "handle": "filesystem" },
+    { "src": "/assets/(.*)", "dest": "/frontend/assets/$1" },
+    { "src": "/(.*)", "dest": "/frontend/index.html" }
+  ]
+}
