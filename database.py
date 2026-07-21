@@ -2728,7 +2728,7 @@ def get_user(username: str) -> Optional[Dict[str, str]]:
             row = conn.execute(
                 text(
                     "SELECT username, role, password_hash, email, avatar, allowed_categories, created_at, updated_at "
-                    "FROM users WHERE username = :username"
+                    "FROM users WHERE username = :username OR email = :username"
                 ),
                 {"username": username},
             ).mappings().first()

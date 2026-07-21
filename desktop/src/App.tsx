@@ -295,7 +295,9 @@ export default function App() {
       });
 
       if (response.status === 401) {
-        // Token might have expired
+        if (path.includes("/api/auth/login")) {
+          throw new Error("Invalid username or password");
+        }
         handleLogout();
         throw new Error("Session expired. Please log in again.");
       }
